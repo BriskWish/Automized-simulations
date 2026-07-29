@@ -1,0 +1,25 @@
+ ***** Statistical information of derived bond types:
+
+    1  Type: cl-UF_Fe  Times of evaluations:   150
+ Avg, min, max of k:       797.78      783.26      812.50 kcal/mol/A^2
+ Avg, min, max of r0:    2.314029    2.312917    2.314606 Angstrom
+ 
+ 
+ ***** Statistical information of derived angle types:
+
+    1  Type: cl-UF_Fe-cl  Times of evaluations:   375
+ Avg, min, max of k:       495.35      448.16      530.37 kcal/mol/rad^2
+ Avg, min, max of a0:   107.994    85.437   179.990 degree
+
+    2  Type: UF_Fe-cl-UF_Fe  Times of evaluations:   150
+ Avg, min, max of k:       675.30      664.43      695.20 kcal/mol/rad^2
+ Avg, min, max of a0:    94.548    94.507    94.576 degree
+ 
+ 
+ ***** Statistical information of derived dihedral types:
+
+    1  Type: cl-UF_Fe-cl-UF_Fe  Times of evaluations:  1200
+ Avg, min, max of k:        674.94       648.76       694.05 kcal/mol/rad^2
+ Avg, min, max of d0:    10.800  -180.000   180.000 degree
+
+ Remind: If you will write the above force constant(s) into bonded_param.dat, the value should be divided by 2

@@ -1,0 +1,46 @@
+;This file defines rule of determining atom types according to bondings and distances
+;The lines beginning with semicolon are comment lines
+;
+;Each atom type starts with $ symbol, then optionally followed by atomic charge. &
+;Specific definitions are given in the next line(s), the following constraint(s) can be used, each one occupies a line
+;  nbond: The number of bonds the atom must form
+;  element: The element of the atom must be
+;  bond: The bonding relationship criteria. The number of terms can be less than nbond. &
+;For example, "bond -1 C 2 O 1 H -2 N" means the atom must simultaneously bond to a carbon with aromatic bond (denoted by -1), &
+;to an oxygen with double bond, to a hydrogen with single bond, and to a nitrogen with arbitrary bond (denoted by -2).
+;  dist: Distance criteria. The number of terms can be less than nbond. &
+;For example, "dist 1.05-1.1 C 1.05-1.1 C 1.19-999 O" means there must be two carbons bonding to this atom &
+;both with bond length of 1.05-1.1 A. At the same time, there must be an oxygen bond to this atom &
+;with bond length of 1.19-999 A (i.e. at least 1.19 A).
+;  angc: Angle criteria (present atom is in center). The number of terms can be less than actual number of angles of this atom type. &
+;For example, "angc 115.5-124 C H 100-110 C H 120-122.3 O H" means there must be two C-X-H angles (X is present atom), &
+;one within 115.5-124 and another one within 100-110 degree. Also this atom should has a O-X-H angle within 120-122.3 degree.
+;  angt: Angle criteria (present atom is in terminal). The number of terms can be less than actual number of angles of this atom type. &
+;For example, "angt 115.5-124 C N 100-110 C N 120-122.3 O H" means there must be two X-C-N angles (X is present atom), &
+;one within 115.5-124 and another one within 100-110 degree. Also this atom should has a X-O-H angle within 120-122.3 degree.
+;See http://bbs.keinsci.com/thread-43186-1-1.html for more example of using angc and angt
+;
+;Examples:
+;$C_ar
+;nbond 3
+;element C
+;bond -1 C -1 C 1 H
+;
+;$C_CH3
+;nbond 4
+;bond 1 H 1 H 1 H
+;
+;$H_CH3 0.1
+;nbond 1
+;dist 1.05-1.1 C
+
+$Ctest
+nbond 4
+
+$Si_bulk 1.1
+nbond 4
+element Si
+
+$O_bulk -0.55
+nbond 2
+element O

@@ -1,0 +1,36 @@
+define =
+integrator = md
+dt         = 0.001   ; ps
+nsteps     = 100000
+comm-grps  = system
+comm-mode  = Angular
+;
+nstxout = 0
+nstvout = 0
+nstfout = 0
+nstlog  = 500
+nstenergy = 500
+nstxout-compressed = 100
+compressed-x-grps  = system
+;
+pbc = no
+nstlist = 0
+rlist = 0
+cutoff-scheme = group
+coulombtype   = cut-off
+rcoulomb      = 0
+vdwtype       = cut-off
+rvdw          = 0
+;
+Tcoupl  = V-rescale
+tau_t   = 0.2
+tc_grps = system
+ref_t   = 300
+;
+gen_vel  = no
+gen_temp = 20
+gen_seed = -1
+;
+freezegrps  = 
+freezedim   = 
+constraints = none

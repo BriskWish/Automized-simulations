@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+config.json.bak
+prompt.txt

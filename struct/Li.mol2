@@ -1,0 +1,13 @@
+# Li
+# Created by mol2_maker.py
+#
+
+@<TRIPOS>MOLECULE
+Li
+1 0
+SMALL
+NO_CHARGES
+
+@<TRIPOS>ATOM
+   1 Li1          0.0000       0.0000       0.0000 Li  
+@<TRIPOS>BOND

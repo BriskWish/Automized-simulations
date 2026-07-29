@@ -1,0 +1,4 @@
+#!/bin/bash
+VENDOR_DIR="$(cd "$(dirname "$0")" && pwd)"
+export LD_LIBRARY_PATH="$VENDOR_DIR:$LD_LIBRARY_PATH"
+exec "$VENDOR_DIR/obabel.bin" "$@"

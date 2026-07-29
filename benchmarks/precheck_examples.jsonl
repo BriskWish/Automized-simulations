@@ -1,0 +1,10 @@
+{"input": "Li 100 TFSI 30 300K 10ns", "expected": {"ok": false, "issues_contain": ["电荷不平衡", "TFSI"]}}
+{"input": "跑个MD，大概100个锂离子", "expected": {"ok": false, "issues_contain": ["阴离子", "条件缺失"]}}
+{"input": "Li 50 FEC 100 NO3 50, 350K, 20ns", "expected": {"ok": true, "issues_contain": []}}
+{"input": "Li 10 FEC 1000 NO3 10, 800K", "expected": {"ok": false, "issues_contain": ["电荷不平衡", "比例"]}}
+{"input": "各100个, 300K, 10ns", "expected": {"ok": false, "issues_contain": ["歧义", "哪些"]}}
+{"input": "Li 200, 500摄氏度, 50ns", "expected": {"ok": false, "issues_contain": ["阴离子", "电荷"]}}
+{"input": "Li 0 FEC 100", "expected": {"ok": false, "issues_contain": ["0", "数量"]}}
+{"input": "FEC 200, 298K, 5ns", "expected": {"ok": false, "issues_contain": ["只有溶剂", "电荷"]}}
+{"input": "Li 30 NO3 30 FEC 100, 常温, 10ns", "expected": {"ok": true, "issues_contain": []}}
+{"input": "你好帮我跑个模拟，100锂50硝酸根200FEC，温度350K，时间20纳秒", "expected": {"ok": true, "issues_contain": []}}

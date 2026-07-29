@@ -1,0 +1,104 @@
+; Created by Sobtop (http://sobereva.com/soft/sobtop) Version 2026.1.16 on 2026-07-25
+
+[ moleculetype ]
+; name          nrexcl
+FEC       3
+
+[ atoms ]
+;  Index   type   residue  resname   atom         cgnr     charge       mass
+     1     c3      1    FEC     C1      1   0.04016260    12.010736
+     2     c3      1    FEC     C2      2   0.33887826    12.010736
+     3      c      1    FEC     C3      3   0.65525875    12.010736
+     4     h1      1    FEC     H4      4   0.10869466     1.007941
+     5     h1      1    FEC     H5      5   0.10869466     1.007941
+     6     h2      1    FEC     H6      6   0.09331039     1.007941
+     7     os      1    FEC     O7      7  -0.31783955    15.999405
+     8     os      1    FEC     O8      8  -0.31489934    15.999405
+     9      o      1    FEC     O9      9  -0.48947841    15.999405
+    10      f      1    FEC    F10     10  -0.22278202    18.998403
+ 
+[ bonds ]
+;  atom_i   atom_j  functype      r0 (nm)    k (kJ/mol/nm^2)
+     1        2         1        0.153750     2.517931E+05     ; C1-C2, prebuilt c3-c3
+     1        4         1        0.109690     2.766461E+05     ; C1-H4, prebuilt c3-h1
+     1        5         1        0.109690     2.766461E+05     ; C1-H5, prebuilt c3-h1
+     1        7         1        0.143160     2.582365E+05     ; C1-O7, prebuilt c3-os
+     2        6         1        0.109610     2.775666E+05     ; C2-H6, prebuilt c3-h2
+     2        8         1        0.143160     2.582365E+05     ; C2-O8, prebuilt c3-os
+     2       10         1        0.134970     2.986539E+05     ; C2-F10, prebuilt c3-f
+     3        7         1        0.135840     3.270214E+05     ; C3-O7, prebuilt c-os
+     3        8         1        0.135840     3.270214E+05     ; C3-O8, prebuilt c-os
+     3        9         1        0.121830     5.336274E+05     ; C3-O9, prebuilt c-o
+ 
+[ angles ]
+;  atom_i   atom_j   atom_k  functype    a0 (Deg.)  k (kJ/mol/rad^2)
+     2        1        4         1       109.560      3.882752E+02     ; C2-C1-H4, prebuilt c3-c3-h1
+     2        1        5         1       109.560      3.882752E+02     ; C2-C1-H5, prebuilt c3-c3-h1
+     2        1        7         1       107.970      5.690240E+02     ; C2-C1-O7, prebuilt c3-c3-os
+     4        1        5         1       108.460      3.280256E+02     ; H4-C1-H5, prebuilt h1-c3-h1
+     4        1        7         1       109.780      4.250944E+02     ; H4-C1-O7, prebuilt h1-c3-os
+     5        1        7         1       109.780      4.250944E+02     ; H5-C1-O7, prebuilt h1-c3-os
+     1        2        6         1       110.220      3.866016E+02     ; C1-C2-H6, prebuilt c3-c3-h2
+     1        2        8         1       107.970      5.690240E+02     ; C1-C2-O8, prebuilt c3-c3-os
+     1        2       10         1       109.240      5.531248E+02     ; C1-C2-F10, prebuilt c3-c3-f
+     6        2        8         1       109.580      4.259312E+02     ; H6-C2-O8, prebuilt h2-c3-os
+     6        2       10         1       108.790      4.276048E+02     ; H6-C2-F10, prebuilt f-c3-h2
+     8        2       10         1       110.580      5.924544E+02     ; O8-C2-F10, prebuilt f-c3-os
+     7        3        8         1       111.290      6.326208E+02     ; O7-C3-O8, prebuilt os-c-os
+     7        3        9         1       123.250      6.301104E+02     ; O7-C3-O9, prebuilt o-c-os
+     8        3        9         1       123.250      6.301104E+02     ; O8-C3-O9, prebuilt o-c-os
+     1        7        3         1       115.980      5.296944E+02     ; C1-O7-C3, prebuilt c-os-c3
+     2        8        3         1       115.980      5.296944E+02     ; C2-O8-C3, prebuilt c-os-c3
+ 
+[ dihedrals ] ; propers
+;  atom_i   atom_j   atom_k   atom_l  functype   d0 (Deg.)   k (kJ/mol/rad^2)    ; Case of functype=2
+;  atom_i   atom_j   atom_k   atom_l  functype  phase (Deg.)  kd (kJ/mol) pn     ; Case of functype=9
+     1        2        8        3         9         0.000       1.60247    3     ; C1-C2-O8-C3, prebuilt c3-c3-os-c
+     1        2        8        3         9       180.000       3.34720    1     ; C1-C2-O8-C3, prebuilt c3-c3-os-c
+     1        7        3        8         9       180.000      11.29680    2     ; C1-O7-C3-O8, prebuilt X-c-os-X
+     1        7        3        9         9       180.000      11.29680    2     ; C1-O7-C3-O9, prebuilt o-c-os-c3
+     1        7        3        9         9       180.000       5.85760    1     ; C1-O7-C3-O9, prebuilt o-c-os-c3
+     2        1        7        3         9         0.000       1.60247    3     ; C2-C1-O7-C3, prebuilt c3-c3-os-c
+     2        1        7        3         9       180.000       3.34720    1     ; C2-C1-O7-C3, prebuilt c3-c3-os-c
+     2        8        3        7         9       180.000      11.29680    2     ; C2-O8-C3-O7, prebuilt X-c-os-X
+     2        8        3        9         9       180.000      11.29680    2     ; C2-O8-C3-O9, prebuilt o-c-os-c3
+     2        8        3        9         9       180.000       5.85760    1     ; C2-O8-C3-O9, prebuilt o-c-os-c3
+     3        7        1        4         9         0.000       1.60387    3     ; C3-O7-C1-H4, prebuilt X-c3-os-X
+     3        7        1        5         9         0.000       1.60387    3     ; C3-O7-C1-H5, prebuilt X-c3-os-X
+     3        8        2        6         9         0.000       1.60387    3     ; C3-O8-C2-H6, prebuilt X-c3-os-X
+     3        8        2       10         9         0.000       1.60387    3     ; C3-O8-C2-F10, prebuilt X-c3-os-X
+     4        1        2        6         9         0.000       0.65084    3     ; H4-C1-C2-H6, prebuilt X-c3-c3-X
+     4        1        2        8         9         0.000       0.00000    3     ; H4-C1-C2-O8, prebuilt h1-c3-c3-os
+     4        1        2        8         9         0.000       1.04600    1     ; H4-C1-C2-O8, prebuilt h1-c3-c3-os
+     4        1        2       10         9         0.000       0.00000    3     ; H4-C1-C2-F10, prebuilt h1-c3-c3-f
+     4        1        2       10         9         0.000       0.79496    1     ; H4-C1-C2-F10, prebuilt h1-c3-c3-f
+     5        1        2        6         9         0.000       0.65084    3     ; H5-C1-C2-H6, prebuilt X-c3-c3-X
+     5        1        2        8         9         0.000       0.00000    3     ; H5-C1-C2-O8, prebuilt h1-c3-c3-os
+     5        1        2        8         9         0.000       1.04600    1     ; H5-C1-C2-O8, prebuilt h1-c3-c3-os
+     5        1        2       10         9         0.000       0.00000    3     ; H5-C1-C2-F10, prebuilt h1-c3-c3-f
+     5        1        2       10         9         0.000       0.79496    1     ; H5-C1-C2-F10, prebuilt h1-c3-c3-f
+     6        2        1        7         9         0.000       0.65084    3     ; H6-C2-C1-O7, prebuilt X-c3-c3-X
+     7        1        2        8         9         0.000       0.60250    3     ; O7-C1-C2-O8, prebuilt os-c3-c3-os
+     7        1        2        8         9         0.000       4.91620    2     ; O7-C1-C2-O8, prebuilt os-c3-c3-os
+     7        1        2       10         9         0.000       0.65084    3     ; O7-C1-C2-F10, prebuilt X-c3-c3-X
+
+[ pairs ] ; Yielded based on rotatable dihedrals
+;  atom_i   atom_j  functype
+     1        9         1     ; C1-O7-C3-O9
+     2        9         1     ; C2-O8-C3-O9
+     3        4         1     ; C3-O7-C1-H4
+     3        5         1     ; C3-O7-C1-H5
+     3        6         1     ; C3-O8-C2-H6
+     3       10         1     ; C3-O8-C2-F10
+     4        6         1     ; H4-C1-C2-H6
+     4        8         1     ; H4-C1-C2-O8
+     4       10         1     ; H4-C1-C2-F10
+     5        6         1     ; H5-C1-C2-H6
+     5        8         1     ; H5-C1-C2-O8
+     5       10         1     ; H5-C1-C2-F10
+     6        7         1     ; H6-C2-C1-O7
+     7       10         1     ; O7-C1-C2-F10
+ 
+[ dihedrals ] ; impropers
+; atom_i   atom_j   atom_k   atom_l  functype  phase (Deg.)  kd (kJ/mol)  pn
+     7        8        3        9         4       180.000      43.93200    2     ; O7-O8-C3-O9, prebuilt X-X-c-o

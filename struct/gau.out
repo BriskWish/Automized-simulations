@@ -1,0 +1,224 @@
+ Entering Gaussian System, Link 0=g16
+ Initial command:
+ /home/hush/g16/l1.exe "/home/hush/g16/Scratch/Gau-2782875.inp" -scrdir="/home/hush/g16/Scratch/"
+ Default is to use a total of  12 processors:
+                               12 via shared-memory
+                                1 via Linda
+ Entering Link 1 = /home/hush/g16/l1.exe PID=   2782877.
+  
+ Copyright (c) 1988,1990,1992,1993,1995,1998,2003,2009,2016,
+            Gaussian, Inc.  All Rights Reserved.
+  
+ This is part of the Gaussian(R) 16 program.  It is based on
+ the Gaussian(R) 09 system (copyright 2009, Gaussian, Inc.),
+ the Gaussian(R) 03 system (copyright 2003, Gaussian, Inc.),
+ the Gaussian(R) 98 system (copyright 1998, Gaussian, Inc.),
+ the Gaussian(R) 94 system (copyright 1995, Gaussian, Inc.),
+ the Gaussian 92(TM) system (copyright 1992, Gaussian, Inc.),
+ the Gaussian 90(TM) system (copyright 1990, Gaussian, Inc.),
+ the Gaussian 88(TM) system (copyright 1988, Gaussian, Inc.),
+ the Gaussian 86(TM) system (copyright 1986, Carnegie Mellon
+ University), and the Gaussian 82(TM) system (copyright 1983,
+ Carnegie Mellon University). Gaussian is a federally registered
+ trademark of Gaussian, Inc.
+  
+ This software contains proprietary and confidential information,
+ including trade secrets, belonging to Gaussian, Inc.
+  
+ This software is provided under written license and may be
+ used, copied, transmitted, or stored only in accord with that
+ written license.
+  
+ The following legend is applicable only to US Government
+ contracts under FAR:
+  
+                    RESTRICTED RIGHTS LEGEND
+  
+ Use, reproduction and disclosure by the US Government is
+ subject to restrictions as set forth in subparagraphs (a)
+ and (c) of the Commercial Computer Software - Restricted
+ Rights clause in FAR 52.227-19.
+  
+ Gaussian, Inc.
+ 340 Quinnipiac St., Bldg. 40, Wallingford CT 06492
+  
+  
+ ---------------------------------------------------------------
+ Warning -- This program may not be used in any manner that
+ competes with the business of Gaussian, Inc. or will provide
+ assistance to any competitor of Gaussian, Inc.  The licensee
+ of this program is prohibited from giving any competitor of
+ Gaussian, Inc. access to this program.  By using this program,
+ the user acknowledges that Gaussian, Inc. is engaged in the
+ business of creating and licensing software in the field of
+ computational chemistry and represents and warrants to the
+ licensee that it is not a competitor of Gaussian, Inc. and that
+ it will not use this program in any manner prohibited above.
+ ---------------------------------------------------------------
+  
+
+ Cite this work as:
+ Gaussian 16, Revision A.03,
+ M. J. Frisch, G. W. Trucks, H. B. Schlegel, G. E. Scuseria, 
+ M. A. Robb, J. R. Cheeseman, G. Scalmani, V. Barone, 
+ G. A. Petersson, H. Nakatsuji, X. Li, M. Caricato, A. V. Marenich, 
+ J. Bloino, B. G. Janesko, R. Gomperts, B. Mennucci, H. P. Hratchian, 
+ J. V. Ortiz, A. F. Izmaylov, J. L. Sonnenberg, D. Williams-Young, 
+ F. Ding, F. Lipparini, F. Egidi, J. Goings, B. Peng, A. Petrone, 
+ T. Henderson, D. Ranasinghe, V. G. Zakrzewski, J. Gao, N. Rega, 
+ G. Zheng, W. Liang, M. Hada, M. Ehara, K. Toyota, R. Fukuda, 
+ J. Hasegawa, M. Ishida, T. Nakajima, Y. Honda, O. Kitao, H. Nakai, 
+ T. Vreven, K. Throssell, J. A. Montgomery, Jr., J. E. Peralta, 
+ F. Ogliaro, M. J. Bearpark, J. J. Heyd, E. N. Brothers, K. N. Kudin, 
+ V. N. Staroverov, T. A. Keith, R. Kobayashi, J. Normand, 
+ K. Raghavachari, A. P. Rendell, J. C. Burant, S. S. Iyengar, 
+ J. Tomasi, M. Cossi, J. M. Millam, M. Klene, C. Adamo, R. Cammi, 
+ J. W. Ochterski, R. L. Martin, K. Morokuma, O. Farkas, 
+ J. B. Foresman, and D. J. Fox, Gaussian, Inc., Wallingford CT, 2016.
+ 
+ ******************************************
+ Gaussian 16:  ES64L-G16RevA.03 25-Dec-2016
+                29-Jul-2026 
+ ******************************************
+ %chk=gau.chk
+ ----------------------------------------------------------------
+ # B3LYP/def2TZVP pop=MK IOp(6/33=2,6/42=6) scrf(solvent=acetone)
+ ----------------------------------------------------------------
+ 1/38=1,172=1/1;
+ 2/12=2,17=6,18=5,40=1/2;
+ 3/5=44,7=101,11=2,25=1,30=1,70=2201,72=19,74=-5/1,2,3;
+ 4//1;
+ 5/5=2,38=5,53=19/2;
+ 6/7=2,8=2,9=2,10=2,15=8,20=1,28=1,33=2,42=6/1,2;
+ 99/5=1,9=1/99;
+ ----
+ test
+ ----
+ Symbolic Z-matrix:
+ Charge =  0 Multiplicity = 1
+ C                    -0.81945   0.61012   0.14283 
+ C                     0.56495   0.86692  -0.42166 
+ C                    -0.40975   2.74573   0.0809 
+ H                    -1.29092  -0.25341  -0.27782 
+ H                    -0.76727   0.48262   1.20392 
+ H                     0.51778   0.9588   -1.48667 
+ O                    -1.49364   1.81929  -0.18194 
+ O                     0.89312   2.11625   0.17296 
+ O                    -0.5841    3.98455   0.21688 
+ F                     1.45005  -0.10594  -0.11731 
+ 
+                          Input orientation:                          
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0       -0.819454    0.610115    0.142829
+      2          6           0        0.564952    0.866919   -0.421663
+      3          6           0       -0.409750    2.745730    0.080901
+      4          1           0       -1.290922   -0.253410   -0.277816
+      5          1           0       -0.767271    0.482616    1.203923
+      6          1           0        0.517782    0.958803   -1.486666
+      7          8           0       -1.493635    1.819291   -0.181942
+      8          8           0        0.893118    2.116252    0.172961
+      9          8           0       -0.584104    3.984553    0.216877
+     10          9           0        1.450054   -0.105945   -0.117313
+ ---------------------------------------------------------------------
+                    Distance matrix (angstroms):
+                    1          2          3          4          5
+     1  C    0.000000
+     2  C    1.516964   0.000000
+     3  C    2.175441   2.175441   0.000000
+     4  H    1.070000   2.172578   3.146424   0.000000
+     5  H    1.070000   2.136595   2.551605   1.735366   0.000000
+     6  H    2.136595   1.070000   2.551605   2.490419   3.019501
+     7  O    1.422006   2.280846   1.449891   2.084796   2.057894
+     8  O    2.280846   1.422006   1.449891   3.254002   2.547262
+     9  O    3.383445   3.383445   1.258400   4.324886   3.642990
+    10  F    2.393968   1.350000   3.410309   2.749629   2.647376
+                    6          7          8          9         10
+     6  H    0.000000
+     7  O    2.547262   0.000000
+     8  O    2.057894   2.431200   0.000000
+     9  O    3.642990   2.382155   2.382155   0.000000
+    10  F    1.969251   3.517957   2.309241   4.580574   0.000000
+ Stoichiometry    C3H3FO3
+ Framework group  C1[X(C3H3FO3)]
+ Deg. of freedom    24
+ Full point group                 C1      NOp   1
+ Largest Abelian subgroup         C1      NOp   1
+ Largest concise Abelian subgroup C1      NOp   1
+                         Standard orientation:                         
+ ---------------------------------------------------------------------
+ Center     Atomic      Atomic             Coordinates (Angstroms)
+ Number     Number       Type             X           Y           Z
+ ---------------------------------------------------------------------
+      1          6           0        0.539388    1.167105   -0.249516
+      2          6           0        0.998642   -0.158169    0.328337
+      3          6           0       -1.151093   -0.180013   -0.004385
+      4          1           0        1.116596    1.998821    0.096866
+      5          1           0        0.592036    1.141661   -1.317917
+      6          1           0        0.980064   -0.120580    1.397515
+      7          8           0       -0.814507    1.217853    0.182337
+      8          8           0        0.000717   -1.047294   -0.157158
+      9          8           0       -2.336157   -0.602465   -0.031415
+     10          9           0        2.243250   -0.504244   -0.063687
+ ---------------------------------------------------------------------
+ Rotational constants (GHZ):           6.2498918           2.1569721           1.6753467
+ Standard basis: def2TZVP (5D, 7F)
+ There are   270 symmetry adapted cartesian basis functions of A   symmetry.
+ There are   235 symmetry adapted basis functions of A   symmetry.
+   235 basis functions,   381 primitive gaussians,   270 cartesian basis functions
+    27 alpha electrons       27 beta electrons
+       nuclear repulsion energy       315.3503456422 Hartrees.
+ NAtoms=   10 NActive=   10 NUniq=   10 SFac= 1.00D+00 NAtFMM=   60 NAOKFM=F Big=F
+ Integral buffers will be    131072 words long.
+ Raffenetti 2 integral format.
+ Two-electron integral symmetry is turned on.
+ ------------------------------------------------------------------------------
+ Polarizable Continuum Model (PCM)
+ =================================
+ Model                : PCM.
+ Atomic radii         : UFF (Universal Force Field).
+ Polarization charges : Total charges.
+ Charge compensation  : None.
+ Solution method      : On-the-fly selection.
+ Cavity type          : Scaled VdW (van der Waals Surface) (Alpha=1.100).
+ Cavity algorithm     : GePol (No added spheres)
+                        Default sphere list used, NSphG=   10.
+                        Lebedev-Laikov grids with approx.  5.0 points / Ang**2.
+                        Smoothing algorithm: York/Karplus (Gamma=1.0000).
+                        Polarization charges: spherical gaussians, with
+                                              point-specific exponents (IZeta= 3).
+                        Self-potential: point-specific (ISelfS= 7).
+                        Self-field    : sphere-specific E.n sum rule (ISelfD= 2).
+ Solvent              : Acetone, Eps=  20.493000 Eps(inf)=   1.846337
+ ------------------------------------------------------------------------------
+ Spheres list:
+ ISph  on   Nord     Re0    Alpha      Xe            Ye            Ze
+    1   C      1    1.9255  1.100      0.539388      1.167105     -0.249516
+    2   C      2    1.9255  1.100      0.998642     -0.158169      0.328337
+    3   C      3    1.9255  1.100     -1.151093     -0.180013     -0.004385
+    4   H      4    1.4430  1.100      1.116596      1.998821      0.096866
+    5   H      5    1.4430  1.100      0.592036      1.141661     -1.317917
+    6   H      6    1.4430  1.100      0.980064     -0.120580      1.397515
+    7   O      7    1.7500  1.100     -0.814507      1.217853      0.182337
+    8   O      8    1.7500  1.100      0.000717     -1.047294     -0.157158
+    9   O      9    1.7500  1.100     -2.336157     -0.602465     -0.031415
+   10   F     10    1.6820  1.100      2.243250     -0.504244     -0.063687
+ ------------------------------------------------------------------------------
+ One-electron integrals computed using PRISM.
+   1 Symmetry operations used in ECPInt.
+ ECPInt:  NShTT=    4005 NPrTT=   12724 LenC2=    3915 LenP2D=   10101.
+ LDataN:  DoStor=T MaxTD1= 6 Len=  172
+ NBasis=   235 RedAO= T EigKep=  3.86D-04  NBF=   235
+ NBsUse=   235 1.00D-06 EigRej= -1.00D+00 NBFU=   235
+ ExpMin= 9.52D-02 ExpMax= 3.55D+04 ExpMxC= 1.21D+03 IAcc=3 IRadAn=         5 AccDes= 0.00D+00
+ Harris functional with IExCor=  402 and IRadAn=       5 diagonalized for initial guess.
+ HarFok:  IExCor=  402 AccDes= 0.00D+00 IRadAn=         5 IDoV= 1 UseB2=F ITyADJ=14
+ ICtDFT=  3500011 ScaDFX=  1.000000  1.000000  1.000000  1.000000
+ FoFCou: FMM=F IPFlag=           0 FMFlag=      100000 FMFlg1=           0
+         NFxFlg=           0 DoJE=T BraDBF=F KetDBF=T FulRan=T
+         wScrn=  0.000000 ICntrl=       500 IOpCl=  0 I1Cent=   200000004 NGrid=           0
+         NMat0=    1 NMatS0=      1 NMatT0=    0 NMatD0=    1 NMtDS0=    0 NMtDT0=    0
+ Petite list used in FoFCou.
+ Keep R1 ints in memory in canonical form, NReq=397686219.

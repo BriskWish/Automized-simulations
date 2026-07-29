@@ -1,0 +1,29 @@
+# Title Card Required
+# Created by GaussView 6.0.16
+#
+
+#
+#
+
+@<TRIPOS>MOLECULE
+Molecule Name
+7 6
+SMALL
+NO_CHARGES
+
+
+@<TRIPOS>ATOM
+1 S1     0.0000     0.0000     0.0000 S
+2 F2     0.0000    -0.0000     1.5786 F
+3 F3     0.0000     1.5786    -0.0000 F
+4 F4    -1.5786    -0.0000    -0.0000 F
+5 F5     0.0000    -1.5786     0.0000 F
+6 F6    -0.0000    -0.0000    -1.5786 F
+7 F7     1.5786     0.0000     0.0000 F
+@<TRIPOS>BOND
+1 1 2 1
+2 1 3 1
+3 1 4 1
+4 1 5 1
+5 1 6 1
+6 1 7 1

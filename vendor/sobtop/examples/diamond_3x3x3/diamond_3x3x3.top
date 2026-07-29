@@ -1,0 +1,14 @@
+; Created by Sobtop (http://sobereva.com/soft/sobtop) Version 1.0(dev2) on 2022-03-18
+
+[ defaults ]
+; nbfunc        comb-rule       gen-pairs       fudgeLJ    fudgeQQ
+     1              2              yes            0.5       0.8333
+
+#include "diamond_3x3x3.itp"
+
+[ system ]
+diamond_3x3x3
+
+[ molecules ]
+; Molecule      nmols
+diamond_3x3x3     1

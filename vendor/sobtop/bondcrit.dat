@@ -1,0 +1,8 @@
+; You can define lower and upper limits for determining existence of bond between
+; specific two elements in this file. For example, if you add the
+; following lines to this file, then if distance (Angstrom) between Fe and Cl is
+; >= 2.0 and <=2.4, then they will be regarded as bonded. While if a pair of Fe and C atoms
+; has distance short than 2.1 Angstrom, they will be regarded as bonded.
+;
+;Fe Cl 2.0 2.4
+;Fe C  0.0 2.1
