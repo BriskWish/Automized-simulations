@@ -2,8 +2,8 @@
 test_toolist_simulation.py —— Layer 3 (Simulation Agent) 工具测试。
 
 重点测试：
-1. BUG: tools_retry_prod — extra_mdrun 死代码
-2. tools_retry_mdp — stage 参数被忽略
+1. tools_retry_prod — 检查点与追加参数透传
+2. tools_retry_mdp — stage 参数过滤
 3. tools_retry_em / tools_retry_eq — 覆盖参数传递
 4. tools_skip_molecule_simulation — 跳过逻辑
 5. tools_diagnose_error_simulation — GROMACS 日志诊断
@@ -90,33 +90,18 @@ class TestHandleSimulationToolCall:
 
 
 # ============================================================
-# BUG: tools_retry_prod — extra_mdrun 死代码
+# tools_retry_prod
 # ============================================================
 
-class TestRetryProdBug:
-    """
-    BUG: toolist_simulation.py:337-349
-    tools_retry_prod 处理程序构建 extra_mdrun 列表但从未传递给 run_prod。
-    run_prod 调用 grompp_and_mdrun()，后者确实接受 extra_mdrun 参数，
-    但 run_prod 未将其透传。因此检查点/追加参数被静默丢弃。
-    """
+class TestRetryProd:
+    """生产重试应把恢复参数完整传到执行器。"""
 
-    def test_extra_mdrun_not_passed_to_run_prod(self):
-        """
-        验证 run_prod 的签名不接受 extra_mdrun。
-
-        在 toolist_simulation.py:348 中：
-            sr = run_prod(work_dir=work_dir)
-        extra_mdrun 列表（第 342-346 行）已构建但未使用。
-        """
+    def test_run_prod_accepts_extra_mdrun(self):
         from willy.simulation.prod import run_prod
         import inspect
         sig = inspect.signature(run_prod)
         params = list(sig.parameters.keys())
-        # run_prod 接受: work_dir, mdp, conf, topol
-        # 但不接受 extra_mdrun
-        assert "extra_mdrun" not in params, \
-            f"run_prod 不接受 extra_mdrun 参数: {params}"
+        assert "extra_mdrun" in params
         assert "work_dir" in params
 
     def test_grompp_and_mdrun_does_accept_extra_mdrun(self):
@@ -131,71 +116,55 @@ class TestRetryProdBug:
         assert "extra_mdrun" in params, \
             f"grompp_and_mdrun 应接受 extra_mdrun: {params}"
 
-    def test_dead_code_locations(self):
-        """
-        精确定位死代码位置：
+    def test_handler_passes_restart_flags(self, tmp_path):
+        from willy.errors import StepResult
+        from willy.toolist_simulation import handle_simulation_tool_call
 
-        第 342 行: extra_mdrun = []
-        第 343-344 行: if args.get("from_checkpoint")...
-        第 345-346 行: if args.get("append")...
-        第 348 行: sr = run_prod(work_dir=work_dir)  # extra_mdrun 未传递
+        checkpoint = tmp_path / "prod.cpt"
+        checkpoint.touch()
+        with patch("willy.simulation.prod.run_prod", return_value=StepResult(
+            step_name="prod", step_index=10, success=True,
+        )) as run_prod:
+            handle_simulation_tool_call("tools_retry_prod", {
+                "work_dir": str(tmp_path),
+                "from_checkpoint": True,
+                "append": True,
+            })
 
-        如果 run_prod 具有 extra_mdrun 参数，则修复为：
-            sr = run_prod(work_dir=work_dir, extra_mdrun=extra_mdrun)
-        """
-        # 读取源文件以验证行号
-        source_path = Path(__file__).parent.parent / "src" / "willy" / "toolist_simulation.py"
-        if source_path.exists():
-            lines = source_path.read_text().split("\n")
-            # 第 342 行 (0-indexed: 341)
-            assert "extra_mdrun" in lines[341], f"第 342 行: {lines[341]}"
-            # 第 348 行 (0-indexed: 347)
-            assert "run_prod" in lines[347], f"第 348 行: {lines[347]}"
-            # 确认 extra_mdrun 未传递给 run_prod
-            assert "extra_mdrun" not in lines[347], \
-                f"第 348 行不应包含 extra_mdrun: {lines[347]}"
-
-    def test_fix_suggestion(self):
-        """
-        修复方案：
-        1. 向 run_prod() 添加 extra_mdrun 参数
-        2. 将其透传给 grompp_and_mdrun()
-        3. 在 tools_retry_prod 处理程序中传递 extra_mdrun
-        """
-        assert True  # 文档化测试
+        run_prod.assert_called_once_with(
+            work_dir=str(tmp_path),
+            extra_mdrun=["-cpi", str(checkpoint), "-append"],
+        )
 
 
 # ============================================================
-# BUG: tools_retry_mdp — stage 参数被忽略
+# tools_retry_mdp
 # ============================================================
 
-class TestRetryMdpBug:
-    """
-    tools_retry_mdp 接受 stage 参数（"em"/"eq"/"prod"/"all"），
-    但始终重建所有 MDP 文件（build_all 没有 stage 过滤器）。
+class TestRetryMdp:
+    """MDP 重试应只重建请求的阶段，除非明确请求 all。"""
 
-    此外，overrides 通过关键字参数传递，而 build_all 的签名是
-    build_all(config_path="config.json", output_dir="process", overrides=None)。
-    使用关键字参数 overrides=... 是正确的。
-    """
+    def test_stage_is_forwarded_to_mdp_builder(self):
+        from willy.errors import StepResult
+        from willy.toolist_simulation import handle_simulation_tool_call
 
-    def test_stage_parameter_extracted_but_unused(self):
-        """
-        第 277 行：stage = args.get("stage", "all")
-        阶段值已提取但 handler 中从未再次出现。
-        build_all 总是生成所有三个 MDP 文件。
-        """
-        source_path = Path(__file__).parent.parent / "src" / "willy" / "toolist_simulation.py"
-        if source_path.exists():
-            lines = source_path.read_text().split("\n")
-            # 第 277 行 (0-indexed: 276)
-            assert "stage" in lines[276], f"第 277 行应提取 stage: {lines[276]}"
-            # 验证 stage 未在后面的构建调用中使用（第 278-286 行）
-            handler_body = "\n".join(lines[276:286])
-            # stage 在第 277 行之后不应出现
-            after_stage = "\n".join(lines[277:286])
-            assert "stage" not in after_stage, \
-                f"第 278-286 行不应引用 stage: {after_stage}"
+        with patch("willy.simulation.mdp.build_all", return_value=StepResult(
+            step_name="mdp", step_index=6, success=True,
+        )) as build_all:
+            handle_simulation_tool_call("tools_retry_mdp", {"stage": "em"})
+
+        build_all.assert_called_once_with(overrides=None, stages=("em",))
+
+    def test_all_stage_requests_all_mdp_files(self):
+        from willy.errors import StepResult
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        with patch("willy.simulation.mdp.build_all", return_value=StepResult(
+            step_name="mdp", step_index=6, success=True,
+        )) as build_all:
+            handle_simulation_tool_call("tools_retry_mdp", {"stage": "all"})
+
+        build_all.assert_called_once_with(overrides=None, stages=None)
 
     def test_build_all_signature_accepts_overrides(self):
         """build_all 按关键字接受 overrides 参数。"""
@@ -204,6 +173,7 @@ class TestRetryMdpBug:
         sig = inspect.signature(build_all)
         params = list(sig.parameters.keys())
         assert "overrides" in params
+        assert "stages" in params
         # overrides 默认为 None
         assert sig.parameters["overrides"].default is None
 

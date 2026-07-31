@@ -2,7 +2,7 @@
 test_toolist_global.py —— Layer 0 (Config Agent) 工具测试。
 
 测试全局工具定义和处理程序，重点关注：
-1. BUG: tools_validate_config 导入失败 (ImportError)
+1. tools_validate_config 的运行时验证行为
 2. 工具 JSON Schema 完整性
 3. 分子注册表查找
 4. 错误诊断函数
@@ -66,60 +66,28 @@ class TestToolDefinitions:
 
 
 # ============================================================
-# BUG: tools_validate_config 导入失败
+# tools_validate_config
 # ============================================================
 
-class TestToolsValidateConfigBug:
-    """
-    BUG: toolist_global.py:422 导入 tools_validate_config
-    但 llm_config.py 中的实际函数名为 validate_config（无 tools_ 前缀）。
-    此命名不一致导致 LLM 调用该工具时抛出 ImportError。
-    """
+class TestToolsValidateConfig:
+    """配置验证工具应调用 llm_config.validate_config 并返回 JSON 结果。"""
 
-    def test_import_from_toolist_global_fails(self):
-        """
-        精确复现 toolist_global.py:422 的行为。
-        模拟 handle_tool_call 中 tools_validate_config 路径的执行。
-        """
-        # 第 419-422 行的逻辑：
+    def test_handler_validates_config(self):
+        from willy.toolist_global import handle_tool_call
         args = {"config_json": json.dumps({
             "residues": {"LiTFSI": 10},
             "molecules": {"LiTFSI": {"charge": 0}},
             "md": {},
         })}
-        cfg = json.loads(args["config_json"]) if isinstance(args["config_json"], str) else args["config_json"]
-
-        # 第 422 行 —— 此导入在运行时失败
-        with pytest.raises(ImportError) as exc_info:
-            from willy.llm_config import tools_validate_config  # noqa: F811
-        assert "tools_validate_config" in str(exc_info.value)
-
-    def test_fix_works_correctly(self):
-        """
-        正确的导入方式 —— 作为临时修复应如此：
-        from willy.llm_config import validate_config as tools_validate_config
-        """
-        from willy.llm_config import validate_config as tools_validate_config
-        cfg = {
-            "residues": {"LiTFSI": 10},
-            "molecules": {"LiTFSI": {"charge": 0}},
-            "md": {},
-        }
-        issues = tools_validate_config(cfg)
-        assert isinstance(issues, list)
+        result = json.loads(handle_tool_call("tools_validate_config", args))
+        assert result == {"valid": True, "issues": []}
 
     def test_json_parse_error_handling(self):
-        """
-        即使 JSON 解析失败，handle_tool_call 也应优雅处理。
-        第 419-421 行在导入之前捕获 JSONDecodeError。
-        """
-        args = {"config_json": "not valid json {{{"}
-        try:
-            cfg = json.loads(args["config_json"])
-            valid_json = True
-        except (json.JSONDecodeError, TypeError):
-            valid_json = False
-        assert not valid_json, "格式错误的 JSON 应解析失败"
+        from willy.toolist_global import handle_tool_call
+        result = json.loads(handle_tool_call(
+            "tools_validate_config", {"config_json": "not valid json {{{"}))
+        assert result["valid"] is False
+        assert result["issues"]
 
 
 # ============================================================

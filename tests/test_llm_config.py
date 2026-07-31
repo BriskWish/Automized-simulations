@@ -249,52 +249,20 @@ class TestApplyDefaults:
 
 
 # ============================================================
-# BUG: tools_validate_config 导入名称不匹配
+# 配置验证导出
 # ============================================================
 
-class TestToolistImportBug:
-    """
-    验证 BUG: toolist_global.py 第 422 行导入了一个不存在的函数。
-
-    from willy.llm_config import tools_validate_config
-    # llm_config.py 中的实际函数名: validate_config (缺少 tools_ 前缀)
-
-    此测试证明：
-    1. validate_config 存在
-    2. tools_validate_config 不存在
-    3. 调用该工具的 LLM 将在运行时遇到 ImportError
-    """
+class TestConfigValidationExport:
+    """验证模块只导出领域函数，tool 名由 toolist 层承载。"""
 
     def test_validate_config_exists(self):
         """validate_config 在 llm_config 中确实存在。"""
         from willy.llm_config import validate_config
         assert callable(validate_config)
 
-    def test_tools_validate_config_does_not_exist(self):
-        """BUG 复现: tools_validate_config 在 llm_config 中不存在。"""
-        with pytest.raises(ImportError) as exc_info:
-            from willy.llm_config import tools_validate_config
-        assert "tools_validate_config" in str(exc_info.value) or \
-               "cannot import" in str(exc_info.value).lower()
-
-    def test_toolist_global_would_fail_at_runtime(self):
-        """
-        模拟 toolist_global.py:422 的行为 —— 当 LLM 调用
-        tools_validate_config 工具时，在运行时触发 ImportError。
-        """
-        # 这行精确匹配 toolist_global.py 第 422 行
-        with pytest.raises(ImportError):
-            from willy.llm_config import tools_validate_config  # noqa: F811
-
-    def test_suggested_fix(self):
-        """
-        修复方案：将 toolist_global.py 第 422 行改为：
-            from willy.llm_config import validate_config
-        然后在调用处使用 validate_config(cfg)。
-        """
-        # 正确的导入方式应能正常工作
-        from willy.llm_config import validate_config as tools_validate_config
-        issues = tools_validate_config({
+    def test_validate_config_accepts_valid_config(self):
+        from willy.llm_config import validate_config
+        issues = validate_config({
             "residues": {"A": 1},
             "molecules": {"A": {"charge": 0}},
             "md": {},

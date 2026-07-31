@@ -156,15 +156,15 @@ class TestDependenciesDefinition:
                 f"{dep.name}: 无效的 kind '{dep.kind}'"
 
     def test_dependencies_grouped_by_module(self):
-        """依赖项应按 needed_by 分组。"""
+        """依赖项应按实际执行步骤的规范名称分组。"""
         modules = set()
         for d in _DEPENDENCIES:
             for m in d.needed_by:
                 modules.add(m)
-        assert "struct_maker" in modules
-        assert "chg_maker" in modules
-        assert "topo_gaff" in modules
-        assert "topo_opls" in modules
+        assert {
+            "struct_g16", "sp_g16", "struct_orca", "sp_orca", "chg_resp",
+            "topo_gaff", "topo_opls", "box",
+        } <= modules
 
     def test_envvar_dependencies_exist(self):
         """envvar 类型的依赖应存在。"""
@@ -207,8 +207,9 @@ class TestCheckModule:
 
     def test_check_known_module(self):
         """已知模块应返回 EnvReport。"""
-        report = check_module("struct_maker")
+        report = check_module("struct_g16")
         assert isinstance(report, EnvReport)
+        assert report.results
 
     def test_check_unknown_module(self):
         """未知模块应返回空报告。"""
@@ -217,8 +218,10 @@ class TestCheckModule:
 
     def test_all_modules_work(self):
         """所有 referenced 模块应可检查且不崩溃。"""
-        valid_modules = {"struct_maker", "chg_maker", "topo_gaff", "topo_opls",
-                         "top_assembly", "box", "md", "quantum", "topology", "simulation"}
+        valid_modules = {
+            "struct_g16", "sp_g16", "struct_orca", "sp_orca", "chg_resp",
+            "topo_gaff", "topo_opls", "box",
+        }
         for mod in valid_modules:
             report = check_module(mod)
             assert isinstance(report, EnvReport), f"{mod} 检查失败"
@@ -240,7 +243,7 @@ class TestEnsure:
         mock_check.return_value = mock_report
 
         try:
-            ensure("struct_maker")
+            ensure("struct_g16")
         except RuntimeError:
             pytest.fail("ensure 在依赖就绪时不应抛出异常")
 
@@ -251,15 +254,15 @@ class TestEnsure:
         mock_report.is_ok.return_value = False  # <-- 关键：is_ok 返回 False
         mock_report.failed.return_value = [
             DepResult(name="g16", kind="binary", path="g16",
-                      status="missing", needed_by=["struct_maker"],
+                      status="missing", needed_by=["struct_g16"],
                       hint="安装 g16"),
         ]
-        mock_report.failed_strs.return_value = ["g16: missing (required by struct_maker)"]
+        mock_report.failed_strs.return_value = ["g16: missing (required by struct_g16)"]
         mock_check.return_value = mock_report
 
         with pytest.raises(RuntimeError) as exc_info:
-            ensure("struct_maker")
-        assert "struct_maker" in str(exc_info.value)
+            ensure("struct_g16")
+        assert "struct_g16" in str(exc_info.value)
 
 
 # ============================================================
