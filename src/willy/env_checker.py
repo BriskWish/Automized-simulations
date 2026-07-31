@@ -101,80 +101,83 @@ class EnvReport:
 SOBTOP_DIR = get_project_root() / "vendor" / "sobtop"
 
 _DEPENDENCIES: list[DepResult] = [
-    # --- struct_maker (g16 or ORCA) ---
+    # --- struct ---
     DepResult(name="g16",       kind="binary",    path="g16",
-              needed_by=["struct_maker", "chg_maker"],
+              needed_by=["struct_g16", "sp_g16"],
               hint="Gaussian 16: 确保 g16 在 PATH 中"),
     DepResult(name="orca",      kind="binary",    path="orca",
-              needed_by=["struct_maker"],
+              needed_by=["struct_orca", "sp_orca"],
               hint="ORCA 6.x: https://orcaforum.kofo.mpg.de/"),
     DepResult(name="orca_2mkl", kind="binary",    path="orca_2mkl",
-              needed_by=["struct_maker"],
+              needed_by=["struct_orca", "sp_orca"],
               hint="ORCA 自带"),
+    DepResult(name="ORCA_DIR", kind="envvar", path="ORCA_DIR",
+              needed_by=["struct_orca", "sp_orca"],
+              hint="ORCA 安装目录: export ORCA_DIR=/path/to/orca"),
     # ---
     DepResult(name="formchk",   kind="binary",    path="formchk",
-              needed_by=["struct_maker", "chg_maker"],
+              needed_by=["struct_g16", "sp_g16"],
               hint="formchk 随 Gaussian 安装，确保在 PATH 中"),
 
-    # --- chg_maker ---
+    # --- Multiwfn ---
     DepResult(name="Multiwfn",  kind="binary",    path="Multiwfn",
-              needed_by=["chg_maker"],
+              needed_by=["sp_g16", "sp_orca", "chg_resp"],
               hint="http://sobereva.com/multiwfn/ 下载并加入 PATH"),
     DepResult(name="RESP_noopt.sh", kind="file_exec",
               path=str(ROOT / "RESP_noopt.sh"),
-              needed_by=["chg_maker"],
-              hint="项目根目录自带，确保有执行权限 (chmod +x)"),
+              needed_by=[],
+              hint="项目根目录自带（G16 两步法已不再依赖，保留备用）"),
 
-    # --- sobtop_interface ---
+    # --- topo_gaff ---
     DepResult(name="sobtop",    kind="file_exec",
               path=str(SOBTOP_DIR / "sobtop"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="https://sobereva.com/soft/sobtop/ 下载"),
     DepResult(name="atomtype",  kind="file_exec",
               path=str(SOBTOP_DIR / "atomtype"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint=f"chmod +x {SOBTOP_DIR}/atomtype"),
     DepResult(name="sobtop.ini", kind="file",
               path=str(SOBTOP_DIR / "sobtop.ini"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="Sobtop 配置文件，随 Sobtop 分发"),
     DepResult(name="LJ_param.dat", kind="file",
               path=str(SOBTOP_DIR / "LJ_param.dat"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="GAFF LJ 参数文件，随 Sobtop 分发"),
     DepResult(name="bonded_param.dat", kind="file",
               path=str(SOBTOP_DIR / "bonded_param.dat"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="GAFF 键合参数文件，随 Sobtop 分发"),
 
-    # --- ligpargen_interface ---
+    # --- topo_opls ---
     DepResult(name="LigParGen", kind="binary", path="LigParGen",
-              needed_by=["ligpargen_interface"],
+              needed_by=["topo_opls"],
               hint="pip install ligpargen"),
     DepResult(name="BOSSdir", kind="envvar", path="BOSSdir",
-              needed_by=["ligpargen_interface"],
+              needed_by=["topo_opls"],
               hint="从 http://zarbi.chem.yale.edu/software.html 下载 BOSS，"
                     "解压后设置 export BOSSdir=/path/to/boss"),
 
-    # --- inp_generator ---
+    # --- box ---
     DepResult(name="gmx",       kind="binary",    path="gmx",
-              needed_by=["inp_generator"],
+              needed_by=["box"],
               hint="GROMACS: apt install gromacs 或 conda install -c bioconda gromacs"),
     DepResult(name="packmol",   kind="file_exec",
               path=str(ROOT / "vendor" / "packmol"),
-              needed_by=["inp_generator"],
+              needed_by=["box"],
               hint="https://github.com/mcubeg/packmol 下载编译"),
     DepResult(name="obabel",   kind="file_exec",
               path=str(ROOT / "vendor" / "obabel.bin"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="OpenBabel CLI, vendored"),
     DepResult(name="libopenbabel.so", kind="file",
               path=str(ROOT / "vendor" / "libopenbabel.so.7"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="OpenBabel 共享库, vendored"),
     DepResult(name="libcoordgen.so", kind="file",
               path=str(ROOT / "vendor" / "libcoordgen.so.3"),
-              needed_by=["sobtop_interface"],
+              needed_by=["topo_gaff"],
               hint="OpenBabel 依赖库, vendored"),
 ]
 

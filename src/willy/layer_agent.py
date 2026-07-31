@@ -178,7 +178,8 @@ class LayerAgent:
                         try:
                             parsed = json.loads(tool_result)
                             if isinstance(parsed, dict) and parsed.get("_step_result"):
-                                step_data = parsed["_step_result"]
+                                # _step_result 是平铺标记，数据字段在顶层
+                                step_data = parsed
                                 if step_data.get("success"):
                                     # 成功 —— 返回重建的 StepResult
                                     return StepResult(
@@ -264,8 +265,15 @@ class LayerAgent:
             attempts_made=ctx.attempts,
             actions_tried=ctx.actions_tried,
             last_raw_output=ctx.last_raw_output or err.raw_output,
-            recommendation=f"{self.name} 层自动修复已耗尽。请人工介入检查。",
-            backup_plan="检查日志文件并手动运行相应步骤。",
+            recommendation=(
+                f"{self.name} 层自动修复已耗尽（{ctx.attempts}/{ctx.max_attempts} 次重试）。"
+                f"⚠️ 流水线在此步骤停止，MD 模拟不会继续执行。"
+                f"建议：1) 使用 skip_molecule 工具跳过问题分子，或 2) 人工检查日志并修复后重新运行。"
+            ),
+            backup_plan=(
+                "使用 skip_molecule 工具跳过此分子后重新运行；"
+                "或手动检查日志并运行对应步骤。"
+            ),
         )
 
         return StepResult(
@@ -276,7 +284,7 @@ class LayerAgent:
                 kind=err.kind,
                 message=f"[{self.name}] 自动修复失败（{ctx.attempts}/{ctx.max_attempts} 次重试后升级）",
                 raw_output=err.raw_output,
-                hint="请人工检查: " + (err.hint or ""),
+                hint="⚠ MD 不会继续！使用 skip_molecule 跳过此分子，或人工检查: " + (err.hint or ""),
             ),
             outputs=step_result.outputs,
             artifacts=step_result.artifacts,

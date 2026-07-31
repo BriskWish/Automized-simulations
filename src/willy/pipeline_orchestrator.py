@@ -32,16 +32,35 @@ _STEP_LAYER = {1: "quantum", 2: "quantum", 3: "quantum",
 
 
 class PipelineOrchestrator:
-    """流水线编排器 —— 执行 7 步流水线，失败时调用 LLM Agent。"""
+    """流水线编排器 —— 执行 7 步流水线，失败时调用 LLM Agent。支持断点续跑。"""
 
-    def __init__(self, backend: str = "g16", use_llm: bool = True):
+    def __init__(self, backend: str = "g16", use_llm: bool = True,
+                 resume_from: int = -1, resume_run_dir: str = ""):
         self.backend = backend
         self.use_llm = use_llm
         self.llm_client = None
         self._agents: dict[int, Optional[LayerAgent]] = {
             1: None, 2: None, 3: None,
         }
+        self._skipped_molecules: set = set()
+
+        # ── 断点续跑：读取上次进度 ──
+        if resume_from >= 0:
+            self._resume_from = min(resume_from, 1)
+            self._resume_run_dir = resume_run_dir
+        else:
+            prev = PipelineStateMachine.read()
+            self._resume_from = max(prev.done_steps) if prev.done_steps else 0
+            self._resume_run_dir = prev.extra.get("run_dir") if prev.extra else None
+            self._resume_from = min(self._resume_from, 1)
+        if self._resume_from > 0:
+            print(f"[orchestrator] 🔄 断点续跑：Step 1 结构优化已完成，从 Step 2 开始")
+            if self._resume_run_dir:
+                print(f"[orchestrator]    复用运行目录: {self._resume_run_dir}")
+
         self._sm = PipelineStateMachine(total_steps=7)
+        for s in range(1, self._resume_from + 1):
+            self._sm.mark_done(s)
 
         if use_llm:
             self._init_llm()
@@ -65,26 +84,19 @@ class PipelineOrchestrator:
     def _init_agents(self):
         if not self.llm_client:
             return
-        from willy.prompts import QUANTUM_AGENT_PROMPT, TOPOLOGY_AGENT_PROMPT, SIMULATION_AGENT_PROMPT
-        from willy.quantum_tools import QUANTUM_TOOLS, handle_quantum_tool_call
-        from willy.topology_tools import TOPOLOGY_TOOLS, handle_topology_tool_call
-        from willy.simulation_tools import SIMULATION_TOOLS, handle_simulation_tool_call
+        from willy.agent_quantum import QuantumAgent
+        from willy.agent_topology import TopologyAgent
+        from willy.agent_simulation import SimulationAgent
 
-        self._agents[1] = LayerAgent(
-            name="quantum", system_prompt=QUANTUM_AGENT_PROMPT,
-            tools=QUANTUM_TOOLS, tool_handler=handle_quantum_tool_call,
+        self._agents[1] = QuantumAgent(
             llm_client=self.llm_client, max_retries=5,
             on_action=lambda a: self._sm.add_action(a),
         )
-        self._agents[2] = LayerAgent(
-            name="topology", system_prompt=TOPOLOGY_AGENT_PROMPT,
-            tools=TOPOLOGY_TOOLS, tool_handler=handle_topology_tool_call,
+        self._agents[2] = TopologyAgent(
             llm_client=self.llm_client, max_retries=4,
             on_action=lambda a: self._sm.add_action(a),
         )
-        self._agents[3] = LayerAgent(
-            name="simulation", system_prompt=SIMULATION_AGENT_PROMPT,
-            tools=SIMULATION_TOOLS, tool_handler=handle_simulation_tool_call,
+        self._agents[3] = SimulationAgent(
             llm_client=self.llm_client, max_retries=3,
             on_action=lambda a: self._sm.add_action(a),
         )
@@ -94,42 +106,55 @@ class PipelineOrchestrator:
     # ============================================================
 
     def _build_steps(self, run_dir: Path) -> list[tuple]:
-        from willy.quantum.g16_struct_maker import run_all as g16_struct
-        from willy.quantum.g16_mol2_maker import batch_convert as g16_mol2
-        from willy.quantum.g16_chg_maker import batch_make_chg as g16_chg
-        from willy.quantum.orca_struct_maker import run_all as orca_struct
-        from willy.quantum.orca_mol2_maker import batch_convert as orca_mol2
-        from willy.quantum.orca_chg_maker import batch_make_chg as orca_chg
-        from willy.topology.sobtop_interface import batch_make_topo
-        from willy.topology.top_maker import build as build_top
-        from willy.simulation.mdp_maker import build_all as build_mdp
-        from willy.simulation.inp_generator import auto_from_config, InpGenerator
+        from willy.quantum.struct_g16 import run_all as g16_struct
+        from willy.quantum.struct_orca import run_all as orca_struct
+        from willy.quantum.fchk_mol2 import batch_convert as fchk_mol2
+        from willy.quantum.chg_resp import batch_make_chg as chg_resp
+        from willy.topology.topo_gaff import batch_make_topo
+        from willy.topology.top_assembly import build as build_top
+        from willy.simulation.mdp import build_all as build_mdp
+        from willy.simulation.box import auto_from_config, InpGenerator
 
         def _run_box(rd: str) -> StepResult:
             config = auto_from_config(output_dir=rd, gro_dir=rd, pdb_dir=rd)
             gen = InpGenerator(config)
             return gen.run()
 
-        idx = lambda i: i  # step index 1-7
+        on_prog = lambda msg: self._sm.set_detail(msg)
+        cfg = str(ROOT / "config.json")
 
         if self.backend == "orca":
             return [
-                ("ORCA 结构优化",    lambda: orca_struct(), "struct_maker", True, 1),
-                ("molden→mol2",      lambda: orca_mol2(),   None, True, 1),
-                ("ORCA RESP 电荷",   lambda: orca_chg(),    "chg_maker", True, 1),
-                ("mol2+chg→itp+gro", lambda: batch_make_topo(output_dir=str(run_dir)), "sobtop_interface", True, 2),
-                ("主拓扑 + 修订 itp", lambda: build_top(topo_dir=str(run_dir)), None, False, 2),
-                ("生成 mdp",          lambda: build_mdp(output_dir=str(run_dir)), None, False, 3),
-                ("Packmol 盒子",      lambda: _run_box(str(run_dir)), "inp_generator", False, 3),
+                ("ORCA 结构优化",    lambda: orca_struct(on_progress=on_prog),
+                 "struct_orca", True, 1),
+                ("SP + molden→mol2", lambda: _orca_sp_and_mol2(cfg, on_prog),
+                 "sp_orca", True, 1),
+                ("RESP 电荷",        lambda: chg_resp(on_progress=on_prog),
+                 "chg_resp", True, 1),
+                ("mol2+chg→itp+gro", lambda: batch_make_topo(output_dir=str(run_dir)),
+                 "topo_gaff", True, 2),
+                ("主拓扑 + 修订 itp", lambda: build_top(topo_dir=str(run_dir)),
+                 None, False, 2),
+                ("生成 mdp",          lambda: build_mdp(output_dir=str(run_dir)),
+                 None, False, 3),
+                ("Packmol 盒子",      lambda: _run_box(str(run_dir)),
+                 "box", False, 3),
             ]
         return [
-            ("g16 优化 + formchk", lambda: g16_struct(), "struct_maker", True, 1),
-            ("fchk→mol2",           lambda: g16_mol2(), None, True, 1),
-            ("RESP 电荷",           lambda: g16_chg(),   "chg_maker", True, 1),
-            ("mol2+chg→itp+gro",    lambda: batch_make_topo(output_dir=str(run_dir)), "sobtop_interface", True, 2),
-            ("主拓扑 + 修订 itp",    lambda: build_top(topo_dir=str(run_dir)), None, False, 2),
-            ("生成 mdp",             lambda: build_mdp(output_dir=str(run_dir)), None, False, 3),
-            ("Packmol 盒子",         lambda: _run_box(str(run_dir)), "inp_generator", False, 3),
+            ("g16 优化 + formchk", lambda: g16_struct(on_progress=on_prog),
+             "struct_g16", True, 1),
+            ("SP + mol2",           lambda: _g16_sp_and_mol2(cfg, on_prog),
+             "sp_g16", True, 1),
+            ("RESP 电荷",           lambda: chg_resp(on_progress=on_prog),
+             "chg_resp", True, 1),
+            ("mol2+chg→itp+gro",    lambda: batch_make_topo(output_dir=str(run_dir)),
+             "topo_gaff", True, 2),
+            ("主拓扑 + 修订 itp",    lambda: build_top(topo_dir=str(run_dir)),
+             None, False, 2),
+            ("生成 mdp",             lambda: build_mdp(output_dir=str(run_dir)),
+             None, False, 3),
+            ("Packmol 盒子",         lambda: _run_box(str(run_dir)),
+             "box", False, 3),
         ]
 
     # ============================================================
@@ -137,14 +162,46 @@ class PipelineOrchestrator:
     # ============================================================
 
     def run(self, run_dir: Optional[Path] = None) -> bool:
+        # ── 断点续跑：复用上次运行目录 ──
         if run_dir is None:
-            from willy.simulation.md_setup import _next_run_dir
-            run_dir = _next_run_dir()
-            run_dir.mkdir(parents=True, exist_ok=True)
+            if self._resume_run_dir:
+                run_dir = Path(self._resume_run_dir)
+                if not run_dir.exists():
+                    print(f"[orchestrator] ⚠ 续跑目录 {run_dir} 不存在，创建新目录")
+                    from willy.simulation.setup import _next_run_dir
+                    run_dir = _next_run_dir()
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    self._resume_from = 0  # 目录没了，不能续跑
+            else:
+                from willy.simulation.setup import _next_run_dir
+                run_dir = _next_run_dir()
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── 记录 run_dir 到状态机 extra ──
+        self._sm._status.extra = {"run_dir": str(run_dir)}
+        self._sm._write()
 
         print(f"[orchestrator] 运行目录: {run_dir}")
         print(f"[orchestrator] 后端: {self.backend}")
         print(f"[orchestrator] LLM Agent: {'启用' if self.use_llm else '禁用'}")
+        if self._resume_from > 0:
+            print(f"[orchestrator] 断点续跑: 仅跳过 Step 1 结构优化，Step 2+ 全部重跑")
+
+        # 读取 skipped_molecules
+        config_path = ROOT / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                skipped = cfg.get("skipped_molecules", [])
+                if skipped:
+                    self._skipped_molecules = set(skipped)
+                    reasons = cfg.get("skip_reasons", {})
+                    for name in skipped:
+                        reason = reasons.get(name, "未指定")
+                        print(f"[orchestrator] ⚠ 跳过的分子: {name}（原因: {reason}）")
+            except (json.JSONDecodeError, OSError):
+                pass
 
         steps = self._build_steps(run_dir)
         accumulated_artifacts: dict[str, list[str]] = {}
@@ -152,6 +209,11 @@ class PipelineOrchestrator:
         self._sm.transition(State.RUNNING)
 
         for i, (label, func, dep_module, is_batch, layer_index) in enumerate(steps, 1):
+            # ── 断点续跑：跳过已完成步骤 ──
+            if i <= self._resume_from:
+                print(f"\n  {i}/7 {label}  ⏭ 已完成，跳过")
+                continue
+
             if dep_module:
                 try:
                     ensure(dep_module)
@@ -198,6 +260,28 @@ class PipelineOrchestrator:
         if not failed:
             print(f"[{label}] ✅ {ok}/{len(results)} 全部成功")
             return True
+
+        # 过滤 skipped_molecules：将其从失败列表中移除
+        if self._skipped_molecules:
+            real_failed = []
+            for r in failed:
+                # 尝试从 error message / outputs 中匹配分子名
+                is_skipped = False
+                for mol_name in self._skipped_molecules:
+                    err_msg = r.error.message if r.error else ""
+                    if mol_name in err_msg or mol_name in str(r.outputs):
+                        is_skipped = True
+                        print(f"[{label}] ⏭ 跳过 {mol_name}（在 skip 列表中）")
+                        # 将跳过的分子产物仍收集起来（如果有部分输出的话）
+                        for k, v in r.outputs.items():
+                            artifacts.setdefault(k, []).append(v)
+                        break
+                if not is_skipped:
+                    real_failed.append(r)
+            if not real_failed:
+                print(f"[{label}] ✅ {ok}/{len(results)} 成功（{len(failed) - len(real_failed)} 个已跳过）")
+                return True
+            failed = real_failed
 
         # 记录错误到状态机
         first_err = failed[0].error
@@ -291,6 +375,73 @@ class PipelineOrchestrator:
             print(f"[{label}] ❌ Agent 修复失败")
 
         return False
+
+
+def _g16_sp_and_mol2(config_path: str, on_progress) -> list:
+    """Step 2 (G16): *_opt.fchk → *_opt.fchk + .mol2."""
+    import json
+    from willy.quantum.singlepoint_g16 import run as sp_run
+    from willy.quantum.fchk_mol2 import convert as mol2_convert
+
+    with open(config_path) as f:
+        molecules = json.load(f).get("molecules", {})
+
+    results = []
+    total = len(molecules)
+    for i, (name, cfg) in enumerate(molecules.items(), 1):
+        if on_progress:
+            on_progress(f"分子 {i}/{total}: {name}")
+        fchk_path = str(ROOT / "struct" / f"{name}.fchk")
+        if not Path(fchk_path).exists():
+            results.append(StepResult(
+                step_name="sp_mol2_g16", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{name}.fchk 不存在，需先运行 Step 1 结构优化")))
+            continue
+        charge = cfg.get("charge", 0)
+        spin = cfg.get("spin", 1)
+        sr = sp_run(fchk_path, charge=charge, spin=spin)
+        if sr.success:
+            opt_fchk = sr.outputs["fchk"]
+            sr2 = mol2_convert(opt_fchk)
+            sr.outputs["mol2"] = sr2.outputs.get("mol2", "")
+            sr.artifacts.extend(sr2.artifacts)
+        results.append(sr)
+    return results
+
+
+def _orca_sp_and_mol2(config_path: str, on_progress) -> list:
+    """Step 2 (ORCA): *_opt.molden → *_opt.fchk → .mol2."""
+    import json
+    from willy.quantum.singlepoint_orca import run as sp_run
+    from willy.quantum.fchk_mol2 import convert as mol2_convert
+
+    with open(config_path) as f:
+        molecules = json.load(f).get("molecules", {})
+
+    results = []
+    total = len(molecules)
+    for i, (name, cfg) in enumerate(molecules.items(), 1):
+        if on_progress:
+            on_progress(f"分子 {i}/{total}: {name}")
+        molden_path = str(ROOT / "struct" / f"{name}.molden")
+        if not Path(molden_path).exists():
+            results.append(StepResult(
+                step_name="sp_orca", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{name}.molden 不存在，需先运行 Step 1 结构优化")))
+            continue
+        charge = cfg.get("charge", 0)
+        spin = cfg.get("spin", 1)
+        sr = sp_run(molden_path, charge=charge, spin=spin)
+        if sr.success:
+            opt_fchk = sr.outputs["fchk"]
+            sr2 = mol2_convert(opt_fchk)
+            sr.outputs["mol2"] = sr2.outputs.get("mol2", "")
+            sr.artifacts.extend(sr2.artifacts)
+        results.append(sr)
+    return results
+
 
 
 def run_pipeline(backend: str = "g16", use_llm: bool = True,

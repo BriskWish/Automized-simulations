@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from openai import OpenAI
-from willy.knowledge_tools import TOOLS, handle_tool_call, _MOLECULES as _REGISTRY
+from willy.toolist_global import TOOLS, handle_tool_call, _MOLECULES as _REGISTRY
 
 # _j() 对齐 app.py: 支持 ```json / ```yaml / ``` / 裸 JSON / yaml
 def _j(raw):
@@ -159,6 +159,13 @@ TEST_CASES = [
         "expected": {"residues": {"Li": 50, "FEC": 100},
                       "md": {"ref_t": 298, "prod_ns": 10}},
     },
+    # ── 后端选择 ──
+    {
+        "id": 24,
+        "input": "用 ORCA 算 Li 50, TFSI 50, EC 200, 300K, 10ns",
+        "expected": {"residues": {"Li": 50, "TFSI": 50, "EC": 200},
+                      "md": {"ref_t": 300, "prod_ns": 10}},
+    },
     # ── 纯溶剂 + 混合阴离子 ──
     {
         "id": 20,
@@ -194,7 +201,7 @@ TEST_CASES = [
 
 def score_structure(parsed: dict) -> tuple[int, list[str]]:
     score = 5; issues = []
-    for k in ["molecules", "residues", "md", "defaults"]:
+    for k in ["backend", "molecules", "residues", "md", "defaults"]:
         if k not in parsed:
             score -= 2; issues.append(f"缺失: {k}"); break
     for name in parsed.get("residues", {}):
@@ -229,7 +236,7 @@ def score_values(parsed: dict, expected: dict, user_input: str = "") -> tuple[in
         elif abs(g - e) < 1: fields[f"md.{k}"] = "✅"
         else: fields[f"md.{k}"] = f"❌ {g}≠{e}"; score -= 1
 
-    # ── 净电荷评估（LLM 应正确查询 lookup_molecule 获取电荷）──
+    # ── 净电荷评估（LLM 应正确查询 tools_lookup_molecule 获取电荷）──
     mols = parsed.get("molecules", {})
     net = 0
     for name, count in got_r.items():
@@ -270,7 +277,7 @@ def _eval_one(tc: dict) -> dict:
         return result
 
     try:
-        from willy.agent import get_system_prompt
+        from willy.agent_config import get_system_prompt
         SYS = get_system_prompt()
     except Exception:
         SYS = "你是 MD 配置生成助手。必须用工具查询信息。输出 JSON。"
@@ -326,7 +333,7 @@ def run(workers: int = 5, imbalanced_only: bool = False):
     cases = TEST_CASES
     if imbalanced_only:
         # 只测电荷不平衡的用例
-        from willy.knowledge_tools import _MOLECULES as _REG
+        from willy.toolist_global import _MOLECULES as _REG
         imbalanced_ids = set()
         for tc in TEST_CASES:
             exp = tc.get("expected")

@@ -1,166 +1,135 @@
 # 量子层设计文档
 
-> Willy 量子计算层接口设计文档。涵盖 Gaussian 和 ORCA 两条链路的设计理念、实现经验与可扩展方案。
+> Willy 量子计算层架构文档。两步法：结构优化 (DZ) → 单点能 (TZ) → mol2 + chg。
+> 最后更新: 2026-07-29
 
 ---
 
-## 1. 核心架构
-
-### 1.1 三层模型
+## 1. 文件架构
 
 ```
-  config.json molecules 段      ← 统一配置源
-         │
-  ┌──────┴──────┐
-  │   Agent 层  │               ← 不感知底层软件，只传参数
-  └──────┬──────┘
-         │
-  ┌──────┴──────────────────┐
-  │   Quantum Layer (本层)   │
-  │                         │
-  │  g16_struct_maker       │  orca_struct_maker
-  │  g16_mol2_maker         │  orca_mol2_maker
-  │  g16_chg_maker          │  orca_chg_maker
-  └─────────────────────────┘
-         │
-  ┌──────┴──────┐
-  │ 下游: sobtop │            ← 只消费 .mol2 + .chg，不关心中间步骤
-  └─────────────┘
+src/willy/quantum/
+├── struct_g16.py          Step 1: G16 结构优化 → .fchk
+├── struct_orca.py         Step 1: ORCA 结构优化 → .molden
+├── singlepoint_g16.py     Step 2a: .fchk → g16 SP(def2TZVP) → *_opt.fchk
+├── singlepoint_orca.py    Step 2a: .molden → ORCA SP(def2-TZVP) → Multiwfn → *_opt.fchk
+├── fchk_mol2.py           Step 2b: *_opt.fchk → .mol2 (纯 Python 解析, G16+ORCA 统一)
+├── chg_resp.py            Step 3:  *_opt.fchk → Multiwfn RESP(内部ESP) → .chg (G16+ORCA 统一)
+├── _orca_utils.py         ORCA 路径解析 + Multiwfn 工具 + 坐标提取/格式化
+└── __init__.py
 ```
 
-### 1.2 各 Tool 职能
+## 2. 两步法链路
+
+```
+Step 1: 结构优化 (DZ)
+  G16:  .gjf → g16 Opt(6-311+g(d,p)) → formchk → {name}.fchk
+  ORCA: .gjf → ORCA Opt(6-311+g(d,p)) → orca_2mkl → {name}.molden
+
+Step 2a: 单点能 (TZ)
+  G16:  {name}.fchk → 提取坐标 → {name}_opt.gjf → g16 SP(def2TZVP) → formchk → {name}_opt.fchk
+  ORCA: {name}.molden → 提取坐标 → {name}_opt.inp → ORCA SP(def2-TZVP) → orca_2mkl
+        → {name}_opt.molden → Multiwfn molden→fchk → {name}_opt.fchk
+
+Step 2b: mol2 生成
+  G16+ORCA 统一: {name}_opt.fchk → fchk_mol2.convert() → {name}.mol2
+
+Step 3: RESP 电荷
+  G16+ORCA 统一: {name}_opt.fchk → Multiwfn RESP(7→18→2→y→q) → {name}.chg
+```
+
+## 3. 各模块职能
 
 | 模块 | 输入 | 输出 | 外部依赖 | 设计要点 |
 |------|------|------|------|------|
-| `*_struct_maker` | `.gjf` + config | `.fchk` / `.molden` | 量子化学软件 | 统一入口，后端可换 |
-| `*_mol2_maker` | `.fchk` / `.molden` | `.mol2` | Multiwfn / 自研解析 | 链式转换，复用下游 |
-| `*_chg_maker` | `.gjf` / `.molden` | `.chg` | RESP_noopt.sh / Multiwfn | 电荷拟合独立于优化 |
+| `struct_g16` | `.gjf` + config | `.fchk` | g16, formchk | 支持 Agent 重试覆盖基组/SCF/OPT 参数 |
+| `struct_orca` | `.gjf` + config | `.molden` | ORCA, orca_2mkl | 零硬编码路径，通过 `_orca_utils` 解析 |
+| `singlepoint_g16` | `.fchk` (DZ) | `*_opt.fchk` (TZ) | g16, formchk, Multiwfn | 提取坐标 → `*_opt.gjf` → SP → formchk |
+| `singlepoint_orca` | `.molden` (DZ) | `*_opt.fchk` (TZ) | ORCA, orca_2mkl, Multiwfn | 内部完成 molden→fchk，保证输出统一 |
+| `fchk_mol2` | `*_opt.fchk` | `.mol2` | 无 | 纯 Python fchk 解析器，零外部依赖 |
+| `chg_resp` | `*_opt.fchk` | `.chg` | Multiwfn | G16+ORCA 完全统一，MultiWfn 内部 ESP |
+| `_orca_utils` | — | — | — | `find_orca`, `find_multiwfn`, `extract_xyz`, `format_orca_xyz_coords`, `get_orca_env` |
 
-### 1.3 设计原则
+## 4. 设计原则
 
-- 每个 maker 只做一件事（优化 / 格式转换 / 电荷拟合）
-- 同技术栈文件加 `g16_` / `orca_` 前缀，结构对称
-- 下游（sobtop）只消费 `.mol2` + `.chg`，不关心中间产物
-- `config.json → molecules` 为唯一配置源，不硬编码分子参数
+- **两步法**: DZ 优化求速度，TZ 单点求精度。两步不可合并——DZ 优化的 fchk 不能直接做 SP（需换基组重建输入），产物同名会覆盖
+- **`*_opt` 命名**: Step 2a 的 SP 产物统一 `{name}_opt.*`，防止覆盖 Step 1 产物。最终 `.mol2` / `.chg` 保持原名（Sobtop 兼容）
+- **Step 2b/3 统一**: `fchk_mol2` 和 `chg_resp` 只收 `*_opt.fchk`，不感知 G16/ORCA
+- **零 RESP_noopt.sh**: G16 不再调用 shell 脚本，SP 由 `singlepoint_g16` 完成
+- **零硬编码路径**: 全部通过 `_orca_utils` + 环境变量 + `shutil.which` 解析
+- **统一 StepResult**: 所有函数返回 `StepResult`，错误用 `ErrorKind` 枚举
 
----
+## 5. 依赖
 
-## 2. 依赖
-
-量子层依赖以下外部工具，统一由 `env_checker.py` 预检：
-
-| 依赖 | 路径 | 用途 |
+| 依赖 | 路径 | 使用者 |
 |------|------|------|
-| Gaussian 16 | PATH (`g16`) | DFT 优化 + ESP 计算 |
-| ORCA 6.x | PATH (`orca`) | DFT 优化（开源替代） |
-| formchk | PATH（随 g16） | `.chk → .fchk` |
-| Multiwfn | PATH | 坐标提取 / RESP 拟合 / `.molden → .fchk` |
-| `RESP_noopt.sh` | 项目根目录 | RESP 电荷一键脚本（卢天） |
-| `env_checker.py` | `src/willy/` | 14 项依赖统一预检 |
+| Gaussian 16 | PATH (`g16`) | `struct_g16`, `singlepoint_g16` |
+| formchk | PATH | `struct_g16`, `singlepoint_g16` |
+| ORCA 6.x | PATH 或 `$ORCA_DIR` | `struct_orca`, `singlepoint_orca` |
+| orca_2mkl | 同上 | `struct_orca`, `singlepoint_orca` |
+| Multiwfn | PATH 或 `$MULTIWFN_BIN` | `singlepoint_g16`, `singlepoint_orca`, `chg_resp` |
 
----
+统一由 `env_checker.py` 预检。
 
-## 3. 遇到的问题与解决方案
+## 6. Agent 工具接口
 
-### 3.1 WSL2 中 Gaussian/formchk 崩溃
-
-- **现象**：`sched_setaffinity` 报错 Aborted
-- **原因**：WSL2 不支持 CPU affinity 系统调用
-- **解决方案**：运行命令前注入 `GAUSS_CDEF=0 OMP_NUM_THREADS=1`。`struct_maker.py` 中已用 `shell=True` + 内联环境变量
-
-### 3.2 Gaussian Scratch 目录缺失
-
-- **现象**：`g16` 报 `PGFIO-F-/OPEN/... no such file`
-- **原因**：Gaussian 默认 scratch 目录不存在或无写权限
-- **解决方案**：`mkdir -p /home/hush/g16/Scratch && chmod 777`，一次性修复
-
-### 3.3 `struct_maker` 中 formchk 路径嵌套
-
-- **现象**：`cwd=struct/` 后 `struct/Li.chk` 变为 `struct/struct/Li.chk`
-- **原因**：相对路径在 `cwd` 上下文中被重复拼接
-- **解决方案**：使用 `.resolve()` 转绝对路径
-
-### 3.4 ORCA 输入格式转换
-
-- **现象**：Gaussian `.gjf` 的 `b3lyp/6-311+g(d,p)` 格式 ORCA 不接受；`* xyz` 块中原子计数行和注释行导致解析失败
-- **原因**：ORCA 和 Gaussian 使用不同的输入格式语法
-- **解决方案**：
-  - 基组：正则 `b3lyp/→B3LYP `，`def2TZVP→def2-TZVP`
-  - 坐标：跳过原子计数行和注释行，坐标直接跟在 `* xyz charge spin` 后
-  - 添加 `%pal nprocs 8 end` 和 `%maxcore 4000` 性能参数
-
-### 3.5 ORCA molden → RESP 失败
-
-- **现象**：Multiwfn 读 ORCA 生成的 `.molden` 做 RESP 拟合时 Fortran crash
-- **原因**：ORCA 的 GTO 基组格式与 Gaussian 不兼容，Multiwfn 无法正确解析
-- **解决方案**：暂走迂回路径——ORCA 优化后，仍用 Gaussian SP + Multiwfn RESP（即复用 `RESP_noopt.sh`）。`orca_chg_maker.py` 保留占位，待未来 Multiwfn 兼容后直接 molden→RESP
-
-### 3.6 ORCA `.molden` 扩展名异常
-
-- **现象**：`orca_2mkl -molden` 输出 `.molden.input` 而非 `.molden`
-- **原因**：orca_2mkl 的默认命名行为将 input 文件名作为后缀
-- **解决方案**：生成后重命名为 `.molden`
-
-### 3.7 Multiwfn 不支持 molden → mol2 直接导出
-
-- **现象**：Multiwfn 的 Export 菜单无 `.mol2` 选项（只有 pdb/xyz/cif/gro）
-- **原因**：Multiwfn 当前版本不内置 mol2 导出功能
-- **解决方案**：两步走——`.molden → .fchk`（Multiwfn 100→2→7），再复用 `g16_mol2_maker` 的 fchk 解析器 → `.mol2`
-
----
-
-## 4. 可扩展方向
-
-### 4.1 短期（已验证）
-
-| 软件 | 类型 | 可行性 | 实现方式 |
-|------|------|:---:|------|
-| **xtb (GFN2-xTB)** | 半经验优化 | 高 | 10MB 单体，内置 vendor/，替代 g16 做快速预优化 |
-| **xtb → .mol2** | 格式转换 | 高 | xtb 自带 `--molden` 输出，Multiwfn 转 fchk |
-
-### 4.2 中期（需额外安装）
-
-| 软件 | 类型 | 可行性 | 说明 |
-|------|------|:---:|------|
-| **Psi4** | Python 原生 DFT | 中 | pip 安装，Python API 直接调，无需 subprocess |
-| **PySCF** | Python 原生 DFT | 中 | 同上，Apache 许可，商业化友好 |
-| **RDKit** | 构象生成 | 高 | pip 安装，生成初始构象 + MMFF94 电荷 |
-
-### 4.3 长期（学术免费但体量大）
-
-| 软件 | 类型 | 可行性 | 说明 |
-|------|------|:---:|------|
-| **Q-Chem** | 商业 DFT | 低 | 需许可，接口与 Gaussian 接近 |
-| **Molpro** | 高精度电子结构 | 低 | 学术免费，specialized use |
-| **NWChem** | 大规模 DFT | 中 | 开源，适合超大体系 |
-
----
-
-## 5. 对 Agent 的暴露接口
-
-量子层对上层完全透明。Agent 只需知道：
-
-- `config.json → molecules` 填写分子名
-- 调用 `run_pipeline.py [g16|orca]` 选择后端
-- 下游自动适配，不需区分软件
-
-未来可扩展 `run_pipeline.py --backend xtb`，只需在 quantum/ 下新增 `xtb_struct_maker.py` 等文件，保持命名和接口约定即可。
-
----
-
-## 6. 接口清单
-
-| 函数 | 文件 | 签名 |
+| 工具 | 功能 | 调用模块 |
 |------|------|------|
-| `run_all` | g16_struct_maker.py | `(config_path, struct_dir, backup) → list[Path]` |
-| `run_one` | g16_struct_maker.py | `(name, cfg, defaults, struct_dir) → Path` |
-| `batch_convert` | g16_mol2_maker.py | `(struct_dir) → list[Path]` |
-| `fchk_to_mol2` | g16_mol2_maker.py | `(fchk_path, output_path) → StepResult` |
-| `batch_make_chg` | g16_chg_maker.py | `(struct_dir, output_dir, solvent) → list[Path]` |
-| `make_chg_one` | g16_chg_maker.py | `(gjf_path, charge, spin, ...) → Path` |
-| `run_all` | orca_struct_maker.py | `(config_path, struct_dir) → list[Path]` |
-| `run_one` | orca_struct_maker.py | `(name, cfg, defaults, struct_dir) → Path` |
-| `batch_convert` | orca_mol2_maker.py | `(struct_dir) → list[Path]` |
-| `molden_to_fchk` | orca_mol2_maker.py | `(molden_path, output_path) → Path \| None` |
-| `batch_make_chg` | orca_chg_maker.py | `(struct_dir, output_dir, ...) → list[Path]` |
-| `run_one` | orca_chg_maker.py | `(gjf_path, charge, spin, ...) → Path` |
+| `tools_retry_struct_g16` | 重试 G16 结构优化 | `struct_g16.run_one()` |
+| `tools_retry_struct_orca` | 重试 ORCA 结构优化 | `struct_orca.run_one()` |
+| `tools_retry_mol2_conversion` | 重试 fchk→mol2 | `fchk_mol2.convert()` |
+| `tools_retry_chg_g16` | 重试 RESP (从 `*_opt.fchk`) | `chg_resp.make_chg()` |
+| `tools_retry_chg_orca` | 同上，等价 | `chg_resp.make_chg()` |
+| `tools_diagnose_error_quantum` | 诊断 g16/ORCA 输出 | `log_parsers.diagnose_log()` |
+| `tools_modify_config_molecule` | 修改 config.json | 直接写 JSON |
+| `tools_skip_molecule_quantum` | 跳过无法修复的分子 | 直接写 JSON |
+
+## 7. 产物命名
+
+| 步骤 | G16 | ORCA |
+|------|-----|------|
+| Step 1 | `{name}.fchk` | `{name}.molden` |
+| Step 2a 中间 | `{name}_opt.gjf`, `{name}_opt.chk` | `{name}_opt.inp`, `{name}_opt.gbw`, `{name}_opt.molden` |
+| Step 2a 输出 | `{name}_opt.fchk` | `{name}_opt.fchk` |
+| Step 2b | `{name}.mol2` | `{name}.mol2` |
+| Step 3 | `{name}.chg` | `{name}.chg` |
+
+## 8. 已解决问题
+
+### 8.1 WSL2 中 Gaussian/formchk 崩溃
+- 注入 `GAUSS_CDEF=0 OMP_NUM_THREADS=1`
+
+### 8.2 ORCA 输入格式转换
+- 正则: `b3lyp/→B3LYP `, `def2TZVP→def2-TZVP`
+- 跳过 .gjf 原子计数行和注释行
+
+### 8.3 ORCA molden → RESP（已解决）
+- 旧: ORCA molden GTO 格式 Multiwfn 不兼容
+- 新: `singlepoint_orca` 内部完成 molden→fchk (Multiwfn 100→2→7)，再统一走 RESP
+
+### 8.4 ORCA `.molden.input` 扩展名
+- `orca_2mkl` 输出 `.molden.input`，需重命名为 `.molden`
+
+### 8.5 Multiwfn 无 mol2 导出
+- `singlepoint_orca` 内部 molden→fchk (Multiwfn)，再复用 `fchk_mol2` 解析
+
+### 8.6 RESP_noopt.sh 依赖（已消除）
+- 旧: G16 chg 走 bash 脚本 RESP_noopt.sh
+- 新: `singlepoint_g16` 完成 SP，`chg_resp` 完成 RESP，全 Python
+
+### 8.7 G16 chg 用初始坐标而非优化坐标（已修复）
+- 旧: `chg_g16` 把 `.gjf`（初始几何）传给 RESP_noopt.sh
+- 新: `singlepoint_g16` 从 Step 1 的 `.fchk`（优化后几何）提取坐标做 SP
+
+### 8.8 硬编码 ORCA 路径（已消除）
+- 旧: `struct_orca` 硬编码 `/home/hush/ORCA/...`
+- 新: `_orca_utils.find_orca()` → `$ORCA_DIR` 环境变量 → `shutil.which`
+
+## 9. 重构历史
+
+| 日期 | 变更 |
+|------|------|
+| 2026-07-29 | 文件重命名: `g16_*`/`orca_*` → `struct_g16`/`struct_orca`/`mol2_g16`/`mol2_orca`/`chg_g16`/`chg_orca` |
+| 2026-07-29 | 消除重复: 新建 `_orca_utils.py`，`resp_maker` 消除硬编码 |
+| 2026-07-29 | 两步法统一: SP 显式化为 Step 2，mol2+chg 都从 `*_opt.fchk` 生成 |
+| 2026-07-29 | 模块拆分合并: `resp_maker` → `singlepoint_g16` + `singlepoint_orca`; `mol2_g16` + `mol2_orca` → `fchk_mol2`; `chg_g16` + `chg_orca` → `chg_resp` |

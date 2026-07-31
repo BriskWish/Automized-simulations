@@ -1,8 +1,8 @@
  Entering Gaussian System, Link 0=g16
  Initial command:
- /home/hush/g16/l1.exe "/home/hush/g16/Scratch/Gau-2781665.inp" -scrdir="/home/hush/g16/Scratch/"
+ /home/hush/g16/l1.exe "/home/hush/g16/Scratch/Gau-61417.inp" -scrdir="/home/hush/g16/Scratch/"
  Default CPUs for threads: 0
- Entering Link 1 = /home/hush/g16/l1.exe PID=   2781667.
+ Entering Link 1 = /home/hush/g16/l1.exe PID=     61419.
   
  Copyright (c) 1988,1990,1992,1993,1995,1998,2003,2009,2016,
             Gaussian, Inc.  All Rights Reserved.
@@ -224,24 +224,24 @@
     X=              0.0000    Y=              0.0000    Z=              0.0000  Tot=              0.0000
  Quadrupole moment (field-independent basis, Debye-Ang):
    XX=             -0.4056   YY=             -0.4056   ZZ=             -0.4056
-   XY=             -0.0000   XZ=             -0.0000   YZ=             -0.0000
+   XY=              0.0000   XZ=              0.0000   YZ=              0.0000
  Traceless Quadrupole moment (field-independent basis, Debye-Ang):
    XX=              0.0000   YY=              0.0000   ZZ=              0.0000
-   XY=             -0.0000   XZ=             -0.0000   YZ=             -0.0000
+   XY=              0.0000   XZ=              0.0000   YZ=              0.0000
  Octapole moment (field-independent basis, Debye-Ang**2):
   XXX=              0.0000  YYY=              0.0000  ZZZ=              0.0000  XYY=              0.0000
   XXY=              0.0000  XXZ=              0.0000  XZZ=              0.0000  YZZ=              0.0000
   YYZ=              0.0000  XYZ=              0.0000
  Hexadecapole moment (field-independent basis, Debye-Ang**3):
- XXXX=             -0.1001 YYYY=             -0.1001 ZZZZ=             -0.1001 XXXY=             -0.0000
- XXXZ=             -0.0000 YYYX=             -0.0000 YYYZ=             -0.0000 ZZZX=             -0.0000
- ZZZY=             -0.0000 XXYY=             -0.0334 XXZZ=             -0.0334 YYZZ=             -0.0334
- XXYZ=             -0.0000 YYXZ=             -0.0000 ZZXY=             -0.0000
+ XXXX=             -0.1001 YYYY=             -0.1001 ZZZZ=             -0.1001 XXXY=              0.0000
+ XXXZ=              0.0000 YYYX=              0.0000 YYYZ=              0.0000 ZZZX=              0.0000
+ ZZZY=              0.0000 XXYY=             -0.0334 XXZZ=             -0.0334 YYZZ=             -0.0334
+ XXYZ=              0.0000 YYXZ=              0.0000 ZZXY=              0.0000
  N-N= 0.000000000000D+00 E-N=-1.610836051465D+01  KE= 7.224986894375D+00
  Symmetry AG   KE= 7.224986894375D+00
- Symmetry B1G  KE= 4.216371033272D-63
- Symmetry B2G  KE= 4.693770928584D-63
- Symmetry B3G  KE= 3.100566160655D-63
+ Symmetry B1G  KE= 5.292636018532D-63
+ Symmetry B2G  KE= 6.816203312512D-63
+ Symmetry B3G  KE= 4.657431817241D-63
  Symmetry AU   KE= 0.000000000000D+00
  Symmetry B1U  KE= 0.000000000000D+00
  Symmetry B2U  KE= 0.000000000000D+00
@@ -317,16 +317,12 @@
  e=0.,0.,0.\Quadrupole=0.,0.,0.,0.,0.,0.\PG=OH [O(Li1)]\\@
 
 
- LEARN FROM YESTERDAY,
- LIVE FOR TODAY,
- LOOK TO TOMORROW,
- REST THIS AFTERNOON.
-
-           -- SNOOPY
- Job cpu time:       0 days  0 hours  0 minutes  7.4 seconds.
+ One man practicing sportsmanship is far better than 50 preaching it.
+ -- Knute K. Rockne
+ Job cpu time:       0 days  0 hours  0 minutes  8.8 seconds.
  Elapsed time:       0 days  0 hours  0 minutes  1.1 seconds.
  File lengths (MBytes):  RWF=      6 Int=      0 D2E=      0 Chk=      1 Scr=      1
- Normal termination of Gaussian 16 at Wed Jul 29 13:01:22 2026.
+ Normal termination of Gaussian 16 at Wed Jul 29 17:12:03 2026.
  Link1:  Proceeding to internal job step number  2.
  ----------------------------------------------------------------------
  #N Geom=AllCheck Guess=TCheck SCRF=Check GenChk RB3LYP/6-311+G(d,p) Fr
@@ -444,7 +440,7 @@
  AX will form     3 AO Fock derivatives at one time.
       3 vectors produced by pass  1 Test12= 3.50D-16 1.67D-08 XBig12= 1.26D-06 8.41D-04.
       3 vectors produced by pass  2 Test12= 3.50D-16 1.67D-08 XBig12= 9.97D-12 2.55D-06.
- InvSVY:  IOpt=1 It=  1 EMax= 4.86D-18
+ InvSVY:  IOpt=1 It=  1 EMax= 4.87D-18
  Solved reduced A of dimension     9 with     3 vectors.
  Isotropic polarizability for W=    0.000000        0.15 Bohr**3.
  End of Minotr F.D. properties file   721 does not exist.
@@ -507,9 +503,9 @@
  XXYZ=              0.0000 YYXZ=             -0.0000 ZZXY=             -0.0000
  N-N= 0.000000000000D+00 E-N=-1.610836050938D+01  KE= 7.224986889691D+00
  Symmetry AG   KE= 7.224986889691D+00
- Symmetry B1G  KE= 5.389771261343D-64
- Symmetry B2G  KE= 3.856636431843D-64
- Symmetry B3G  KE= 6.776879550594D-64
+ Symmetry B1G  KE= 3.058647166007D-64
+ Symmetry B2G  KE= 3.859734395359D-64
+ Symmetry B3G  KE= 2.940522562840D-64
  Symmetry AU   KE= 0.000000000000D+00
  Symmetry B1U  KE= 0.000000000000D+00
  Symmetry B2U  KE= 0.000000000000D+00
@@ -518,7 +514,7 @@
  Approx polarizability:   0.151  -0.000   0.151  -0.000  -0.000   0.151
  Calling FoFJK, ICntrl=    100127 FMM=F ISym2X=1 I1Cent= 0 IOpClX= 0 NMat=1 NMatS=1 NMatT=0.
  Full mass-weighted force constant matrix:
- Low frequencies ---   -0.0000   -0.0000   -0.0000
+ Low frequencies ---    0.0000    0.0000    0.0000
  Diagonal vibrational polarizability:
         0.0000000       0.0000000       0.0000000
  Harmonic frequencies (cm**-1), IR intensities (KM/Mole), Raman scattering
@@ -578,9 +574,9 @@
  Second derivative matrix not updated -- analytic derivatives used.
  The second derivative matrix:
                           X1        Y1        Z1
-           X1          -0.00000
-           Y1           0.00000  -0.00000
-           Z1          -0.00000   0.00000  -0.00000
+           X1           0.00000
+           Y1           0.00000   0.00000
+           Z1          -0.00000   0.00000   0.00000
  ITU=  0
      Eigenvalues --- 
  Angle between quadratic step and forces=  90.00 degrees.
@@ -639,10 +635,8 @@
  .,0.,0.,0.,0.,0.\\0.,0.,0.\\\@
 
 
- Age does not diminish the extreme disappointment of
- having a scoop of ice cream fall from the cone.
- -- Jim Fiebig
- Job cpu time:       0 days  0 hours  0 minutes  8.2 seconds.
+ A DANDELION FROM A LOVER MEANS MORE THAN AN ORCHID FROM A FRIEND.
+ Job cpu time:       0 days  0 hours  0 minutes  9.0 seconds.
  Elapsed time:       0 days  0 hours  0 minutes  1.1 seconds.
  File lengths (MBytes):  RWF=      6 Int=      0 D2E=      0 Chk=      1 Scr=      1
- Normal termination of Gaussian 16 at Wed Jul 29 13:01:24 2026.
+ Normal termination of Gaussian 16 at Wed Jul 29 17:12:04 2026.

@@ -115,6 +115,31 @@ class StepResult:
 
 
 @dataclass
+class DiagnosisResult:
+    """统一的诊断结果 —— 所有 diagnose_* 工具的标准返回格式。
+
+    遵循 _diagnosis 约定（镜像 _step_result 约定）。
+    """
+    source: str                              # "quantum"|"topology"|"simulation"|"config"
+    severity: str = "info"                   # "info"|"warning"|"error"|"fatal"
+    issues: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    hint: str = ""
+    extra: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "_diagnosis": True,
+            "source": self.source,
+            "severity": self.severity,
+            "issues": self.issues,
+            "evidence": self.evidence,
+            "hint": self.hint,
+            "extra": self.extra,
+        }
+
+
+@dataclass
 class RetryContext:
     """Agent 重试上下文 —— 记录一层内对某个 Step 的修复尝试。"""
     layer: str                                # "quantum" | "topology" | "simulation"

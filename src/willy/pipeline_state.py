@@ -63,6 +63,8 @@ class PipelineStatus:
     updated_at: str = ""              # ISO timestamp
     total_steps: int = 7              # 总步骤数
     done_steps: list[int] = field(default_factory=list)  # 已完成的步骤 index
+    progress_detail: str = ""                              # 当前步骤的详细信息（如正在处理的分子名）
+    extra: dict = field(default_factory=dict)              # 额外信息 (如 run_dir 用于断点续跑)
 
 
 class PipelineStateMachine:
@@ -115,6 +117,12 @@ class PipelineStateMachine:
             self._status.done_steps.append(step)
         self._write()
 
+    def set_detail(self, detail: str = ""):
+        """更新当前步骤的详细信息（如正在处理的分子名）。"""
+        self._status.progress_detail = detail
+        self._status.updated_at = _now()
+        self._write()
+
     def set_error(self, message: str, kind: str = ""):
         """记录当前步骤的错误。不清除 retry 上下文。"""
         self._status.error = message
@@ -123,12 +131,11 @@ class PipelineStateMachine:
         self._write()
 
     def start_retry(self, agent: str, retry_n: int, retry_max: int):
-        """进入 RETRYING 状态。"""
+        """进入 RETRYING 状态。不清空 actions，允许跨重试累积动作历史。"""
         self._status.state = State.RETRYING.value
         self._status.agent = agent
         self._status.retry_n = retry_n
         self._status.retry_max = retry_max
-        self._status.actions = []
         self._status.updated_at = _now()
         self._write()
 

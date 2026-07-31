@@ -1,6 +1,8 @@
 # Willy — AI 驱动的分子动力学模拟自动化
 
-用自然语言描述你的化学体系，AI Agent 自动完成从量子化学计算到 GROMACS MD 模拟的全流程。
+用自然语言描述化学体系，AI Agent 自动完成从量子化学计算到 Packmol 初始盒子构建的准备流程。
+
+> 当前公开主流程为 7 步的体系准备流水线，产出可供 GROMACS 使用的拓扑、MDP 和初始盒子；EM、平衡和生产 MD 执行器仍在开发中，尚未接入主编排器。
 
 ```
 用户: "Li 80, TFSI 80, FEC 300, 350K, 20ns"
@@ -9,7 +11,7 @@
    DeepSeek LLM  →  config.json  →  run_pipeline.py (7 步)
          │
          ▼
-   GROMACS: EM → NVT → NPT EQ → PROD
+   GROMACS 输入准备：topol.top + *.mdp + model.pdb
 ```
 
 ## 架构
@@ -36,11 +38,6 @@
 │  5. 主拓扑 + itp 修订                              │
 │  6. MDP 参数生成 (em/eq/prod)                      │
 │  7. Packmol 初始盒子构建                            │
-└────────────────────┬─────────────────────────────┘
-                     │
-┌────────────────────▼─────────────────────────────┐
-│               GROMACS MD 模拟                      │
-│    能量最小化 → NVT 平衡 → NPT 平衡 → 产出采样      │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -95,7 +92,7 @@ python3 app.py
 Li 80, TFSI 80, FEC 300, 350K, 20ns
 ```
 
-Agent 会给出方案确认，确认后自动执行全流程。
+Agent 会给出方案确认，确认后自动执行当前的 7 步体系准备流程。
 
 ### CLI 模式
 
@@ -145,25 +142,32 @@ AutomizedSimulations/
 │   ├── knowledge_tools.py  ← 7 个 function calling 工具
 │   ├── llm_config.py       ← 配置验证/写入
 │   ├── env_checker.py      ← 依赖预检
-│   ├── progress.py         ← 流水线进度
+│   ├── pipeline_state.py   ← 流水线状态机
+│   ├── frontend_api.py      ← 前端专用后端 API
 │   ├── quantum/            ← 量子化学 (g16/ORCA)
 │   ├── topology/           ← 拓扑生成 (Sobtop)
 │   └── simulation/         ← MD 模拟 (GROMACS)
 ├── vendor/                 ← 内置依赖 (Packmol, OpenBabel, Sobtop)
 ├── struct/                 ← 分子结构文件 (.gjf)
 ├── md_run/md_*/            ← 模拟产物
-├── docs/                   ← 文档
+├── docs/                   ← 文档 (详见 docs/README.md 索引)
 │   ├── Willy.md           ← 架构文档
 │   ├── knowledge.md        ← 分子知识库
-│   └── ERR_WARN_Build.md   ← Error/Warning 协议
+│   ├── ERR_WARN_Build.md   ← Error/Warning 协议
+│   ├── naming_convention.md ← 命名规范
+│   ├── reconstruction.md   ← 重构检查清单
+│   ├── quantum_design.md   ← 量子层设计
+│   ├── topology_design.md  ← 拓扑层设计
+│   ├── status_api.md       ← 前端接口
+│   ├── employees.md        ← 团队分工与共识
+│   ├── project_gap_analysis.md ← 完整性分析
+│   └── lithium-salts.md    ← 锂盐体系调研
 └── benchmarks/             ← LLM 评分测试
 ```
 
 ## 更多文档
 
-- [架构设计文档](docs/Willy.md)
-- [分子知识库](docs/knowledge.md)
-- [Error/Warning 协议](docs/ERR_WARN_Build.md)
+→ **[docs/README.md](docs/README.md)** — 文档索引（按阅读目的导航 + 12 份文档分类 + 矛盾清单）
 
 ## 许可
 

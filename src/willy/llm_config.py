@@ -80,8 +80,12 @@ def apply_config(config_dict: dict, backup: bool = True) -> Path:
 
 
 def _apply_defaults(config_dict: dict) -> dict:
-    """将 config 与默认值合并。"""
+    """将 LLM 输出的 config 与默认值合并，写入 config.json 前调用。"""
     out = copy.deepcopy(config_dict)
+    # 剥离 LLM 协议字段，只保留运行时配置
+    out.pop("error", None)
+    out.pop("warnings", None)
+    out.setdefault("backend", "g16")
     out.setdefault("defaults", {"mem": "5GB", "nproc": 8})
     out["defaults"].setdefault("mem", "5GB")
     out["defaults"].setdefault("nproc", 8)
@@ -122,4 +126,15 @@ def _apply_defaults(config_dict: dict) -> dict:
     md.setdefault("rvdw", 1.0)
     md.setdefault("coulombtype", "PME")
     md.setdefault("vdwtype", "Cut-off")
+    out.setdefault("topology", {})
+    topo = out["topology"]
+    topo.setdefault("backend", "sobtop")
+    topo.setdefault("force_field", "gaff")
+    topo.setdefault("default_net_charge", 0)
+    topo.setdefault("default_lbcc", False)
+    topo.setdefault("default_opt_steps", 0)
+    out.setdefault("box", {})
+    out["box"].setdefault("density", 6.0)
+    out["box"].setdefault("box_size", None)
+    out["box"].setdefault("tolerance", 2.0)
     return out
