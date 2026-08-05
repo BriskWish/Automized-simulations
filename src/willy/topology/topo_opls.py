@@ -14,17 +14,24 @@ LigParGen OPLS-AA 调用接口 —— SMILES/mol2 → .itp + .gro。
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 import subprocess
 import shutil
-import os
-import glob as glob_mod
+import re
+import uuid
 
 from willy._paths import get_project_root
+from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.errors import StepResult, StepError, ErrorKind
+from willy.process_lifecycle import run_managed_command
+from willy.topology.validation import (
+    run_output_path,
+    validate_topology_files,
+    validate_topology_output_name,
+)
 
 ROOT = get_project_root()
-LIGPARGEN_BIN = shutil.which("LigParGen") or "/home/hush/.local/bin/LigParGen"
+LIGPARGEN_TMP_DIR = Path("/tmp")
 
 
 # ============================================================
@@ -58,18 +65,20 @@ class LigParGenInput:
     lbcc: bool = True                  # True=CM1A-LBCC (中性分子推荐), False=CM1A
     opt_steps: int = 0                 # 优化步数: 0=单点, 1-3=逐步优化
     cleanup_tmp: bool = True           # 是否清理 /tmp/ 下的临时产物
+    temp_prefix: Optional[str] = None  # 可选运行级临时前缀；默认每次执行唯一
 
 
 # ============================================================
 # 核心逻辑
 # ============================================================
 
-def _mol2_to_smiles(mol2_path: str) -> str:
+def _mol2_to_smiles(mol2_path: str, *, run_dir: str | Path | None = None) -> str:
     """通过 vendored obabel 从 mol2 提取 SMILES。"""
     obabel = str(ROOT / "vendor" / "obabel.bin")
-    result = subprocess.run(
+    result = run_managed_command(
         [obabel, mol2_path, "-osmi"],
-        capture_output=True, text=True, timeout=30,
+        timeout=30,
+        run_dir=run_dir,
     )
     if result.returncode != 0 or not result.stdout.strip():
         raise RuntimeError(f"无法从 {mol2_path} 提取 SMILES: {result.stderr}")
@@ -79,34 +88,69 @@ def _mol2_to_smiles(mol2_path: str) -> str:
     return smiles
 
 
-def _find_tmp_output(resname: str) -> dict[str, Path]:
-    """在 /tmp/ 下查找 LigParGen 生成的文件。返回 {ext: Path}。"""
+def _temporary_prefix(inp: LigParGenInput) -> str:
+    """Return a unique LigParGen output prefix without changing final names."""
+    base = re.sub(r"[^A-Za-z0-9_]", "_", inp.output_name).strip("_") or "MOL"
+    token = inp.temp_prefix or uuid.uuid4().hex
+    token = re.sub(r"[^A-Za-z0-9_]", "", token)[:16] or uuid.uuid4().hex[:16]
+    return f"{base[:24]}_{token}"
+
+
+def _find_tmp_output(prefix: str) -> dict[str, Path]:
+    """Find the current invocation's LigParGen files under its unique prefix."""
     found: dict[str, Path] = {}
     for ext in ["itp", "gro"]:
-        path = Path(f"/tmp/{resname}.{ext}")
+        path = LIGPARGEN_TMP_DIR / f"{prefix}.{ext}"
         if path.exists():
             found[ext] = path
     return found
 
 
-def _cleanup_tmp(resname: str) -> None:
-    """清理 /tmp/ 下 LigParGen 的临时产物。"""
-    patterns = [
-        f"/tmp/{resname}.*",
-        f"/tmp/{resname}*.smi",
-        f"/tmp/{resname}*.z",
-    ]
-    for pat in patterns:
-        for f in glob_mod.glob(pat):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+def _cleanup_tmp(prefix: str) -> None:
+    """Clean only files owned by the current unique LigParGen invocation."""
+    for path in LIGPARGEN_TMP_DIR.glob(f"{prefix}*"):
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _restore_moleculetype_name(itp_path: Path, residue_name: str) -> bool:
+    """Restore the configured molecule name after using a temporary prefix.
+
+    LigParGen's ``-r`` controls both its fixed temporary filenames and the
+    ITP molecule type.  Only the latter belongs in the run artifacts.
+    """
+    lines = itp_path.read_text().splitlines(keepends=True)
+    in_moleculetype = False
+    for index, line in enumerate(lines):
+        body, marker, comment = line.partition(";")
+        stripped = body.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_moleculetype:
+                return False
+            in_moleculetype = stripped[1:-1].strip().lower() == "moleculetype"
+            continue
+        if not in_moleculetype or not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) < 2 or not fields[1].lstrip("+-").isdigit():
+            return False
+        leading = body[:len(body) - len(body.lstrip())]
+        newline = "\n" if line.endswith("\n") else ""
+        suffix = f";{comment.rstrip()}" if marker else ""
+        lines[index] = f"{leading}{residue_name} {' '.join(fields[1:])}{suffix}{newline}"
+        itp_path.write_text("".join(lines))
+        return True
+    return False
 
 
 def make_itp_gro_opls(
     inp: LigParGenInput,
-    output_dir: str = "topo",
+    output_dir: str | None = None,
 ) -> StepResult:
     """
     调用 LigParGen，生成 OPLS-AA .itp + .gro。
@@ -116,6 +160,13 @@ def make_itp_gro_opls(
     """
     import time as _time
     _start = _time.time()
+
+    if not output_dir:
+        return StepResult(
+            step_name="topo_opls", step_index=4, success=False,
+            error=StepError(ErrorKind.INPUT_CONTRACT, "必须提供当前 run 的 output_dir"),
+            duration_s=_time.time() - _start,
+        )
 
     # ── 参数校验 ──
     if not inp.smiles and not inp.mol2:
@@ -136,6 +187,15 @@ def make_itp_gro_opls(
             duration_s=_time.time() - _start,
         )
 
+    try:
+        resname = validate_topology_output_name(inp.output_name)
+    except ValueError as exc:
+        return StepResult(
+            step_name="topo_opls", step_index=4, success=False,
+            error=StepError(ErrorKind.CONFIG_INVALID, str(exc)),
+            duration_s=_time.time() - _start,
+        )
+
     # ── 预检 ──
     issues = check_ligpargen_ready()
     if issues:
@@ -144,37 +204,59 @@ def make_itp_gro_opls(
             error=StepError(kind=ErrorKind.DEPENDENCY_MISSING,
                             message="LigParGen 环境未就绪",
                             raw_output="\n".join(issues),
-                            hint="pip install ligpargen 并设置 $BOSSdir 指向 BOSS 安装目录"),
+                            hint="配置 WILLY_LIGPARGEN_BIN 与 WILLY_BOSS_HOME，或使用兼容的 BOSSdir"),
             duration_s=_time.time() - _start,
         )
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    try:
+        destinations = {
+            ext: run_output_path(out, resname, f".{ext}")
+            for ext in ("itp", "gro")
+        }
+    except ValueError as exc:
+        return StepResult(
+            step_name="topo_opls", step_index=4, success=False,
+            error=StepError(ErrorKind.CONFIG_INVALID, str(exc)),
+            duration_s=_time.time() - _start,
+        )
 
     # ── 确定 SMILES ──
     smiles = inp.smiles
     if not smiles and inp.mol2:
         try:
-            smiles = _mol2_to_smiles(inp.mol2)
-        except RuntimeError as e:
+            smiles = _mol2_to_smiles(inp.mol2, run_dir=out)
+        except (RuntimeError, OSError) as e:
             return StepResult(
                 step_name="topo_opls", step_index=4, success=False,
-                error=StepError(kind=ErrorKind.LIGPARGEN_FAILED,
+                error=StepError(kind=ErrorKind.DEPENDENCY_MISSING if isinstance(e, OSError) else ErrorKind.LIGPARGEN_FAILED,
                                 message=f"{inp.output_name}: {e}",
                                 hint="检查 .mol2 文件是否完整，或直接提供 SMILES"),
                 duration_s=_time.time() - _start,
             )
 
-    resname = inp.output_name
+    temporary_prefix = _temporary_prefix(inp)
 
-    # ── 清理 /tmp/ 残留 ──
-    _cleanup_tmp(resname)
+    # LigParGen writes globally in /tmp.  A unique prefix is the ownership
+    # boundary: it avoids both deleting and collecting another run's output.
+    _cleanup_tmp(temporary_prefix)
+
+    try:
+        ligpargen = require_tool("ligpargen")
+        ligpargen_env = build_tool_env("ligpargen")
+    except EnvironmentRegistryError as exc:
+        return StepResult(
+            step_name="topo_opls", step_index=4, success=False,
+            error=StepError(ErrorKind.DEPENDENCY_MISSING, f"{resname}: {exc}"),
+            duration_s=_time.time() - _start,
+        )
 
     # ── 构建命令 ──
     cmd = [
-        str(LIGPARGEN_BIN),
+        str(ligpargen.executable),
         "-s", smiles,
-        "-r", resname,
+        "-r", temporary_prefix,
         "-c", str(inp.net_charge),
         "-o", str(inp.opt_steps),
     ]
@@ -187,15 +269,14 @@ def make_itp_gro_opls(
 
     # ── 调用 LigParGen ──
     try:
-        result = subprocess.run(
+        result = run_managed_command(
             cmd,
-            capture_output=True,
-            text=True,
             timeout=300,  # BOSS 可能较慢
-            env={**os.environ},
+            env=ligpargen_env,
+            run_dir=out,
         )
     except subprocess.TimeoutExpired:
-        _cleanup_tmp(resname)
+        _cleanup_tmp(temporary_prefix)
         return StepResult(
             step_name="topo_opls", step_index=4, success=False,
             error=StepError(kind=ErrorKind.TIMEOUT,
@@ -203,23 +284,15 @@ def make_itp_gro_opls(
                             hint="检查分子复杂度是否过高（>200 原子），或 BOSS 是否正常运行"),
             duration_s=_time.time() - _start,
         )
-
-    # ── 取回产物 ──
-    outputs: dict[str, Path] = {}
-    artifacts: list[str] = []
-
-    tmp_files = _find_tmp_output(resname)
-    for ext in ["itp", "gro"]:
-        if ext in tmp_files:
-            dst = out / f"{resname}.{ext}"
-            shutil.copy2(tmp_files[ext], dst)
-            outputs[ext] = dst
-            artifacts.append(str(dst))
-            print(f"[ligpargen] ✅ {ext}: {dst}")
-
-    # ── 清理临时文件 ──
-    if inp.cleanup_tmp:
-        _cleanup_tmp(resname)
+    except OSError as exc:
+        _cleanup_tmp(temporary_prefix)
+        return StepResult(
+            step_name="topo_opls", step_index=4, success=False,
+            error=StepError(kind=ErrorKind.DEPENDENCY_MISSING,
+                            message=f"{resname}: 无法启动 LigParGen/BOSS: {exc}",
+                            hint="检查 WILLY_LIGPARGEN_BIN 与 WILLY_BOSS_HOME 配置"),
+            duration_s=_time.time() - _start,
+        )
 
     # ── 失败处理 ──
     if result.returncode != 0:
@@ -227,29 +300,79 @@ def make_itp_gro_opls(
               (result.stderr[-500:] if result.stderr else "")
         print(f"[ligpargen] stderr:\n{result.stderr[-500:]}")
         print(f"[ligpargen] stdout:\n{result.stdout[-500:]}")
+        if inp.cleanup_tmp:
+            _cleanup_tmp(temporary_prefix)
         return StepResult(
             step_name="topo_opls", step_index=4, success=False,
             error=StepError(kind=ErrorKind.LIGPARGEN_FAILED,
                             message=f"{resname}: LigParGen 退出码={result.returncode}",
                             raw_output=raw.strip()[-500:],
-                            hint="检查 $BOSSdir 设置和 BOSS 安装，或尝试用 SMILES 重新输入"),
-            artifacts=artifacts,
+                            hint="检查 WILLY_BOSS_HOME/BOSSdir 与 BOSS 安装，或尝试用 SMILES 重新输入"),
             duration_s=_time.time() - _start,
         )
 
-    if len(outputs) < 2:
-        missing = [k for k in ["itp", "gro"] if k not in outputs]
+    tmp_files = _find_tmp_output(temporary_prefix)
+    if len(tmp_files) < 2:
+        missing = [k for k in ["itp", "gro"] if k not in tmp_files]
         raw = (result.stdout[-500:] if result.stdout else "") + "\n" + \
               (result.stderr[-500:] if result.stderr else "")
+        if inp.cleanup_tmp:
+            _cleanup_tmp(temporary_prefix)
         return StepResult(
             step_name="topo_opls", step_index=4, success=False,
             error=StepError(kind=ErrorKind.LIGPARGEN_FAILED,
                             message=f"{resname}: LigParGen 未生成完整输出（缺失 {missing}）",
                             raw_output=raw.strip()[-500:],
                             hint="检查 SMILES 是否正确或分子是否超过 200 原子限制"),
-            artifacts=artifacts,
             duration_s=_time.time() - _start,
         )
+
+    validation = validate_topology_files(
+        tmp_files["itp"], tmp_files["gro"],
+        step_name="topo_opls", error_kind=ErrorKind.LIGPARGEN_FAILED,
+    )
+    if not validation.success:
+        if inp.cleanup_tmp:
+            _cleanup_tmp(temporary_prefix)
+        validation.duration_s = _time.time() - _start
+        return validation
+
+    outputs: dict[str, Path] = {}
+    artifacts: list[str] = []
+    for ext in ["itp", "gro"]:
+        dst = destinations[ext]
+        dst.unlink(missing_ok=True)
+        shutil.copy2(tmp_files[ext], dst)
+        if ext == "itp" and not _restore_moleculetype_name(dst, resname):
+            for destination in destinations.values():
+                destination.unlink(missing_ok=True)
+            if inp.cleanup_tmp:
+                _cleanup_tmp(temporary_prefix)
+            return StepResult(
+                step_name="topo_opls", step_index=4, success=False,
+                error=StepError(
+                    ErrorKind.LIGPARGEN_FAILED,
+                    f"{resname}: LigParGen ITP 缺少合法 [ moleculetype ] 数据行",
+                ),
+                duration_s=_time.time() - _start,
+            )
+        outputs[ext] = dst
+        artifacts.append(str(dst))
+        print(f"[ligpargen] ✅ {ext}: {dst}")
+    final_validation = validate_topology_files(
+        outputs["itp"], outputs["gro"],
+        step_name="topo_opls", error_kind=ErrorKind.LIGPARGEN_FAILED,
+        expected_moleculetype=resname,
+    )
+    if not final_validation.success:
+        for destination in destinations.values():
+            destination.unlink(missing_ok=True)
+        if inp.cleanup_tmp:
+            _cleanup_tmp(temporary_prefix)
+        final_validation.duration_s = _time.time() - _start
+        return final_validation
+    if inp.cleanup_tmp:
+        _cleanup_tmp(temporary_prefix)
 
     duration = _time.time() - _start
     return StepResult(
@@ -257,7 +380,13 @@ def make_itp_gro_opls(
         outputs={k: str(v) for k, v in outputs.items()},
         artifacts=artifacts,
         duration_s=duration,
-        extra={"returncode": result.returncode, "lbcc": inp.lbcc},
+        extra={
+            "returncode": result.returncode,
+            "lbcc": inp.lbcc,
+            "opt_steps": inp.opt_steps,
+            "temporary_prefix": temporary_prefix,
+            **final_validation.extra,
+        },
     )
 
 
@@ -265,37 +394,9 @@ def make_itp_gro_opls(
 # 快捷函数
 # ============================================================
 
-def batch_make_topo_opls(
-    mol2_dir: str = "struct",
-    output_dir: str = "topo",
-    net_charge: int = 0,
-    lbcc: bool = True,
-) -> list[StepResult]:
-    """
-    批量处理：对 mol2_dir 下所有 .mol2，用 LigParGen 生成 OPLS-AA .itp + .gro。
-
-    与 topo_gaff.batch_make_topo 接口对齐。
-
-    Returns:
-        List[StepResult] —— 每个分子一个结果
-    """
-    results: list[StepResult] = []
-    for mol2 in sorted(Path(mol2_dir).glob("*.mol2")):
-        name = mol2.stem
-        sr = make_itp_gro_opls(
-            LigParGenInput(
-                mol2=str(mol2),
-                output_name=name,
-                net_charge=net_charge,
-                lbcc=lbcc,
-            ),
-            output_dir=output_dir,
-        )
-        results.append(sr)
-
-    ok = sum(1 for r in results if r.success)
-    print(f"[ligpargen] 完成: {ok}/{len(results)} 个分子")
-    return results
+def batch_make_topo_opls(inputs: Iterable[LigParGenInput], output_dir: str) -> list[StepResult]:
+    """Parameterize explicit plan inputs; this function never scans directories."""
+    return [make_itp_gro_opls(inp, output_dir=output_dir) for inp in inputs]
 
 
 # ============================================================
@@ -305,18 +406,19 @@ def batch_make_topo_opls(
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 2:
-        print("用法: python3 topo_opls.py <SMILES> [resname]")
-        print("示例: python3 topo_opls.py 'c1ccccc1' BNZ")
+    if len(sys.argv) != 4:
+        print("用法: python3 topo_opls.py <SMILES> <resname> <run_dir>")
+        print("示例: python3 topo_opls.py 'c1ccccc1' BNZ md_run/<run_id>")
         sys.exit(1)
 
     test_smiles = sys.argv[1]
-    test_name = sys.argv[2] if len(sys.argv) > 2 else "TEST"
+    test_name = sys.argv[2]
+    run_dir = Path(sys.argv[3]).resolve()
 
     print(f"===== 测试: SMILES={test_smiles} → {test_name} =====")
     r = make_itp_gro_opls(
         LigParGenInput(smiles=test_smiles, output_name=test_name),
-        output_dir="topo",
+        output_dir=str(run_dir),
     )
     if r.success:
         print(f"生成: {list(r.outputs.keys())}")

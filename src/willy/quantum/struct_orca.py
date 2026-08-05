@@ -9,6 +9,7 @@ import subprocess, os, json, time, re
 
 from willy._paths import get_project_root
 from willy.errors import StepResult, StepError, ErrorKind
+from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import (
     find_orca, find_orca_2mkl, get_orca_env, format_orca_xyz_coords,
 )
@@ -92,13 +93,17 @@ def run_one(name: str, cfg: dict, defaults: dict, struct_dir: str = "struct") ->
         return StepResult(
             step_name="struct_orca", step_index=1, success=False,
             error=StepError(kind=ErrorKind.DEPENDENCY_MISSING, message=str(e),
-                            hint="安装 ORCA 并设置 ORCA_DIR 环境变量"),
+                            hint="安装 ORCA 并设置 WILLY_ORCA_HOME/WILLY_ORCA_BIN，或将 ORCA 加入 PATH"),
             duration_s=time.time() - _start,
         )
     try:
-        result = subprocess.run(
+        result = run_managed_command(
             [orca_bin, inp_path.name],
-            capture_output=True, text=True, cwd=str(std), timeout=7200, env=orca_env)
+            cwd=std,
+            timeout=7200,
+            env=orca_env,
+            run_dir=std,
+        )
     except subprocess.TimeoutExpired:
         return StepResult(
             step_name="struct_orca", step_index=1, success=False,
@@ -129,9 +134,13 @@ def run_one(name: str, cfg: dict, defaults: dict, struct_dir: str = "struct") ->
         pass  # continue; file check below will catch if molden is missing
     else:
         try:
-            subprocess.run(
+            run_managed_command(
                 [orca_2mkl, name, "-molden"],
-                capture_output=True, text=True, cwd=str(std), timeout=60, env=orca_env)
+                cwd=std,
+                timeout=60,
+                env=orca_env,
+                run_dir=std,
+            )
         except subprocess.TimeoutExpired:
             pass  # 继续检查文件是否存在
 
@@ -163,7 +172,7 @@ def run_all(config_path: str = "config.json", struct_dir: str = "struct",
             on_progress=None) -> list[StepResult]:
     """批量运行 ORCA 优化 + molden 生成。返回 List[StepResult]。
 
-    on_progress(name, i, total) — 每分子开始前回调，供 orchestrator 更新进度。
+    on_progress(activity) — 每分子开始前回调，activity 为公开结构化字段。
     """
     with open(config_path) as f:
         config = json.load(f)
@@ -173,12 +182,27 @@ def run_all(config_path: str = "config.json", struct_dir: str = "struct",
 
     results: list[StepResult] = []
     for i, (name, cfg) in enumerate(molecules.items(), 1):
-        if not (Path(struct_dir) / f"{name}.gjf").exists():
-            continue
         if on_progress:
-            on_progress(f"分子 {i}/{total}: {name}")
+            on_progress({
+                "tool": "ORCA", "operation": "结构优化",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
+        gjf_path = Path(struct_dir) / f"{name}.gjf"
+        if not gjf_path.exists():
+            results.append(StepResult(
+                step_name="struct_orca", step_index=1, success=False,
+                error=StepError(
+                    kind=ErrorKind.FILE_NOT_FOUND,
+                    message=f"{gjf_path} 不存在",
+                    hint=f"确认已从 struct/ 复制 {name}.gjf 到本次运行目录",
+                ), target_type="molecule", target=name,
+            ))
+            continue
         print(f"\n[{i}/{total}] {name}")
         sr = run_one(name, cfg, defaults, struct_dir)
+        sr.target_type = "molecule"
+        sr.target = name
         results.append(sr)
     ok = sum(1 for r in results if r.success)
     print(f"\n[orca_struct] 完成: {ok}/{len(molecules)} 个分子")

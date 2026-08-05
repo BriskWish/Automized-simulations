@@ -49,6 +49,25 @@ def _parse_fchk_block(lines: List[str], header: str, dtype: str,
     return []
 
 
+def _parse_fchk_scalar(lines: List[str], header: str) -> int:
+    """读取 fchk 标量字段，例如 ``MxBond I 4``。"""
+    for line in lines:
+        if line.strip().startswith(header):
+            try:
+                return int(line.split()[-1])
+            except (IndexError, ValueError) as exc:
+                raise ValueError(f"无法解析 {header} 字段") from exc
+    raise ValueError(f"缺少 {header} 字段")
+
+
+def _require_block(name: str, values: List, expected_count: int) -> None:
+    """确保 fchk 数组字段完整，避免生成不含真实键连接的 mol2。"""
+    if len(values) != expected_count:
+        raise ValueError(
+            f"{name} 数据不完整：期望 {expected_count} 项，实际 {len(values)} 项"
+        )
+
+
 def parse_fchk(fchk_path: str) -> dict:
     lines = Path(fchk_path).read_text().split("\n")
     for line in lines:
@@ -56,22 +75,48 @@ def parse_fchk(fchk_path: str) -> dict:
             natoms = int(line.split()[-1]); break
     else:
         raise ValueError(f"无法解析原子数: {fchk_path}")
-    mxbond_raw = _parse_fchk_block(lines, "MxBond", "I", 1)
-    mxbond = mxbond_raw[0] if mxbond_raw else 4
+    if natoms <= 0:
+        raise ValueError(f"原子数必须大于零: {fchk_path}")
+
+    mxbond = _parse_fchk_scalar(lines, "MxBond")
+    if mxbond <= 0:
+        raise ValueError(f"MxBond 必须大于零: {fchk_path}")
+
     atomic_numbers = _parse_fchk_block(lines, "Atomic numbers", "I", natoms)
     coords_raw = _parse_fchk_block(lines, "Current cartesian coordinates", "R", natoms * 3)
     nbonds = _parse_fchk_block(lines, "NBond", "I", natoms)
     ibond_raw = _parse_fchk_block(lines, "IBond", "I", natoms * mxbond)
     rbond_raw = _parse_fchk_block(lines, "RBond", "R", natoms * mxbond)
+
+    _require_block("Atomic numbers", atomic_numbers, natoms)
+    _require_block("Current cartesian coordinates", coords_raw, natoms * 3)
+    _require_block("NBond", nbonds, natoms)
+    _require_block("IBond", ibond_raw, natoms * mxbond)
+    _require_block("RBond", rbond_raw, natoms * mxbond)
+
     coords = [(coords_raw[i*3], coords_raw[i*3+1], coords_raw[i*3+2]) for i in range(natoms)]
     bond_targets, bond_orders = [], []
-    cursor = 0
-    for i, n in enumerate(nbonds):
-        targets = ibond_raw[cursor:cursor + n]
-        orders = rbond_raw[cursor:cursor + n]
-        bond_targets.append([t - 1 for t in targets if t > 0])
-        bond_orders.extend(orders[:len(bond_targets[-1])])
-        cursor += mxbond
+    for atom_index, bond_count in enumerate(nbonds):
+        if bond_count < 0 or bond_count > mxbond:
+            raise ValueError(
+                f"NBond[{atom_index}]={bond_count} 不在 0..{mxbond} 范围内"
+            )
+
+        start = atom_index * mxbond
+        targets = ibond_raw[start:start + mxbond]
+        orders = rbond_raw[start:start + mxbond]
+        active_bonds = [(target, order) for target, order in zip(targets, orders)
+                        if target > 0]
+        if len(active_bonds) != bond_count:
+            raise ValueError(
+                f"NBond[{atom_index}]={bond_count} 与 IBond 连接数不一致"
+            )
+        if any(target > natoms for target, _ in active_bonds):
+            raise ValueError(f"IBond 包含超出原子范围的连接: atom {atom_index + 1}")
+
+        bond_targets.append([target - 1 for target, _ in active_bonds])
+        bond_orders.append([order for _, order in active_bonds])
+
     return {"natoms": natoms, "atomic_numbers": atomic_numbers, "coords": coords,
             "nbonds_per_atom": nbonds, "bond_targets": bond_targets, "bond_orders": bond_orders}
 
@@ -85,14 +130,12 @@ def _bond_order_to_mol2_type(order: float) -> str:
 
 def build_mol2(data: dict, name: str) -> str:
     lines = [f"# {name}", "# Created by fchk_mol2.py", "#", ""]
-    bonds, bond_types, b_idx = [], [], 0
+    bonds, bond_types = [], []
     for i, targets in enumerate(data["bond_targets"]):
-        for j in targets:
+        for j, order in zip(targets, data["bond_orders"][i]):
             if i < j:
                 bonds.append((i, j))
-                bond_types.append(_bond_order_to_mol2_type(
-                    data["bond_orders"][b_idx]) if b_idx < len(data["bond_orders"]) else "1")
-            b_idx += 1
+                bond_types.append(_bond_order_to_mol2_type(order))
     lines.append("@<TRIPOS>MOLECULE")
     lines.append(name)
     lines.append(f"{data['natoms']} {len(bonds)}")
@@ -121,13 +164,25 @@ def convert(fchk_path: str, output_path: str = None) -> StepResult:
                                           message=f"{fchk_path} 不存在"),
                           duration_s=time.time()-t0)
 
-    data = parse_fchk(fchk_path)
-    mol2_content = build_mol2(data, name)
+    try:
+        data = parse_fchk(fchk_path)
+        mol2_content = build_mol2(data, name)
 
-    if output_path is None:
-        output_path = str(Path(fchk_path).parent / f"{name}.mol2")
-    out = Path(output_path)
-    out.write_text(mol2_content)
+        if output_path is None:
+            output_path = str(Path(fchk_path).parent / f"{name}.mol2")
+        out = Path(output_path)
+        out.write_text(mol2_content)
+    except (OSError, ValueError, IndexError) as exc:
+        return StepResult(
+            step_name="fchk_mol2", step_index=2, success=False,
+            error=StepError(
+                kind=ErrorKind.UNKNOWN,
+                message=f"{name}: fchk→mol2 转换失败: {exc}",
+                hint="确认 *_opt.fchk 完整且包含原子、坐标和键连接信息。",
+            ),
+            duration_s=time.time() - t0,
+        )
+
     print(f"[fchk_mol2] ✅ {name}: {data['natoms']} atoms → {out}")
 
     return StepResult(step_name="fchk_mol2", step_index=2, success=True,
@@ -149,12 +204,26 @@ def batch_convert(struct_dir: str = "struct", config_path: str = "config.json",
              if f.stem.replace("_opt", "") in registered or not registered]
     if not fchks:
         print(f"[fchk_mol2] ⚠ {struct_dir}/ 下没有 *_opt.fchk")
-        return []
+        return [StepResult(
+            step_name="fchk_mol2", step_index=2, success=False,
+            error=StepError(
+                kind=ErrorKind.FILE_NOT_FOUND,
+                message=f"{struct_dir}/ 下没有可转换的 *_opt.fchk",
+                hint="确认本次运行的 Step 2 已生成完整 FCHK 文件。",
+            ),
+        )]
     total = len(fchks)
     for i, fchk in enumerate(fchks, 1):
+        name = fchk.stem.replace("_opt", "")
         if on_progress:
-            on_progress(f"分子 {i}/{total}: {fchk.stem.replace('_opt', '')}")
+            on_progress({
+                "tool": "格式转换", "operation": "mol2 转换",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
         sr = convert(str(fchk))
+        sr.target_type = "molecule"
+        sr.target = name
         results.append(sr)
     ok = sum(1 for r in results if r.success)
     print(f"[fchk_mol2] 完成: {ok}/{total} 个 .mol2")

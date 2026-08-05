@@ -1,234 +1,246 @@
-"""
-topo_gaff.py
-===================
-Sobtop 调用接口 —— mol2 + chg → .itp + .gro。
+"""Sobtop GAFF+UFF execution backend.
 
-不生成主拓扑文件（.top），后续由 top_assembly 单独构建。
+Sobtop writes to its own installation directory.  This module serializes that
+shared workspace and copies only files produced and validated by the current
+process into the caller's run directory.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-import subprocess
-import shutil
+from typing import Iterable
+import fcntl
 import os
+import shutil
+import subprocess
+import time
 
 from willy._paths import get_project_root
-from willy.errors import StepResult, StepError, ErrorKind
+from willy.errors import ErrorKind, StepError, StepResult
+from willy.process_lifecycle import run_managed_command
+from willy.topology.validation import validate_topology_files, validate_topology_output_name
+
+
 SOBTOP_DIR = get_project_root() / "vendor" / "sobtop"
 SOBTOP_BIN = SOBTOP_DIR / "sobtop"
+_LOCK_PATH = SOBTOP_DIR / ".willy-sobtop.lock"
 
-
-# ============================================================
-# 环境预检
-# ============================================================
 
 def check_sobtop_ready() -> list[str]:
-    """
-    预检 Sobtop 环境是否就绪。委托到 env_checker。
-
-    调用 run_sobtop 前应先调用此函数，在迁移到新机器时给出清晰错误提示。
-    """
+    """Delegate Sobtop availability checks to the central environment checker."""
     from willy.env_checker import check_module
-    issues = check_module("topo_gaff").failed_strs()
-    if not issues:
-        print("[sobtop] ✅ Sobtop 环境预检通过")
-    return issues
+
+    return check_module("topo_gaff").failed_strs()
 
 
-# ============================================================
-# 入参层
-# ============================================================
+@dataclass(frozen=True)
+class SobtopInput:
+    """The sole supported Sobtop mode: GAFF, then UFF for missing atom types."""
 
-@dataclass
-class TopMakerInput:
-    """Sobtop 的输入参数。mol2 + chg → .itp + .gro（不含 .top）"""
-    mol2: str                     # .mol2 文件路径（必填）
-    chg: str                      # .chg 电荷文件路径（必填）
-    output_name: str = "MOL"      # 输出前缀
-    gaff: bool = True             # True=GAFF, False=AMBER
-    hessian: Optional[str] = None # .fchk 路径（需要自定义力常数时）
+    mol2: str
+    chg: str
+    output_name: str
 
 
-# ============================================================
-# 核心逻辑
-# ============================================================
+# Compatibility alias for callers that used the old public input name.
+TopMakerInput = SobtopInput
 
-def make_itp_gro(inp: TopMakerInput, output_dir: str = "topo") -> StepResult:
+
+@dataclass(frozen=True)
+class SobtopInputBuilder:
+    """Build the frozen interactive sequence for Sobtop 2026.1.16.
+
+    The verified menu actions are ``7 -> 10 -> chg -> 0 -> 1 -> 2 -> 4``:
+    load charges, return, generate topology, assign GAFF then UFF, and use
+    prebuilt bonded parameters with guessed gaps.  Explicit paths then avoid
+    Sobtop's implicit input-stem output names; ``2 -> gro -> 0`` emits GRO and
+    exits the program.
     """
-    调用 Sobtop，生成 .itp + .gro。丢弃 .top。
-    Sobtop 使用默认路径写出到自身目录，接口取回 .itp 和 .gro 到 output_dir。
 
-    Returns:
-        StepResult (success=True 时 outputs={"itp": path, "gro": path})
-    """
-    import time as _time
-    _start = _time.time()
+    inp: SobtopInput
+    work_dir: Path | None = None
 
-    # ── 预检 ──
+    def expected_outputs(self) -> dict[str, Path]:
+        _validate_output_name(self.inp.output_name)
+        work_dir = self.work_dir or SOBTOP_DIR
+        return {
+            "top": work_dir / f"{self.inp.output_name}.top",
+            "itp": work_dir / f"{self.inp.output_name}.itp",
+            "gro": work_dir / f"{self.inp.output_name}.gro",
+        }
+
+    def build(self) -> str:
+        outputs = self.expected_outputs()
+        lines = [
+            str(Path(self.inp.mol2).resolve()),
+            "7",
+            "10",
+            str(Path(self.inp.chg).resolve()),
+            "0",
+            "1",
+            "2",
+            "4",
+            str(outputs["top"]),
+            str(outputs["itp"]),
+            "2",
+            str(outputs["gro"]),
+            "0",
+        ]
+        return "\n".join(lines) + "\n"
+
+
+class SobtopWorkspaceLock:
+    """A process-wide advisory lock around Sobtop's shared vendor directory."""
+
+    def __enter__(self) -> "SobtopWorkspaceLock":
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = _LOCK_PATH.open("a+")
+        fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        self._handle.close()
+
+
+def _validate_output_name(output_name: str) -> None:
+    validate_topology_output_name(output_name)
+
+
+def _cleanup_expected_outputs(paths: Iterable[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _raw_output(result: subprocess.CompletedProcess[str]) -> str:
+    return ((result.stdout or "") + "\n" + (result.stderr or ""))[-1000:].strip()
+
+
+def _failure(
+    inp: SobtopInput,
+    start: float,
+    message: str,
+    *,
+    raw_output: str = "",
+    kind: ErrorKind = ErrorKind.SOBTOP_FAILED,
+) -> StepResult:
+    return StepResult(
+        step_name="topo_gaff",
+        step_index=4,
+        success=False,
+        error=StepError(
+            kind=kind,
+            message=f"{inp.output_name}: {message}",
+            raw_output=raw_output[-1000:],
+            hint="检查本次运行目录内的 .mol2/.chg，或重试 Sobtop GAFF+UFF 后端。",
+        ),
+        duration_s=time.monotonic() - start,
+    )
+
+
+def make_itp_gro(inp: SobtopInput, output_dir: str | None = None) -> StepResult:
+    """Run Sobtop and return only validated current-process ITP/GRO artifacts."""
+    start = time.monotonic()
+    if not output_dir:
+        return _failure(
+            inp, start, "必须提供当前 run 的 output_dir",
+            kind=ErrorKind.INPUT_CONTRACT,
+        )
+    if not Path(inp.mol2).is_file() or not Path(inp.chg).is_file():
+        missing = [path for path in (inp.mol2, inp.chg) if not Path(path).is_file()]
+        return _failure(inp, start, f"缺少输入文件: {', '.join(missing)}", kind=ErrorKind.FILE_NOT_FOUND)
+
     issues = check_sobtop_ready()
     if issues:
-        return StepResult(
-            step_name="topo_gaff", step_index=4, success=False,
-            error=StepError(kind=ErrorKind.DEPENDENCY_MISSING,
-                            message="Sobtop 环境未就绪",
-                            raw_output="\n".join(issues),
-                            hint="安装 Sobtop 并确保 vendor/sobtop/ 下有 sobtop 可执行文件"),
-            duration_s=_time.time() - _start,
-        )
+        return _failure(inp, start, "Sobtop 环境未就绪", raw_output="\n".join(issues),
+                        kind=ErrorKind.DEPENDENCY_MISSING)
 
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    # ── 构建交互输入序列 ──
-    lines = []
-    mol2_abs = str(Path(inp.mol2).resolve())
-    lines.append(mol2_abs)
-    chg_abs = str(Path(inp.chg).resolve())
-    lines.append("7")
-    lines.append("10")
-    lines.append(chg_abs)
-    lines.append("0")
-    lines.append("2")
-    lines.append("")
-    lines.append("1")
-    at_opt = "2" if inp.gaff else "1"
-    lines.append(at_opt)
-    if inp.hessian:
-        lines.append("7")
-        lines.append(str(Path(inp.hessian).resolve()))
-    else:
-        lines.append("4")
-    lines.append("")
-    lines.append("")
-    stdin_str = "\n".join(lines) + "\n"
-
-    # ── 调用 Sobtop ──
     try:
-        result = subprocess.run(
-            [str(SOBTOP_BIN)],
-            input=stdin_str,
-            capture_output=True,
-            text=True,
-            cwd=str(SOBTOP_DIR),
-            timeout=120,
-            env={**os.environ, "OMP_NUM_THREADS": "1"},
-        )
-    except subprocess.TimeoutExpired:
-        return StepResult(
-            step_name="topo_gaff", step_index=4, success=False,
-            error=StepError(kind=ErrorKind.TIMEOUT,
-                            message=f"{inp.output_name}: Sobtop 超时 (120s)",
-                            hint="检查 .mol2/.chg 文件是否过大或损坏"),
-            duration_s=_time.time() - _start,
-        )
+        builder = SobtopInputBuilder(inp)
+        vendor_outputs = builder.expected_outputs()
+        stdin_text = builder.build()
+    except ValueError as exc:
+        return _failure(inp, start, str(exc), kind=ErrorKind.CONFIG_INVALID)
 
-    # ── 取回需要的文件（.itp + .gro），删除 .top ──
-    outputs: dict[str, Path] = {}
-    artifacts: list[str] = []
+    run_dir = Path(output_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_outputs = {kind: run_dir / path.name for kind, path in vendor_outputs.items()}
 
-    src_itp = SOBTOP_DIR / f"{inp.output_name}.itp"
-    if src_itp.exists():
-        dst = out / f"{inp.output_name}.itp"
-        shutil.copy2(src_itp, dst)
-        src_itp.unlink()
-        outputs["itp"] = dst
-        artifacts.append(str(dst))
-        print(f"[sobtop] ✅ itp: {dst}")
+    with SobtopWorkspaceLock():
+        _cleanup_expected_outputs(vendor_outputs.values())
+        _cleanup_expected_outputs(run_outputs.values())
+        try:
+            try:
+                started_ns = time.time_ns()
+                result = run_managed_command(
+                    [str(SOBTOP_BIN)],
+                    input_text=stdin_text,
+                    cwd=SOBTOP_DIR,
+                    timeout=120,
+                    env={**os.environ, "OMP_NUM_THREADS": "1"},
+                    run_dir=run_dir,
+                )
+            except subprocess.TimeoutExpired:
+                return _failure(inp, start, "Sobtop 超时 (120s)", kind=ErrorKind.TIMEOUT)
+            except OSError as exc:
+                return _failure(
+                    inp,
+                    start,
+                    f"无法启动 Sobtop: {exc}",
+                    kind=ErrorKind.DEPENDENCY_MISSING,
+                )
 
-    src_gro = SOBTOP_DIR / f"{inp.output_name}.gro"
-    if src_gro.exists():
-        dst = out / f"{inp.output_name}.gro"
-        shutil.copy2(src_gro, dst)
-        src_gro.unlink()
-        outputs["gro"] = dst
-        artifacts.append(str(dst))
-        print(f"[sobtop] ✅ gro: {dst}")
+            if result.returncode not in {0, 24}:
+                return _failure(inp, start, f"Sobtop 退出码={result.returncode}", raw_output=_raw_output(result))
 
-    src_top = SOBTOP_DIR / f"{inp.output_name}.top"
-    if src_top.exists():
-        src_top.unlink()
+            not_current = [
+                str(path) for path in vendor_outputs.values()
+                if not path.is_file() or path.stat().st_mtime_ns < started_ns
+            ]
+            if not_current:
+                return _failure(
+                    inp,
+                    start,
+                    "未生成本次运行所需的临时输出: " + ", ".join(not_current),
+                    raw_output=_raw_output(result),
+                )
 
-    # ── 检查 ──
-    if len(outputs) < 2:
-        missing = [k for k in ["itp", "gro"] if k not in outputs]
-        raw = (result.stdout[-500:] if result.stdout else "") + "\n" + \
-              (result.stderr[-500:] if result.stderr else "")
-        print(f"[sobtop] ❌ 缺失文件: {missing}")
-        print(f"[sobtop] stdout tail: {result.stdout[-500:]}")
-        print(f"[sobtop] stderr tail: {result.stderr[-500:]}")
-        return StepResult(
-            step_name="topo_gaff", step_index=4, success=False,
-            error=StepError(kind=ErrorKind.SOBTOP_FAILED,
-                            message=f"{inp.output_name}: Sobtop 未生成完整输出（缺失 {missing}）",
-                            raw_output=raw.strip()[-500:],
-                            hint="检查 .mol2 和 .chg 格式是否正确，或尝试 LigParGen 替代"),
-            artifacts=artifacts,
-            duration_s=_time.time() - _start,
-        )
+            validation = validate_topology_files(
+                vendor_outputs["itp"], vendor_outputs["gro"],
+                step_name="topo_gaff", error_kind=ErrorKind.SOBTOP_FAILED,
+                expected_moleculetype=inp.output_name,
+            )
+            if not validation.success:
+                validation.duration_s = time.monotonic() - start
+                return validation
 
-    if result.returncode != 0:
-        print(f"[sobtop] ⚠  Sobtop 退出码={result.returncode}（输出文件正常，可忽略）")
-
-    duration = _time.time() - _start
-    return StepResult(
-        step_name="topo_gaff", step_index=4, success=True,
-        outputs={k: str(v) for k, v in outputs.items()},
-        artifacts=artifacts,
-        duration_s=duration,
-        extra={"returncode": result.returncode},
-    )
-
-
-# ============================================================
-# 快捷函数
-# ============================================================
-
-def batch_make_topo(mol2_dir: str = "struct",
-                    chg_dir: str = "struct",
-                    output_dir: str = "topo",
-                    ) -> list[StepResult]:
-    """
-    批量处理：对 mol2_dir 下所有 .mol2，用 chg_dir 下同名 .chg 生成 .itp + .gro。
-
-    Returns:
-        List[StepResult] —— 每个分子一个结果
-    """
-    results: list[StepResult] = []
-    for mol2 in sorted(Path(mol2_dir).glob("*.mol2")):
-        name = mol2.stem
-        chg = Path(chg_dir) / f"{name}.chg"
-        if not chg.exists():
-            print(f"[sobtop] ⚠ {name}: 找不到 {chg}，跳过")
-            results.append(StepResult(
-                step_name="topo_gaff", step_index=4, success=False,
-                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
-                                message=f"{name}: 找不到 {chg}",
-                                hint="先运行 RESP 电荷计算 (chg_maker)"),
-            ))
-            continue
-        sr = make_itp_gro(
-            TopMakerInput(mol2=str(mol2), chg=str(chg), output_name=name),
-            output_dir=output_dir,
-        )
-        results.append(sr)
-
-    ok = sum(1 for r in results if r.success)
-    print(f"[sobtop] 完成: {ok}/{len(results)} 个分子")
-    return results
+            shutil.copy2(vendor_outputs["itp"], run_outputs["itp"])
+            shutil.copy2(vendor_outputs["gro"], run_outputs["gro"])
+            if result.returncode == 24:
+                accepted_rc24 = True
+            else:
+                accepted_rc24 = False
+            return StepResult(
+                step_name="topo_gaff",
+                step_index=4,
+                success=True,
+                outputs={"itp": str(run_outputs["itp"]), "gro": str(run_outputs["gro"])},
+                artifacts=[str(run_outputs["itp"]), str(run_outputs["gro"])],
+                duration_s=time.monotonic() - start,
+                extra={
+                    "returncode": result.returncode,
+                    "accepted_rc24": accepted_rc24,
+                    **validation.extra,
+                },
+            )
+        finally:
+            _cleanup_expected_outputs(vendor_outputs.values())
 
 
-# ============================================================
-# 测试入口
-# ============================================================
-
-if __name__ == "__main__":
-    # 测试单个：struct/DME.mol2 + struct/DME.chg
-    print("===== 测试: DME.mol2 + DME.chg =====")
-    r = make_itp_gro(
-        TopMakerInput(mol2="struct/DME.mol2", chg="struct/DME.chg",
-                      output_name="DME"),
-        output_dir="topo",
-    )
-    print(f"生成: {list(r.keys())}")
+def batch_make_topo(inputs: Iterable[SobtopInput], output_dir: str) -> list[StepResult]:
+    """Parameterize explicit plan inputs; this function never scans directories."""
+    return [make_itp_gro(inp, output_dir=output_dir) for inp in inputs]

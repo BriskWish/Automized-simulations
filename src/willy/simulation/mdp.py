@@ -1,294 +1,352 @@
-"""
-mdp.py
-============
-GROMACS .mdp 文件生成器。
-
-每次运行批量生成 em.mdp / eq.mdp / prod.mdp → ./process/
-
-入参从 config.json 的 md 段读取，方便后续 AI 修改。
-"""
+"""Versioned GROMACS MDP generation for EM, NPT EQ, and PROD."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Collection, Optional
+from typing import Any, Collection
 import json
-import math
 
-from willy._paths import get_project_root
-from willy.errors import StepResult, StepError, ErrorKind
+from willy.errors import ErrorKind, StepError, StepResult
+from willy.simulation.protocol import (
+    EQ_SEGMENT_NAMES,
+    MDConfigError,
+    eq_annealing_points,
+    eq_total_ns,
+    ns_to_nsteps,
+    require_valid_md_config,
+)
+from willy.step_registry import MDP_STEP
 
 
-# ── 常量（不随 config 变的固有值） ──
-ROOT = get_project_root()
-PROCESS_DIR = ROOT / "process"
-
-
-# ============================================================
-# 入参层
-# ============================================================
-
-@dataclass
+@dataclass(frozen=True)
 class MdpConfig:
-    """MD 参数配置。从 config.json 的 md 段读取。"""
-    dt: float = 0.001               # 时间步长 (ps)
-    ref_t: float = 298.15           # 参考温度 (K)
-    ref_p: float = 1.01325          # 参考压力 (bar)
-    eq_ns: float = 10.0             # 平衡时长 (ns)
-    prod_ns: float = 10.0           # 产出时长 (ns)
-    tcoupl: str = "V-rescale"       # 热浴算法
-    tau_t: float = 0.5              # 热浴耦合常数 (ps)
-    pcoupl: str = "C-rescale"       # 压浴算法
-    pcoupltype: str = "isotropic"   # 压力耦合类型
-    compressibility: str = "8.5e-5" # 压缩系数 (bar⁻¹)
-    constraints: str = "hbonds"     # 约束算法
-    rcoulomb: float = 1.0           # 库仑截断 (nm)
-    rvdw: float = 1.0               # VDW 截断 (nm)
-    coulombtype: str = "PME"        # 长程静电算法
-    vdwtype: str = "Cut-off"        # VDW 类型
+    """Validated v2 protocol plus a run-specific random seed."""
 
-    # 产出阶段的热浴/压浴参数（可能与 eq 不同）
-    tau_p_prod: float = 2.0         # prod 阶段 τ_p（比 eq 宽松）
+    values: dict[str, Any]
+    run_seed: int
+    warnings: tuple[str, ...]
+
+    @property
+    def dt(self) -> float:
+        return float(self.values["dt"])
+
+
+def _lines(*lines: str) -> str:
+    return chr(10).join(lines) + chr(10)
 
 
 def load_mdp_config(config_path: str = "config.json") -> MdpConfig:
-    """从 config.json 读取 MD 参数。"""
-    with open(config_path) as f:
-        data = json.load(f)
-    md = data.get("md", {})
-    return MdpConfig(
-        dt=md.get("dt", 0.001),
-        ref_t=md.get("ref_t", 298.15),
-        ref_p=md.get("ref_p", 1.01325),
-        eq_ns=md.get("eq_ns", 10.0),
-        prod_ns=md.get("prod_ns", 10.0),
-        tcoupl=md.get("tcoupl", "V-rescale"),
-        tau_t=md.get("tau_t", 0.5),
-        pcoupl=md.get("pcoupl", "C-rescale"),
-        pcoupltype=md.get("pcoupltype", "isotropic"),
-        compressibility=str(md.get("compressibility", "8.5e-5")),
-        constraints=md.get("constraints", "hbonds"),
-        rcoulomb=md.get("rcoulomb", 1.0),
-        rvdw=md.get("rvdw", 1.0),
-        coulombtype=md.get("coulombtype", "PME"),
-        vdwtype=md.get("vdwtype", "Cut-off"),
-        tau_p_prod=md.get("tau_p_prod", 2.0),
-    )
+    """Read only the v2 protocol; legacy duration fields are rejected."""
+    with open(config_path) as handle:
+        data = json.load(handle)
+    normalized, warnings = require_valid_md_config(data.get("md", {}))
+    raw_seed = normalized.get("run_seed", normalized.get("seed", 1))
+    try:
+        run_seed = int(raw_seed)
+    except (TypeError, ValueError) as exc:
+        raise MDConfigError("md.run_seed 必须是整数") from exc
+    if run_seed <= 0:
+        raise MDConfigError("md.run_seed 必须为正整数")
+    return MdpConfig(normalized, run_seed, warnings)
 
-
-# ============================================================
-# 各阶段模板
-# ============================================================
 
 def _common_preamble(cfg: MdpConfig) -> str:
-    """EM/EQ/PROD 的公共头部（PBC + 静电 + VDW）。"""
-    return f"""pbc = xyz
-cutoff-scheme = Verlet
-coulombtype   = {cfg.coulombtype}
-rcoulomb      = {cfg.rcoulomb}
-vdwtype       = {cfg.vdwtype}
-rvdw          = {cfg.rvdw}
-DispCorr      = EnerPres"""
+    md = cfg.values
+    return _lines(
+        "pbc = xyz",
+        "cutoff-scheme = Verlet",
+        f"coulombtype   = {md['coulombtype']}",
+        f"rcoulomb      = {md['rcoulomb']}",
+        f"vdwtype       = {md['vdwtype']}",
+        f"rvdw          = {md['rvdw']}",
+        f"DispCorr      = {md['dispersion_correction']}",
+    ).rstrip()
 
 
-def _build_em(cfg: MdpConfig) -> str:
-    """能量最小化 .mdp。"""
-    return f"""
-integrator = cg
-nsteps = 10000
-emtol  = 100.0
-emstep = 0.01
-;
-nstxout   = 100
-nstlog    = 50
-nstenergy = 50
-;
-{_common_preamble(cfg)}
-;
-constraints = none
-"""
+def _trajectory_output_controls(cfg: MdpConfig) -> str:
+    trr_interval = 1000 if cfg.values["outputs"].get("trr", False) else 0
+    return _lines(
+        f"nstxout   = {trr_interval}",
+        f"nstvout   = {trr_interval}",
+        f"nstfout   = {trr_interval}",
+        "nstxout-compressed = 1000",
+        "compressed-x-grps  = system",
+        "nstlog = 500",
+        "nstenergy = 500",
+        "nstcheckpoint = 1000",
+    ).rstrip()
 
 
-def _build_eq(cfg: MdpConfig) -> str:
-    """NPT 平衡 .mdp（含退火）。"""
-    nsteps = int(cfg.eq_ns * 1000 / cfg.dt)  # ns → ps → steps
-
-    return f"""define =
-integrator = md
-
-dt         = {cfg.dt}
-nsteps     = {nsteps}
-comm-grps  = system
-energygrps =
-;
-nstxout = 0
-nstvout = 0
-nstfout = 0
-nstlog  = 500
-nstenergy = 500
-nstxout-compressed = 1000
-compressed-x-grps  = system
-;
-annealing = single
-annealing_npoints = 7
-annealing_time = 0 1000 3000 4000 6000 7000 12000
-annealing_temp = 298 500 500 400 400 298 298
-;
-{_common_preamble(cfg)}
-;
-Tcoupl  = {cfg.tcoupl}
-tau_t   = {cfg.tau_t}
-tc_grps = system
-ref_t   = {cfg.ref_t}
-;
-
-Pcoupl     = {cfg.pcoupl}
-pcoupltype = {cfg.pcoupltype}
-tau_p = 1
-ref_p = {cfg.ref_p}
-compressibility = {cfg.compressibility}
-;
-gen_vel  = no
-gen_temp = {cfg.ref_t}
-gen_seed = -1
-;
-freezegrps  =
-freezedim   =
-constraints = {cfg.constraints}
-"""
+def _coupling_controls(
+    cfg: MdpConfig,
+    *,
+    tau_p: float,
+    temperature: float,
+    gen_vel: bool,
+) -> str:
+    md = cfg.values
+    return _lines(
+        f"Tcoupl  = {md['tcoupl']}",
+        f"tau_t   = {md['tau_t']}",
+        "tc_grps = system",
+        f"ref_t   = {temperature}",
+        ";",
+        f"Pcoupl     = {md['pcoupl']}",
+        f"pcoupltype = {md['pcoupltype']}",
+        f"tau_p = {tau_p}",
+        f"ref_p = {md['ref_p']}",
+        f"compressibility = {md['compressibility']}",
+        ";",
+        f"gen_vel  = {'yes' if gen_vel else 'no'}",
+        f"gen_temp = {temperature}",
+        f"gen_seed = {cfg.run_seed}",
+        ";",
+        f"constraints = {md['constraints']}",
+        f"lincs_iter = {md['lincs_iter']}",
+        f"lincs_order = {md['lincs_order']}",
+    ).rstrip()
 
 
-def _build_prod(cfg: MdpConfig) -> str:
-    """产出阶段 .mdp（无退火，tau_p 更宽松）。"""
-    nsteps = int(cfg.prod_ns * 1000 / cfg.dt)
-
-    return f"""define =
-integrator = md
-
-dt         = {cfg.dt}
-nsteps     = {nsteps}
-comm-grps  = system
-energygrps =
-;
-nstxout = 0
-nstvout = 0
-nstfout = 0
-nstlog  = 500
-nstenergy = 500
-nstxout-compressed = 1000
-compressed-x-grps  = system
-;
-{_common_preamble(cfg)}
-;
-Tcoupl  = {cfg.tcoupl}
-tau_t   = {cfg.tau_t}
-tc_grps = system
-ref_t   = {cfg.ref_t}
-;
-
-Pcoupl     = {cfg.pcoupl}
-pcoupltype = {cfg.pcoupltype}
-tau_p = {cfg.tau_p_prod}
-ref_p = {cfg.ref_p}
-compressibility = {cfg.compressibility}
-;
-gen_vel  = no
-gen_temp = {cfg.ref_t}
-gen_seed = -1
-;
-freezegrps  =
-freezedim   =
-constraints = {cfg.constraints}
-"""
+def _build_em(cfg: MdpConfig) -> tuple[str, dict[str, Any]]:
+    md = cfg.values
+    content = _lines(
+        "; Willy MD schema v2 | stage=em",
+        "integrator = cg",
+        f"nsteps = {md['nsteps']}",
+        f"emtol  = {md['emtol']}",
+        f"emstep = {md['emstep']}",
+        ";",
+        _trajectory_output_controls(cfg),
+        ";",
+        _common_preamble(cfg),
+        ";",
+        "constraints = none",
+    )
+    return content, {"nsteps": int(md["nsteps"]), "actual_ns": 0.0}
 
 
-# ============================================================
-# 批量生成
-# ============================================================
+def _format_points(points: list[float]) -> str:
+    return " ".join(f"{value:.9g}" for value in points)
+
+
+def _build_eq(cfg: MdpConfig) -> tuple[str, dict[str, Any]]:
+    md = cfg.values
+    eq = md["eq"]
+    times_ps, temperatures, actual_segments = eq_annealing_points(md)
+    nsteps, actual_total_ns = ns_to_nsteps(eq_total_ns(md), cfg.dt)
+    requested_total_ns = eq_total_ns(md)
+    content = _lines(
+        "; Willy MD schema v2 | stage=eq",
+        f"; requested_total_ns = {requested_total_ns:.9g}",
+        f"; actual_total_ns = {actual_total_ns:.9g}",
+        "integrator = md",
+        f"dt = {cfg.dt}",
+        f"nsteps = {nsteps}",
+        "comm-grps = system",
+        "energygrps =",
+        ";",
+        _trajectory_output_controls(cfg),
+        ";",
+        "annealing = single",
+        "annealing_npoints = 7",
+        f"annealing_time = {_format_points(times_ps)}",
+        f"annealing_temp = {_format_points(temperatures)}",
+        ";",
+        _common_preamble(cfg),
+        ";",
+        _coupling_controls(
+            cfg,
+            tau_p=float(eq["tau_p"]),
+            temperature=float(eq["target_temperature"]),
+            gen_vel=True,
+        ),
+    )
+    return content, {
+        "requested_ns": requested_total_ns,
+        "actual_ns": actual_total_ns,
+        "nsteps": nsteps,
+        "annealing_time_ps": times_ps,
+        "annealing_temperature_k": temperatures,
+        "segments": {
+            name: {
+                "requested_ns": float(eq["segments_ns"][name]),
+                "actual_ns": actual_segments[name],
+            }
+            for name in EQ_SEGMENT_NAMES
+        },
+        "acceptance_window_ns": float(eq["acceptance"]["window_ns"]),
+    }
+
+
+def _build_prod(cfg: MdpConfig) -> tuple[str, dict[str, Any]]:
+    md = cfg.values
+    prod = md["prod"]
+    nsteps, actual_ns = ns_to_nsteps(float(prod["duration_ns"]), cfg.dt)
+    content = _lines(
+        "; Willy MD schema v2 | stage=prod",
+        f"; requested_total_ns = {float(prod['duration_ns']):.9g}",
+        f"; actual_total_ns = {actual_ns:.9g}",
+        "integrator = md",
+        f"dt = {cfg.dt}",
+        f"nsteps = {nsteps}",
+        "comm-grps = system",
+        "energygrps =",
+        ";",
+        _trajectory_output_controls(cfg),
+        ";",
+        _common_preamble(cfg),
+        ";",
+        _coupling_controls(
+            cfg,
+            tau_p=float(prod["tau_p"]),
+            temperature=float(prod["temperature"]),
+            gen_vel=False,
+        ),
+    )
+    return content, {
+        "requested_ns": float(prod["duration_ns"]),
+        "actual_ns": actual_ns,
+        "nsteps": nsteps,
+        "temperature": float(prod["temperature"]),
+    }
+
 
 _BUILDERS = {
-    "em":   ("em.mdp",   _build_em),
-    "eq":   ("eq.mdp",   _build_eq),
+    "em": ("em.mdp", _build_em),
+    "eq": ("eq.mdp", _build_eq),
     "prod": ("prod.mdp", _build_prod),
 }
 
 
-def build_all(config_path: str = "config.json",
-              output_dir: str = "process",
-              overrides: dict = None,
-              stages: Collection[str] | None = None) -> StepResult:
-    """
-    批量生成 em.mdp / eq.mdp / prod.mdp。
+def _apply_overrides(values: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
+    """Apply only explicit v2 paths; legacy aliases are deliberately rejected."""
+    if not overrides:
+        return values
+    result = json.loads(json.dumps(values))
+    aliases = {
+        "eq_target_temperature": ("eq", "target_temperature"),
+        "prod_duration_ns": ("prod", "duration_ns"),
+        "prod_temperature": ("prod", "temperature"),
+        "eq_tau_p": ("eq", "tau_p"),
+        "prod_tau_p": ("prod", "tau_p"),
+    }
+    for key, value in overrides.items():
+        if key in {"eq_ns", "prod_ns", "ref_t", "tau_p_prod", "tau_p"}:
+            raise MDConfigError(f"{key} 是旧 MD 参数；请使用 v2 分段字段")
+        if key in aliases:
+            section, field = aliases[key]
+            result[section][field] = value
+        elif key == "eq_segments_ns":
+            if not isinstance(value, dict):
+                raise MDConfigError("eq_segments_ns 必须是六段对象")
+            result["eq"]["segments_ns"].update(value)
+        elif key == "eq_acceptance":
+            if not isinstance(value, dict):
+                raise MDConfigError("eq_acceptance 必须是对象")
+            result["eq"]["acceptance"].update(value)
+        elif key in result:
+            result[key] = value
+        else:
+            raise MDConfigError(f"不支持的 MDP 覆盖字段: {key}")
+    return result
 
-    Args:
-        config_path: config.json 路径
-        output_dir: 输出目录
-        overrides: 参数字典，覆盖 config.json 中的对应字段（供 Agent 重试用）
-        stages: 要生成的阶段；None 表示生成 em、eq、prod 全部阶段
 
-    Returns:
-        StepResult (success=True 时 outputs={"em": path, "eq": path, "prod": path})
-    """
+def build_all(
+    config_path: str = "config.json",
+    output_dir: str = "process",
+    overrides: dict | None = None,
+    stages: Collection[str] | None = None,
+    on_progress=None,
+) -> StepResult:
+    """Build MDPs and record rounded physical durations in mdp_metadata.json."""
     import time as _time
-    _start = _time.time()
 
+    started_at = _time.time()
     try:
-        cfg = load_mdp_config(config_path)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
+        loaded = load_mdp_config(config_path)
+        values = _apply_overrides(loaded.values, overrides)
+        values, override_warnings = require_valid_md_config(values)
+        cfg = MdpConfig(values, loaded.run_seed, tuple((*loaded.warnings, *override_warnings)))
+    except (FileNotFoundError, json.JSONDecodeError, MDConfigError) as exc:
         return StepResult(
-            step_name="mdp", step_index=6, success=False,
-            error=StepError(kind=ErrorKind.CONFIG_INVALID,
-                            message=f"无法读取 config.json: {e}",
-                            hint="检查 config.json 格式是否正确"),
-            duration_s=_time.time() - _start,
+            step_name="mdp", step_index=MDP_STEP, success=False,
+            error=StepError(
+                kind=ErrorKind.INPUT_CONTRACT,
+                message=f"MD 协议配置无效: {exc}",
+                hint="使用 v2 md.eq/md.prod 配置；旧 eq_ns/prod_ns 必须先显式迁移",
+            ),
+            duration_s=_time.time() - started_at,
         )
 
-    # 应用参数覆盖
-    if overrides:
-        for k, v in overrides.items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-
-    selected_stages = tuple(_BUILDERS) if stages is None else tuple(stages)
-    unknown_stages = set(selected_stages) - _BUILDERS.keys()
-    if not selected_stages or unknown_stages:
-        invalid = ", ".join(sorted(unknown_stages)) or "空阶段列表"
+    selected = tuple(_BUILDERS) if stages is None else tuple(stages)
+    unknown = set(selected) - _BUILDERS.keys()
+    if not selected or unknown:
+        invalid = ", ".join(sorted(unknown)) or "空阶段列表"
         return StepResult(
-            step_name="mdp", step_index=6, success=False,
-            error=StepError(kind=ErrorKind.CONFIG_INVALID,
-                            message=f"未知 MDP 阶段: {invalid}",
-                            hint="可用阶段为 em、eq、prod"),
-            duration_s=_time.time() - _start,
+            step_name="mdp", step_index=MDP_STEP, success=False,
+            error=StepError(ErrorKind.INPUT_CONTRACT, f"未知 MDP 阶段: {invalid}"),
+            duration_s=_time.time() - started_at,
         )
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-
-    results: dict[str, Path] = {}
+    outputs: dict[str, str] = {}
     artifacts: list[str] = []
-    for stage in selected_stages:
-        fname, builder = _BUILDERS[stage]
-        content = builder(cfg).lstrip("\n")
-        path = out / fname
-        path.write_text(content)
-        results[stage] = path
+    metadata = {
+        "schema_version": 1,
+        "md_schema_version": values["schema_version"],
+        "run_seed": cfg.run_seed,
+        "protocol_controls": {
+            "tcoupl": values["tcoupl"],
+            "pcoupl": values["pcoupl"],
+            "pcoupltype": values["pcoupltype"],
+            "compressibility": values["compressibility"],
+            "rcoulomb": values["rcoulomb"],
+            "rvdw": values["rvdw"],
+            "dispersion_correction": values["dispersion_correction"],
+        },
+        "stages": {},
+        "warnings": list(cfg.warnings),
+    }
+    for current, stage in enumerate(selected, 1):
+        if on_progress:
+            on_progress({
+                "tool": "MDP", "operation": "参数生成",
+                "target_type": "stage", "target": stage,
+                "current": current, "total": len(selected),
+            })
+        filename, builder = _BUILDERS[stage]
+        content, stage_metadata = builder(cfg)
+        path = out / filename
+        path.write_text(content.lstrip(chr(10)))
+        outputs[stage] = str(path)
         artifacts.append(str(path))
-        nsteps = content.split("nsteps")[1].split()[0] if "nsteps" in content else "N/A"
-        print(f"[mdp] ✅ {fname}  (nsteps → {nsteps})")
+        metadata["stages"][stage] = stage_metadata
 
-    duration = _time.time() - _start
-    print(f"[mdp] 完成: {len(results)} 个 .mdp → {out}/  ({duration:.1f}s)")
+    metadata_path = out / "mdp_metadata.json"
+    previous: dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            previous = json.loads(metadata_path.read_text())
+        except json.JSONDecodeError:
+            previous = {}
+    prior_stages = previous.get("stages", {})
+    if isinstance(prior_stages, dict):
+        prior_stages.update(metadata["stages"])
+        metadata["stages"] = prior_stages
+    previous.update(metadata)
+    metadata_path.write_text(json.dumps(previous, ensure_ascii=False, indent=2) + chr(10))
+    outputs["metadata"] = str(metadata_path)
+    artifacts.append(str(metadata_path))
     return StepResult(
-        step_name="mdp", step_index=6, success=True,
-        outputs={k: str(v) for k, v in results.items()},
+        step_name="mdp", step_index=MDP_STEP, success=True,
+        outputs=outputs,
         artifacts=artifacts,
-        duration_s=duration,
+        duration_s=_time.time() - started_at,
+        extra={"warnings": list(cfg.warnings), "mdp_metadata": metadata},
     )
 
-
-# ============================================================
-# 测试入口
-# ============================================================
 
 if __name__ == "__main__":
     build_all("config.json", "process")

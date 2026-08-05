@@ -53,6 +53,19 @@ class TestQuantumToolDefinitions:
             props = tool["function"]["parameters"].get("properties", {})
             assert isinstance(props, dict)
 
+    def test_retry_tools_use_current_fchk_contract(self, quantum_tools):
+        """mol2 和 RESP 重试都必须消费 Step 2 的 *_opt.fchk。"""
+        definitions = {tool["function"]["name"]: tool["function"]
+                       for tool in quantum_tools}
+        for name in {
+            "tools_retry_mol2_conversion",
+            "tools_retry_chg_g16",
+            "tools_retry_chg_orca",
+        }:
+            parameters = definitions[name]["parameters"]
+            assert "fchk_path" in parameters["properties"]
+            assert "fchk_path" in parameters["required"]
+
 
 # ============================================================
 # Quantum 工具处理程序
@@ -94,6 +107,28 @@ class TestQuantumToolHandler:
         finally:
             tq.ROOT = original_root
 
+    def test_modify_config_uses_the_active_run_snapshot(self, tmp_path):
+        """Agent 调整只影响当前运行，不得改写项目根配置。"""
+        from willy.toolist_quantum import handle_quantum_tool_call
+
+        root_config = tmp_path / "config.json"
+        root_config.write_text(json.dumps({"molecules": {"Li": {"basis": "old"}}}))
+        run_dir = tmp_path / "md_run" / "run-1"
+        run_dir.mkdir(parents=True)
+        run_config = run_dir / "config.json"
+        run_config.write_text(root_config.read_text())
+
+        parsed = json.loads(handle_quantum_tool_call(
+            "tools_modify_config_molecule",
+            {"molecule_name": "Li", "basis": "new"},
+            work_dir=str(run_dir),
+            config_path=str(run_config),
+        ))
+
+        assert parsed["ok"] is True
+        assert json.loads(run_config.read_text())["molecules"]["Li"]["basis"] == "new"
+        assert json.loads(root_config.read_text())["molecules"]["Li"]["basis"] == "old"
+
     def test_skip_molecule_quantum(self, tmp_project_root):
         """tools_skip_molecule_quantum 应将分子加入跳过列表。"""
         import willy.toolist_quantum as tq
@@ -126,6 +161,90 @@ class TestQuantumToolHandler:
         # 应返回错误或结果
         assert "_step_result" not in parsed or parsed.get("success") is False
 
+    def test_mol2_conversion_returns_step_result_for_malformed_fchk(self, tmp_path):
+        """fchk 解析异常不得从公开工具路径泄露。"""
+        from willy.toolist_quantum import handle_quantum_tool_call
+
+        fchk = tmp_path / "broken_opt.fchk"
+        fchk.write_text("not an fchk file\n")
+        parsed = json.loads(handle_quantum_tool_call(
+            "tools_retry_mol2_conversion", {"fchk_path": str(fchk)},
+        ))
+
+        assert parsed["_step_result"] is True
+        assert parsed["success"] is False
+        assert parsed["error_kind"] == ErrorKind.UNKNOWN.value
+
+    @pytest.mark.parametrize("missing_block", ["NBond", "IBond", "RBond"])
+    def test_mol2_conversion_rejects_missing_bond_connectivity(self, tmp_path, missing_block):
+        """缺失任一键连接字段时，不得生成可被 Sobtop 消费的 mol2。"""
+        from willy.quantum.fchk_mol2 import convert
+
+        blocks = {
+            "NBond": "NBond I N= 2\n1 1\n",
+            "IBond": "IBond I N= 2\n2 1\n",
+            "RBond": "RBond R N= 2\n1.0 1.0\n",
+        }
+        content = (
+            "Number of atoms I 2\n"
+            "Atomic numbers I N= 2\n6 1\n"
+            "Current cartesian coordinates R N= 6\n"
+            "0.0 0.0 0.0 0.0 0.0 1.0\n"
+            "MxBond I 1\n"
+            + "".join(value for name, value in blocks.items() if name != missing_block)
+        )
+        fchk = tmp_path / "incomplete_opt.fchk"
+        mol2 = tmp_path / "incomplete.mol2"
+        fchk.write_text(content)
+
+        result = convert(str(fchk), str(mol2))
+
+        assert result.success is False
+        assert result.error is not None
+        assert missing_block in result.error.message
+        assert not mol2.exists()
+
+    def test_mol2_conversion_rejects_incomplete_coordinates(self, tmp_path):
+        """原子数与坐标数组长度不一致时必须失败。"""
+        from willy.quantum.fchk_mol2 import convert
+
+        fchk = tmp_path / "truncated_opt.fchk"
+        mol2 = tmp_path / "truncated.mol2"
+        fchk.write_text(
+            "Number of atoms I 2\n"
+            "Atomic numbers I N= 2\n6 1\n"
+            "Current cartesian coordinates R N= 6\n"
+            "0.0 0.0 0.0 0.0 0.0\n"
+            "MxBond I 1\n"
+            "NBond I N= 2\n1 1\n"
+            "IBond I N= 2\n2 1\n"
+            "RBond R N= 2\n1.0 1.0\n"
+        )
+
+        result = convert(str(fchk), str(mol2))
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Current cartesian coordinates" in result.error.message
+        assert not mol2.exists()
+
+    @pytest.mark.parametrize("tool_name", [
+        "tools_retry_chg_g16",
+        "tools_retry_chg_orca",
+    ])
+    def test_chg_retry_reports_missing_explicit_fchk(self, tool_name, tmp_path):
+        """两种后端重试都基于同一显式 fchk 输入。"""
+        from willy.toolist_quantum import handle_quantum_tool_call
+
+        missing = tmp_path / "Li_opt.fchk"
+        parsed = json.loads(handle_quantum_tool_call(
+            tool_name, {"fchk_path": str(missing)},
+        ))
+
+        assert parsed["_step_result"] is True
+        assert parsed["success"] is False
+        assert parsed["error_kind"] == ErrorKind.FILE_NOT_FOUND.value
+
 
 # ============================================================
 # Topology 工具定义
@@ -156,6 +275,10 @@ class TestTopologyToolDefinitions:
         }
         missing = required - names
         assert not missing, f"缺少工具: {missing}"
+
+    def test_topology_config_tool_has_no_unused_default_charge(self, topology_tools):
+        modify_tool = next(tool for tool in topology_tools if tool["function"]["name"] == "tools_modify_config_topology")
+        assert "default_net_charge" not in modify_tool["function"]["parameters"]["properties"]
 
 
 # ============================================================
@@ -214,42 +337,25 @@ class TestTopologyToolHandler:
         parsed = json.loads(result)
         assert "_diagnosis" in parsed
 
-    def test_modify_config_topology(self, tmp_project_root):
-        """tools_modify_config_topology 应更新 config.json 的 topology 段。"""
-        import willy.toolist_topology as tt
-        original_root = tt.ROOT
-        tt.ROOT = tmp_project_root
-        try:
-            result = tt.handle_topology_tool_call("tools_modify_config_topology", {
-                "force_field": "opls",
-                "default_net_charge": -1,
-            })
-            parsed = json.loads(result)
-            assert parsed.get("ok") is True
+    def test_modify_config_requires_active_run(self, tmp_project_root):
+        """Topology config tools may only mutate an explicit run snapshot."""
+        from willy.toolist_topology import handle_topology_tool_call
 
-            saved = json.loads((tmp_project_root / "config.json").read_text())
-            assert saved["topology"]["force_field"] == "opls"
-            assert saved["topology"]["default_net_charge"] == -1
-        finally:
-            tt.ROOT = original_root
+        result = json.loads(handle_topology_tool_call(
+            "tools_modify_config_topology", {"default_lbcc": False},
+        ))
+        assert result["success"] is False
 
-    def test_skip_molecule_topology(self, tmp_project_root):
-        """tools_skip_molecule_topology 应将分子加入跳过列表。"""
-        import willy.toolist_topology as tt
-        original_root = tt.ROOT
-        tt.ROOT = tmp_project_root
-        try:
-            result = tt.handle_topology_tool_call("tools_skip_molecule_topology", {
-                "molecule_name": "UnstableMol",
-                "reason": "atomtype 无法解析",
-            })
-            parsed = json.loads(result)
-            assert parsed.get("ok") is True
+    def test_skip_molecule_topology_is_disabled(self, tmp_project_root):
+        """Skip must not leave manifest and residues inconsistent."""
+        from willy.toolist_topology import handle_topology_tool_call
 
-            saved = json.loads((tmp_project_root / "config.json").read_text())
-            assert "UnstableMol" in saved.get("skipped_molecules", [])
-        finally:
-            tt.ROOT = original_root
+        run_dir = tmp_project_root / "md_run" / "run-1"
+        run_dir.mkdir(parents=True)
+        result = json.loads(handle_topology_tool_call(
+            "tools_skip_molecule_topology", {"molecule_name": "UnstableMol"}, work_dir=str(run_dir),
+        ))
+        assert result["ok"] is False
 
 
 # ============================================================

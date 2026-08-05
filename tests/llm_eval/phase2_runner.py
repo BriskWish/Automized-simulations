@@ -1,8 +1,8 @@
 """
-phase2_runner.py —— Phase 2: 真实 LLM (DeepSeek) + Mock 工具执行。
+phase2_runner.py —— Phase 2: 真实 OpenAI-compatible LLM + Mock 工具执行。
 
 核心变化 (vs Phase 1):
-  - LLM 调用真实 DeepSeek API (真实的 tool-calling 决策)
+  - LLM 调用已配置的 OpenAI-compatible API (真实的 tool-calling 决策)
   - 工具执行结果由 MockToolExecutor 返回 (不运行外部程序)
   - 验证 Agent 的工具选择、诊断逻辑、重试策略是否合理
 
@@ -216,7 +216,7 @@ class Phase2Harness:
     """
     Phase 2 评估核心: 真实 LLM + Mock 工具。
 
-    - 使用真实的 DeepSeek API 进行 tool-calling
+    - 使用真实的 OpenAI-compatible API 进行 tool-calling
     - 工具执行结果由 MockToolExecutor 控制
     - 验证 Agent 的决策质量
     """
@@ -336,24 +336,16 @@ class Phase2Harness:
 # ============================================================
 
 def _init_llm_client():
-    """从环境变量或 .env 文件初始化 DeepSeek 客户端。"""
-    from willy._paths import get_project_root
+    """Create the project-configured OpenAI-compatible client for evaluation."""
+    from willy.llm_config import LLMConfigError, configured_llm_client
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        env_file = get_project_root() / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().split("\n"):
-                if line.startswith("DEEPSEEK_API_KEY="):
-                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-
-    if not api_key:
-        raise RuntimeError(
-            "DEEPSEEK_API_KEY 未设置。请在 .env 文件中设置或导出环境变量。"
-        )
-
-    from openai import OpenAI
-    return OpenAI(api_key=api_key, base_url="https://api.deepseek.com"), api_key
+    try:
+        client, settings = configured_llm_client()
+    except LLMConfigError as exc:
+        raise RuntimeError(f"LLM 配置无效：{exc}") from exc
+    if client is None or settings is None:
+        raise RuntimeError("未配置 OpenAI-compatible LLM 服务。")
+    return client, settings.model
 
 
 # ============================================================
@@ -363,11 +355,12 @@ def _init_llm_client():
 def run_phase2(
     scenarios: list[ErrorScenario],
     max_workers: int = 4,
-    model: str = "deepseek-chat",
+    model: str | None = None,
     dry_run: bool = False,
 ) -> list[EvalResult]:
     """并行执行所有场景, 返回评估结果。"""
-    client, api_key = _init_llm_client()
+    client, configured_model = _init_llm_client()
+    model = model or configured_model
     scorer = Scorer()
     results: list[EvalResult] = []
     results_lock = threading.Lock()
@@ -445,7 +438,7 @@ def _print_token_estimate(scenarios: list[ErrorScenario]):
     print(f"  预估输入 token:  {total_input/1000:.0f}K")
     print(f"  预估输出 token:  {total_output/1000:.0f}K")
     print(f"  预估总 token:    {(total_input+total_output)/1000:.0f}K")
-    # DeepSeek pricing
+    # This is a DeepSeek-specific historical estimate; other providers differ.
     cost = total_input/1e6 * 0.27 + total_output/1e6 * 1.10
     print(f"  预估费用:        ${cost:.2f}")
     print()

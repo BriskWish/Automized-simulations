@@ -1,240 +1,55 @@
-# Willy Project Gap Analysis
+# Willy 项目缺口与风险台账
 
-> Generated 2026-07-29 · Coverage: security, architecture, code quality, documentation, testing
+> 最后核验：2026-08-05。本文只记录当前可执行缺口；历史已解决事项列在文末，文档状态和责任人以 [`document_registry.md`](document_registry.md) 为准。
 
----
+## 使用规则
 
-## CRITICAL
+- 每个未解决问题必须有责任领域、事实依据和关闭条件。
+- 修复问题时，同一变更更新本台账、责任文档和测试；不能仅删除问题描述。
+- 不在本文记录真实密钥、私有运行数据或未脱敏日志。安全风险只记录处理要求和验收证据。
 
-### CRIT-1 — Hardcoded Live API Key in `.env`
+## 高优先级
 
-**File:** `.env`
+| 编号 | 缺口 | 责任领域 | 关闭条件 |
+|------|------|------|------|
+| H-1 | API key 与远程部署安全尚未形成可审计的发布策略。 | 0 号、4 号 | 密钥不进入仓库或日志；远程访问强制认证；部署说明和安全测试完成。 |
+| H-4 | 小体系 GROMACS smoke 已完成，但目标体系的科学收敛、警告白名单和可重放验收尚未建立。 | 3 号、6 号 | 每条主线有版本化输入、工具版本、摘要产物、验收阈值和受控证据。 |
+| H-5 | 日志主要为 `print()` 输出，缺少统一级别、run 关联和可归档的结构化日志。 | 0 号、3 号、4 号 | 建立统一日志接口，关键 run/步骤/错误可按 run_id 追踪，且不泄露敏感信息。 |
 
-A real DeepSeek API key is stored in plaintext. While `.env` is in `.gitignore`, any process or script that reads this file (e.g. `benchmarks/llm_score.py` line 14) can log or leak the key.
+## 中优先级
 
-**Fix:** Rotate the key immediately, replace with placeholder `DEEPSEEK_API_KEY=your_api_key_here`. Use `benchmarks/llm_score.py`'s own key loading path rather than reading `.env` directly.
+| 编号 | 缺口 | 责任领域 | 关闭条件 |
+|------|------|------|------|
+| M-1 | OPLS-AA 路径依赖 LigParGen/BOSS 环境；已具备 hash 校验 fixture/证据契约，但尚无真实最小执行成功记录。 | 2 号、6 号 | 目标验收机提供受控 bundle，external 运行保存成功的版本化执行证据。 |
+| M-2 | CI 已具备默认 regression、compileall/测试台账质量门禁及条件 self-hosted external gate，但尚未观察到远程全绿执行。 | 0 号、6 号 | CI 在支持 Python 版本安装 `.[test]`、导入包、执行 pytest/LLM mock eval，并至少保存一次 external 成功 artifact。 |
+| M-3 | 运行产物保留与 Git 忽略已规范化，但 vendor 二进制和示例数据的版本、来源与许可仍未完整定义。 | 0 号、5 号 | vendor 来源/许可清单、校验方式和示例数据边界齐备，并复核 run 保留策略。 |
+| M-4 | Run Assistant 仅完成只读 Phase A；错误解释、确认式控制、历史保留仍待分阶段实施。 | 0 号、3 号、4 号 | 按 `run_assistant_design.md` 的 Phase B-D 完成权限、审计与回归验收。 |
+| M-5 | 公开错误消息与类型提示仍有中英文混用，用户展示与开发诊断边界需统一。 | 0 号、4 号 | 定义面向用户与面向开发者的消息约定，并在公共路径测试。 |
 
-### CRIT-2 — Gradio Bound to `0.0.0.0`
+## 低优先级
 
-**File:** `app.py:172-173`
+| 编号 | 缺口 | 责任领域 | 关闭条件 |
+|------|------|------|------|
+| L-1 | 类型标注和静态检查尚未形成增量治理基线。 | 各领域、6 号 | 选定工具并从公共接口开始纳入 CI。 |
+| L-2 | `benchmarks/` 的定位仍偏混合，需明确它是离线评测、性能基准还是两者兼有。 | 0 号、6 号 | 目录职责、输入来源和运行命令写入文档。 |
 
-```python
-app.launch(server_name="0.0.0.0", server_port=7860, share=False, ...)
-```
+## 已关闭或已替代的历史项
 
-The Gradio UI is exposed on all network interfaces. An MD simulation control panel with shell-execution capability should not be reachable from the LAN without authentication.
-
-**Fix:** Change to `server_name="127.0.0.1"`, or add `auth=(username, password)` for remote access.
-
-### CRIT-3 — `tools_skip_molecule_simulation` Handler Exists but Tool Definition Missing
-
-**File:** `src/willy/toolist_simulation.py`
-
-The `handle_simulation_tool_call()` dispatch includes a `"tools_skip_molecule_simulation"` branch (line ~372), but the corresponding entry in `SIMULATION_TOOLS` (the JSON Schema list) is absent. The LLM never sees this tool — the Simulation Agent cannot skip molecules.
-
-**Fix:** Add the tool definition entry to `SIMULATION_TOOLS`.
-
----
-
-## HIGH
-
-### HIGH-1 — Zero Structured Logging — `print()` Only
-
-**Files:** entire `src/willy/` tree
-
-No `logging` module usage anywhere. ~70 bare `print()` calls across pipeline orchestrator, simulation executors, topology modules, and env checker. Consequences: no log levels, no file rotation, thread-unsafe in Gradio context, production runs undebuggable.
-
-**Fix:** Add `src/willy/_logging.py` with `logger = logging.getLogger("willy")`, replace all `print()` with `logger.info()`/`logger.warning()`/`logger.error()`.
-
-### HIGH-2 — No Simulation Layer Design Document
-
-**Files:** `docs/` directory
-
-`docs/quantum_design.md` and `docs/topology_design.md` exist. `docs/simulation_design.md` is missing. The 7-module simulation layer (MDP generation, Packmol box, GROMACS EM/EQ/PROD, convergence checks) has no design documentation.
-
-**Fix:** Write `docs/simulation_design.md` following the structure established by `quantum_design.md`.
-
-### HIGH-3 — 11 Bare `raise` Statements Not Wrapped as `StepResult`
-
-**Files:** `quantum/_orca_utils.py`, `quantum/resp_maker.py`, `quantum/mol2_g16.py`, `quantum/struct_g16.py`, `topology/topo_opls.py`, `simulation/box.py`, `topology/top_assembly.py`
-
-Consensus principle #1 in `employees.md` requires all pipeline functions to return `StepResult`. Eleven bare `raise RuntimeError`/`ValueError`/`FileNotFoundError` violations exist. These are caught by broad `except Exception` blocks in tool handlers but lose structured error context (`ErrorKind`, `hint`, `raw_output`).
-
-**Fix:** Wrap each `raise` in a `StepResult` with the appropriate `ErrorKind`.
-
-### HIGH-4 — `os.system()` Command Injection Risk in `frontend_api.py`
-
-**File:** `src/willy/frontend_api.py:79,89`
-
-```python
-os.system(f"pkill -9 -f '{name}' 2>/dev/null")
-os.system(f"rm -f {ROOT}/model.inp {ROOT}/model.pdb")
-```
-
-The `pkill` line is vulnerable to command injection if `name` contains single quotes or shell metacharacters. Currently `name` comes from a hardcoded list, but this is fragile.
-
-**Fix:** Replace with `subprocess.run([...], shell=False)` or use `os.kill(pid, signal.SIGKILL)`.
-
-### HIGH-5 — `shell=True` in 5 Subprocess Calls
-
-**Files:** `agent_config.py:148-150`, `simulation/eq.py:44-45`, `simulation/box.py:216-218`, `quantum/struct_g16.py:207-210,246-249`
-
-All five locations use `shell=True`. Some are justified (environment variable injection for Gaussian), but most can be refactored to `shell=False` with explicit argument lists.
-
-**Fix:** Convert to `shell=False` + `[cmd, arg1, arg2, ...]` where possible. Document remaining `shell=True` cases with inline comments explaining why.
-
-### HIGH-6 — `docs/lithium-salts.md` is an Orphaned 303-line Document
-
-**File:** `docs/lithium-salts.md`
-
-A comprehensive research document on lithium salt electrolyte design. Referenced by zero files in the entire codebase — no imports, no document includes, no README links. Either integrate it or remove it.
-
-**Fix:** Add a link in `README.md` under "更多文档", or consolidate relevant content into `knowledge.md`.
-
----
-
-## MEDIUM
-
-### MED-1 — Design Document Filenames Out of Sync with Actual Code
-
-| Design Doc Reference | Actual File |
+| 原问题 | 当前结论 |
 |------|------|
-| `sobtop_interface.py` | `topo_gaff.py` |
-| `ligpargen_interface.py` | `topo_opls.py` |
-| `top_maker.py` | `top_assembly.py` |
-| `mdp_maker.py` | `mdp.py` |
-| `inp_generator.py` | `box.py` |
-| `md_setup.py` | `setup.py` |
-| `_md_utils.py` | `_gmx_utils.py` |
-| `md_em.py` / `md_eq.py` / `md_prod.py` | `em.py` / `eq.py` / `prod.py` |
+| Gradio 默认绑定 `0.0.0.0` | 已关闭：默认绑定为 `127.0.0.1`。 |
+| `frontend_api.py` 使用 `os.system` 清理 | 已关闭：改为受控子进程与路径操作。 |
+| `src/willy/` 中存在 5 处 `shell=True` | 已关闭：2026-08-02 全仓复核未发现 `shell = True`。后续子进程安全审计作为 H-1 的部署与密钥治理的一部分持续执行。 |
+| 模拟层缺少设计文档 | 已关闭：`simulation_design.md` 和 `postprocessing_design.md` 已建立。 |
+| 模拟层跳过分子工具缺失 | 已替代：该能力会破坏拓扑与建盒一致性，因此不对 Simulation Agent 公开。 |
+| 设计文档普遍使用旧文件名 | 已关闭：当前设计文档已使用实际模块名；历史迁移名称只保留在命名与重构记录中。 |
+| 锂盐资料未被索引 | 已关闭：已在 `docs/README.md` 分类和导航中登记，仍作为参考资料而非运行时数据。 |
+| 缺少 CI 与测试 extras | 实现已在当前工作区存在，待 M-2 验证其远程执行与提交状态。 |
+| 缺少完整 `config.json` schema、唯一 step registry 与规范化依赖归属 | 已关闭：`config_schema.py` 负责外层结构；`simulation.protocol` 负责 MD v2 与迁移；`STEP_REGISTRY`/`EXECUTION_MODULE_REGISTRY` 统一步骤和依赖归属，并有契约回归。 |
+| 新 run 隐式继承旧 `done_steps`，并使上游修复被误记为下游成功 | 已关闭：新 run 从 Step 1 开始；续跑必须显式提供原运行目录。Step 2 校验 `.fchk`/`.mol2` 契约，Step 3 拒绝不完整分子集合，防止错误延迟至 Sobtop。 |
+| EQ 重试期间，上游修复工具成功被重标为 Step 9 成功，导致 PROD 越级启动 | 已关闭：LayerAgent 保留工具实际步骤身份；编排器按失效阶段回滚或重跑，Step 8--10 在 `mark_done` 前强制校验私有 manifest 许可和非空产物；RunRegistry 仅对历史状态越级做无损公开状态对账。回归覆盖 MDP/EM 上游修复、EQ 许可缺失和活跃 EQ 状态纠正。 |
+| 方案确认与启动回执合并为重复助手气泡 | 已关闭：待确认方案后的文本启动回复记录为显式用户动作；启动回执不再重复方案摘要，并有前端与配置 Agent 回归测试。 |
 
-All imports in tool handlers and orchestrator use actual filenames (code works). Design docs are misleading.
+## 发布前门禁
 
-**Fix:** Update `quantum_design.md`, `topology_design.md`, and `Willy.md` to reflect current filenames.
-
-### MED-2 — `_step_to_dict()` Duplicated 3 Times
-
-**Files:** `toolist_quantum.py:199-215`, `toolist_topology.py:185-201`, `toolist_simulation.py:257-273`
-
-Three identical copies of the same ~15-line function. It converts a `StepResult` to a JSON-serializable dict with a `_step_result` sentinel.
-
-**Fix:** Move to `errors.py` as `StepResult.to_dict()` method. Import once everywhere.
-
-### MED-3 — `tools_skip_molecule_*` Logic Duplicated 4 Times
-
-**Files:** `toolist_global.py`, `toolist_quantum.py`, `toolist_topology.py`, `toolist_simulation.py`
-
-All four toolist files have near-identical `tools_skip_molecule_*` handler code that adds a molecule name to `config.json`'s `skipped_molecules` list.
-
-**Fix:** Extract a shared `_apply_skip_molecule(name, reason, config_path)` helper function.
-
-### MED-4 — No CI/CD Configuration
-
-**File:** project root
-
-No `.github/workflows/`, no `tox.ini`, no `Makefile`, no `Dockerfile`. `pyproject.toml` only declares 3 runtime dependencies (`gradio`, `openai`, `py3Dmol`) but `pytest`, `sklearn`, and other test dependencies are undeclared.
-
-**Fix:** Add `[project.optional-dependencies]` with `test` and `dev` groups. Add a minimal GitHub Actions workflow that runs `pytest` on push.
-
-### MED-5 — `llm_config.validate_config()` Lacks JSON Schema
-
-**File:** `src/willy/llm_config.py`
-
-Validation is done procedurally. Invalid config is caught by try/except blocks that silently continue instead of surfacing clear errors.
-
-**Fix:** Add JSON Schema validation (using `jsonschema` library) or Pydantic models for `config.json` structure.
-
-### MED-6 — No Retry / Backoff for DeepSeek API
-
-**Files:** `agent_config.py`, `pipeline_orchestrator.py`
-
-If the API key is valid but the service returns errors (rate limit, timeout, 5xx), there is no retry logic or exponential backoff. The `chat()` function in `agent_config.py` calls `client.chat.completions.create()` with no timeout and at most one retry via the outer `for attempt in range(3)` loop.
-
-**Fix:** Add `timeout=60` and `max_retries=2` to the OpenAI client, or implement manual backoff in the tool-calling loop.
-
-### MED-7 — `toolist_global.py` Internal Docstring Mismatch
-
-**File:** `src/willy/toolist_global.py`
-
-The module docstring reads `"""knowledge_tools.py — LLM function calling tools + TF-IDF 向量检索"""` but the actual filename is `toolist_global.py`.
-
-**Fix:** Update docstring to match the current filename.
-
-### MED-8 — `simulation/setup.py` Name Conflicts with Python Build Tool
-
-**File:** `src/willy/simulation/setup.py`
-
-The name `setup.py` collides with Python's standard build script convention. `from willy.simulation import setup` is ambiguous.
-
-**Fix:** Rename to `md_setup.py` and update all imports.
-
----
-
-## LOW
-
-### LOW-1 — Mixed Chinese / English Error Messages
-
-Error messages use both languages inconsistently: `raise ValueError(f"无法解析原子数: {fchk_path}")` alongside English `ErrorKind` enum values. Debug output is inconsistent for mixed-language audiences.
-
-**Fix:** Standardize — either all English (preferred for code) or all Chinese.
-
-### LOW-2 — `.md_counter` Not in `.gitignore`
-
-**File:** `.gitignore`
-
-The runtime counter file `.md_counter` (used by `simulation/setup.py` for run directory naming) is not listed in `.gitignore`. It could be accidentally committed.
-
-**Fix:** Add `.md_counter` to `.gitignore`.
-
-### LOW-3 — Incomplete Type Hints
-
-Newer code (`toolist_*.py`, `pipeline_orchestrator.py`, `errors.py`) has good type annotations. Older code (`quantum/struct_g16.py`, `quantum/chg_g16.py`) is missing return type annotations. No `mypy` or `pyright` configuration exists.
-
-**Fix:** Add `pyproject.toml` `[tool.mypy]` section. Gradually add type hints to older modules.
-
-### LOW-4 — `benchmarks/` Directory is Minimal
-
-**File:** `benchmarks/`
-
-Only 2 files: `llm_score.py` (LLM output scoring) and `precheck_examples.jsonl` (10 NL test cases). No performance benchmarks, no regression tests, no simulation run comparisons.
-
-**Fix:** Either expand with meaningful benchmarks or rename to `evals/` to reflect actual content.
-
-### LOW-5 — Comments in `knowledge.md` Refer to Old Step Numbers
-
-**File:** `docs/knowledge.md`
-
-Some section references use old 8-step numbering (the pipeline currently has 7 steps). Not functionally broken but confusing.
-
----
-
-## Summary Table
-
-| Severity | Count | Key Themes |
-|------|:---:|------|
-| CRITICAL | 3 | API key leak, network exposure, missing tool definition |
-| HIGH | 6 | Logging, bare raises, `shell=True`, orphaned doc, design doc gaps |
-| MEDIUM | 8 | Code duplication, CI/CD, naming inconsistencies, validation |
-| LOW | 5 | Type hints, mixed languages, `.gitignore`, benchmarks |
-| **Total** | **22** | |
-
----
-
-## Recommended Execution Order
-
-### Sprint 1 (this week)
-1. Rotate API key → placeholder in `.env` (CRIT-1)
-2. `server_name="127.0.0.1"` in `app.py` (CRIT-2)
-3. Register `tools_skip_molecule_simulation` in `SIMULATION_TOOLS` (CRIT-3)
-
-### Sprint 2 (this month)
-4. Extract `_step_to_dict` → `StepResult.to_dict()` (MED-2)
-5. Wrap 11 bare `raise` → `StepResult` (HIGH-3)
-6. Add `_logging.py` + replace `print()` (HIGH-1)
-7. Write `docs/simulation_design.md` (HIGH-2)
-
-### Sprint 3 (next iteration)
-8. Refactor `shell=True` calls (HIGH-5)
-9. Fix `frontend_api.py` command injection (HIGH-4)
-10. Add CI/CD + `pyproject.toml` deps (MED-4)
-11. Sync design doc filenames (MED-1)
+发布前，0 号、5 号和 6 号必须确认：高优先级项无未认领风险；相关外部 smoke 有证据；`pytest -q` 与 LLM mock eval 全绿；以及 `document_registry.md` 中没有无责任人的 `待同步` 文档。

@@ -12,6 +12,7 @@ import time as _time
 from pathlib import Path
 
 from willy.errors import StepResult, StepError, ErrorKind
+from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import (
     find_orca, find_orca_2mkl, get_orca_env,
     find_multiwfn, format_orca_xyz_coords, extract_xyz,
@@ -103,10 +104,12 @@ def run(
         )
 
     try:
-        result = subprocess.run(
+        result = run_managed_command(
             [orca_bin, inp_path.name],
-            capture_output=True, text=True,
-            cwd=workdir, timeout=3600, env=orca_env,
+            cwd=workdir,
+            timeout=3600,
+            env=orca_env,
+            run_dir=workdir,
         )
     except subprocess.TimeoutExpired:
         return StepResult(
@@ -131,10 +134,12 @@ def run(
     # ── orca_2mkl → *_opt.molden ──
     try:
         orca_2mkl = find_orca_2mkl()
-        subprocess.run(
+        run_managed_command(
             [orca_2mkl, opt_name, "-molden"],
-            capture_output=True, text=True,
-            cwd=workdir, timeout=60, env=orca_env,
+            cwd=workdir,
+            timeout=60,
+            env=orca_env,
+            run_dir=workdir,
         )
     except (RuntimeError, subprocess.TimeoutExpired):
         pass
@@ -157,10 +162,12 @@ def run(
     multiwfn = find_multiwfn()
     commands = f"100\n2\n7\n{opt_fchk.resolve()}\n0\nq\n"
     try:
-        subprocess.run(
+        run_managed_command(
             [multiwfn, str(opt_molden.resolve())],
-            input=commands, capture_output=True, text=True,
-            cwd=workdir, timeout=120,
+            input_text=commands,
+            cwd=workdir,
+            timeout=120,
+            run_dir=workdir,
         )
     except subprocess.TimeoutExpired:
         return StepResult(

@@ -1,46 +1,39 @@
-"""
-toolist_topology.py
-===================
-Layer 2 — Topology Agent 的 6 个工具定义与处理函数。
-
-工具:
-  tools_retry_topo_gaff, tools_retry_topo_opls, tools_retry_top_assembly,
-  tools_diagnose_error_topology, tools_modify_config_topology,
-  tools_skip_molecule_topology
-"""
+"""Topology Agent tools constrained to the current run manifest."""
 
 from __future__ import annotations
-import json as _json
+
+import json
 from pathlib import Path
 
-from willy._paths import get_project_root
-from willy.errors import StepResult, StepError, ErrorKind
+from willy.errors import DiagnosisResult, ErrorKind, StepError, StepResult
+from willy.config_store import write_json
+from willy.topology.backends import (
+    OplsaaBackend,
+    SobtopBackend,
+    TopologyComponent,
+    normalize_topology_config,
+)
+from willy.topology.manifest import (
+    claim_retry,
+    manifest_lock,
+    TopologyManifestComponent,
+    component_for_name,
+    load_manifest,
+    manifest_path,
+    write_manifest,
+)
 
-ROOT = get_project_root()
-
-# ============================================================
-# Tool Definitions
-# ============================================================
 
 TOPOLOGY_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "tools_retry_topo_gaff",
-            "description": "为一个或全部分子重试 Sobtop 拓扑生成（mol2+chg→itp+gro）。可在 GAFF 和 AMBER 力场之间切换。",
+            "description": "仅对当前 manifest 中的 Sobtop GAFF+UFF 组件重试。",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "molecule_name": {
-                        "type": "string",
-                        "description": "要重试的分子名。省略或 'all' 则重试全部分子。",
-                    },
-                    "mol2_path": {"type": "string", "description": ".mol2 文件路径（可选）"},
-                    "chg_path": {"type": "string", "description": ".chg 文件路径（可选）"},
-                    "gaff": {"type": "boolean", "description": "True=GAFF, False=AMBER 力场"},
-                    "hessian_path": {"type": "string", "description": "可选的 .fchk 路径用于基于 Hessian 的参数"},
-                },
-                "required": [],
+                "properties": {"molecule_name": {"type": "string"}},
+                "required": ["molecule_name"],
             },
         },
     },
@@ -48,25 +41,10 @@ TOPOLOGY_TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_retry_topo_opls",
-            "description": "使用 LigParGen（OPLS-AA）作为 Sobtop 的替代方案生成拓扑。接受 SMILES 或 mol2 输入。",
+            "description": "仅对当前 manifest 中的 OPLS-AA 组件重试。",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "molecule_name": {"type": "string"},
-                    "smiles": {"type": "string", "description": "分子的 SMILES 字符串（首选）"},
-                    "mol2_path": {"type": "string", "description": ".mol2 文件路径（若未提供 smiles 则用于提取 SMILES）"},
-                    "net_charge": {
-                        "type": "integer",
-                        "enum": [-2, -1, 0, 1, 2],
-                        "description": "净分子电荷",
-                    },
-                    "lbcc": {"type": "boolean", "description": "使用 CM1A-LBCC 电荷模型（仅限中性分子）"},
-                    "opt_steps": {
-                        "type": "integer",
-                        "enum": [0, 1, 2, 3],
-                        "description": "BOSS 优化步数：0=单点，1-3=递进优化",
-                    },
-                },
+                "properties": {"molecule_name": {"type": "string"}},
                 "required": ["molecule_name"],
             },
         },
@@ -75,34 +53,21 @@ TOPOLOGY_TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_retry_top_assembly",
-            "description": "重试 top_assembly 拓扑组装（生成 topol.top，运行 itp_revise）。从所有 .itp 文件收集 atomtype，去重并组装主拓扑。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topo_dir": {"type": "string", "description": "包含 .itp 文件的目录"},
-                    "config_path": {"type": "string", "description": "config.json 路径"},
-                },
-                "required": [],
-            },
+            "description": "基于当前 run_dir 的 topology_manifest.json 重试主拓扑组装。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     {
         "type": "function",
         "function": {
             "name": "tools_diagnose_error_topology",
-            "description": "分析 Sobtop/LigParGen/top_assembly 输出以确定拓扑生成失败的根本原因。检查：mol2 格式错误、缺少电荷、力场 atomtype 不匹配、结构验证失败。",
+            "description": "结合当前 manifest 和原始输出诊断拓扑失败。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "error_source": {
-                        "type": "string",
-                        "enum": ["sobtop", "ligpargen", "top_assembly", "itp_revise"],
-                        "description": "哪个组件产生了错误",
-                    },
-                    "molecule_name": {"type": "string", "description": "失败的分子名"},
-                    "raw_output": {"type": "string", "description": "失败组件的 stderr/stdout 输出（最后 1000 字符）"},
-                    "mol2_path": {"type": "string", "description": ".mol2 文件路径（用于检查有效性）"},
-                    "chg_path": {"type": "string", "description": ".chg 文件路径（用于检查有效性，仅 Sobtop）"},
+                    "error_source": {"type": "string", "enum": ["sobtop", "ligpargen", "top_assembly", "itp_revise"]},
+                    "molecule_name": {"type": "string"},
+                    "raw_output": {"type": "string"},
                 },
                 "required": ["error_source", "raw_output"],
             },
@@ -112,33 +77,14 @@ TOPOLOGY_TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_modify_config_topology",
-            "description": "用修改后的拓扑参数更新 config.json 中的 topology 段。更改在后续重试时保留。",
+            "description": "修改当前运行快照的合法拓扑配置；后端切换必须新建运行。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "backend": {
-                        "type": "string",
-                        "enum": ["sobtop", "ligpargen"],
-                        "description": "拓扑生成后端",
-                    },
-                    "force_field": {
-                        "type": "string",
-                        "enum": ["gaff", "amber"],
-                        "description": "力场选择 (仅 Sobtop 有效)",
-                    },
-                    "default_net_charge": {
-                        "type": "integer",
-                        "description": "默认净分子电荷 (LigParGen 用)",
-                    },
-                    "default_lbcc": {
-                        "type": "boolean",
-                        "description": "是否使用 CM1A-LBCC 电荷模型 (LigParGen 用)",
-                    },
-                    "default_opt_steps": {
-                        "type": "integer",
-                        "enum": [0, 1, 2, 3],
-                        "description": "BOSS 优化步数 (LigParGen 用)",
-                    },
+                    "backend": {"type": "string", "enum": ["sobtop", "oplsaa"]},
+                    "force_field": {"type": "string", "enum": ["gaff_uff", "oplsaa"]},
+                    "default_lbcc": {"type": "boolean"},
+                    "default_opt_steps": {"type": "integer", "enum": [0, 1, 2, 3]},
                 },
                 "required": [],
             },
@@ -148,230 +94,198 @@ TOPOLOGY_TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_skip_molecule_topology",
-            "description": "将指定分子加入跳过列表，后续步骤不再处理此分子。用于无法修复的分子致命错误。",
+            "description": "当前已禁用。拓扑层不会在未原子同步 manifest/residues 时跳过分子。",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "molecule_name": {
-                        "type": "string",
-                        "description": "要跳过的分子名",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "跳过原因（记录在 config.json 中）",
-                    },
-                },
+                "properties": {"molecule_name": {"type": "string"}, "reason": {"type": "string"}},
                 "required": ["molecule_name"],
             },
         },
     },
 ]
 
-# ============================================================
-# Tool 分类元数据
-# ============================================================
-
 TOOL_META = {
-    "tools_retry_topo_gaff":             {"category": "action",     "mutating": True,  "risk": "high"},
-    "tools_retry_topo_opls":          {"category": "action",     "mutating": True,  "risk": "high"},
-    "tools_retry_top_assembly":       {"category": "action",     "mutating": True,  "risk": "medium"},
-    "tools_diagnose_error_topology":  {"category": "diagnostic", "mutating": False, "risk": "low"},
-    "tools_modify_config_topology":   {"category": "config",     "mutating": True,  "risk": "medium"},
-    "tools_skip_molecule_topology":            {"category": "config",     "mutating": True,  "risk": "medium"},
+    "tools_retry_topo_gaff": {"category": "action", "mutating": True, "risk": "high", "layer": "topology", "effect": "retry_safe"},
+    "tools_retry_topo_opls": {"category": "action", "mutating": True, "risk": "high", "layer": "topology", "effect": "retry_safe"},
+    "tools_retry_top_assembly": {"category": "action", "mutating": True, "risk": "medium", "layer": "topology", "effect": "retry_safe"},
+    "tools_diagnose_error_topology": {"category": "diagnostic", "mutating": False, "risk": "low", "layer": "topology", "effect": "read_only"},
+    "tools_modify_config_topology": {"category": "config", "mutating": True, "risk": "medium", "layer": "topology", "effect": "requires_fork"},
+    "tools_skip_molecule_topology": {"category": "disabled", "mutating": False, "risk": "none", "layer": "topology", "effect": "read_only", "enabled": False},
 }
 
-# ============================================================
-# Tool Handler
-# ============================================================
 
-def _step_to_dict(sr: StepResult) -> dict:
-    err = sr.error
-    return {
-        "_step_result": True,
-        "success": sr.success,
-        "step_name": sr.step_name,
-        "outputs": sr.outputs,
-        "artifacts": sr.artifacts,
-        "duration_s": sr.duration_s,
-        "error_message": err.message if err else "",
-        "error_kind": err.kind.value if err else "",
-        "hint": err.hint if err else "",
-        "raw_output": err.raw_output if err else "",
-    }
+def _tool_failure(message: str, kind: ErrorKind = ErrorKind.CONFIG_INVALID) -> str:
+    return json.dumps(StepResult(
+        step_name="topology_tool", step_index=4, success=False,
+        error=StepError(kind, message),
+    ).to_dict(), ensure_ascii=False)
 
 
-def handle_topology_tool_call(tool_name: str, args: dict) -> str:
-    """Layer 2 工具调用分发器。"""
+def _workspace(work_dir: str | None) -> Path:
+    if not work_dir:
+        raise ValueError("Topology Agent 必须提供本次 run_dir")
+    return Path(work_dir)
 
-    if tool_name == "tools_retry_topo_gaff":
-        mol_name = args.get("molecule_name", "")
-        mol2_path = args.get("mol2_path")
-        chg_path = args.get("chg_path")
-        gaff = args.get("gaff", True)
-        hessian = args.get("hessian_path")
 
-        from willy.topology.topo_gaff import make_itp_gro, TopMakerInput
+def _component_from_manifest(entry: dict) -> TopologyComponent:
+    return TopologyComponent(
+        molecule_id=entry["molecule_id"], residue_name=entry["residue_name"], quantity=int(entry["quantity"]),
+        mol2=Path(entry["mol2"]), chg=Path(entry["chg"]) if entry.get("chg") else None,
+        charge=int(entry.get("charge", 0)), spin=int(entry.get("spin", 1)), smiles=entry.get("smiles"),
+        lbcc=bool(entry.get("lbcc", False)), opt_steps=int(entry.get("opt_steps", 0)),
+    )
 
-        if mol_name and mol_name != "all" and mol2_path and chg_path:
-            inp = TopMakerInput(
-                mol2=mol2_path, chg=chg_path,
-                output_name=mol_name, gaff=gaff,
-                hessian=hessian,
-            )
-            sr = make_itp_gro(inp)
-        else:
-            # 对全部分子重试
-            from willy.topology.topo_gaff import batch_make_topo
-            results = batch_make_topo()
-            ok = sum(1 for r in results if r.success)
-            failed = [r for r in results if not r.success]
-            if not failed:
-                sr = StepResult(
-                    step_name="topo_gaff", step_index=4, success=True,
-                    outputs={"batch_count": str(len(results))},
-                )
-            else:
-                first_err = failed[0].error
-                sr = StepResult(
-                    step_name="topo_gaff", step_index=4, success=False,
+
+def _write_manifest_dict(workspace: Path, manifest: dict) -> None:
+    components = [TopologyManifestComponent(**entry) for entry in manifest["components"]]
+    write_manifest(workspace, backend=manifest["backend"], forcefield_family=manifest["forcefield_family"],
+                   components=components, retry_ledger=manifest.get("retry_ledger", {}))
+
+
+def _retry_backend(workspace: Path, molecule_name: str, backend_name: str) -> StepResult:
+    try:
+        with manifest_lock(workspace):
+            manifest = load_manifest(workspace)
+            entry = component_for_name(manifest, molecule_name)
+            if entry is None:
+                return StepResult("topology_tool", 4, False, error=StepError(ErrorKind.CONFIG_INVALID, f"manifest 中没有 {molecule_name}"))
+            if manifest.get("backend") != backend_name or entry.get("backend") != backend_name:
+                return StepResult(
+                    "topology_tool", 4, False,
                     error=StepError(
-                        kind=ErrorKind.SOBTOP_FAILED,
-                        message=f"批量 Sobtop: {ok}/{len(results)} 成功，{len(failed)} 失败",
-                        raw_output=first_err.raw_output if first_err else "",
-                        hint=first_err.hint if first_err else "检查单个分子输出获取详细错误",
+                        ErrorKind.CONFIG_INVALID,
+                        "当前运行禁止跨后端重试；若需 OPLS-AA，请从配置快照派生一个新的 OPLS-AA run。",
                     ),
                 )
-        return _json.dumps(_step_to_dict(sr), ensure_ascii=False)
-
-    elif tool_name == "tools_retry_topo_opls":
-        mol_name = args["molecule_name"]
-        try:
-            from willy.topology.topo_opls import make_itp_gro_opls
-            sr = make_itp_gro_opls(
-                molecule_name=mol_name,
-                smiles=args.get("smiles"),
-                mol2_path=args.get("mol2_path"),
-                net_charge=args.get("net_charge", 0),
-                lbcc=args.get("lbcc", False),
-                opt_steps=args.get("opt_steps", 0),
+            granted, reason = claim_retry(
+                manifest,
+                backend=backend_name,
+                molecule_id=entry["molecule_id"],
+                action="parameterize",
             )
-        except Exception as e:
-            sr = StepResult(
-                step_name="topo_opls", step_index=4, success=False,
-                error=StepError(kind=ErrorKind.LIGPARGEN_FAILED,
-                                message=f"LigParGen 失败: {e}",
-                                hint="检查 BOSSdir 环境变量或回退到 Sobtop"),
-            )
-        return _json.dumps(_step_to_dict(sr), ensure_ascii=False)
+            if not granted:
+                return StepResult(
+                    "topology_tool", 4, False,
+                    error=StepError(ErrorKind.RETRY_LIMIT_EXCEEDED, reason),
+                )
+            _write_manifest_dict(workspace, manifest)
 
-    elif tool_name == "tools_retry_top_assembly":
-        topo_dir = args.get("topo_dir", "topo")
-        config_path = args.get("config_path", "config.json")
-        from willy.topology.top_assembly import build as _build
-        sr = _build(config_path=config_path, topo_dir=topo_dir)
-        return _json.dumps(_step_to_dict(sr), ensure_ascii=False)
+            backend = SobtopBackend() if backend_name == "sobtop" else OplsaaBackend()
+            component = _component_from_manifest(entry)
+            result = backend.parameterize(component, workspace)
+            if result.success:
+                result = backend.validate(component, result.outputs)
+            if result.success:
+                entry.update({"itp": result.outputs["itp"], "assembly_itp": None, "gro": result.outputs["gro"], "success": True, "validated": True, "error": ""})
+            else:
+                entry.update({"itp": None, "assembly_itp": None, "gro": None, "success": False, "validated": False,
+                              "error": result.error.message if result.error else "重试失败"})
+            _write_manifest_dict(workspace, manifest)
+            return result
+    except (OSError, json.JSONDecodeError) as exc:
+        return StepResult("topology_tool", 4, False, error=StepError(ErrorKind.FILE_NOT_FOUND, f"无法读取 manifest: {exc}"))
 
-    elif tool_name == "tools_diagnose_error_topology":
-        error_source = args["error_source"]
-        raw_output = args.get("raw_output", "")
-        mol2_path = args.get("mol2_path")
-        chg_path = args.get("chg_path")
 
-        issues = []
-        evidence = []
-        hint = ""
+def handle_topology_tool_call(
+    tool_name: str,
+    args: dict,
+    work_dir: str | None = None,
+    config_path: str | None = None,
+) -> str:
+    """Dispatch topology tools without accepting arbitrary input/output paths."""
+    if tool_name not in {tool["function"]["name"] for tool in TOPOLOGY_TOOLS}:
+        return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)
+    workspace = Path(work_dir) if work_dir else None
 
-        # ── 检查 mol2 有效性 ──
-        if mol2_path and Path(mol2_path).exists():
-            mol2_text = Path(mol2_path).read_text()
-            if "@<TRIPOS>ATOM" not in mol2_text:
-                issues.append("mol2 文件缺少 @<TRIPOS>ATOM 段")
-            if "@<TRIPOS>BOND" not in mol2_text:
-                issues.append("mol2 文件缺少 @<TRIPOS>BOND 段")
-        elif mol2_path:
-            issues.append(f"mol2 文件不存在: {mol2_path}")
-
-        # ── 检查 chg 有效性 ──
-        if chg_path and Path(chg_path).exists():
-            chg_text = Path(chg_path).read_text()
-            if not chg_text.strip():
-                issues.append("chg 文件为空")
-        elif chg_path:
-            issues.append(f"chg 文件不存在: {chg_path}")
-
-        # ── 解析 stderr 模式 ──
-        if "atomtype" in raw_output.lower():
-            issues.append("atomtype 缺失或不匹配 —— 检查力场分配")
-            hint = "在 itp 中添加缺失的 atomtype 或切换力场（GAFF ↔ AMBER）"
-        if "cannot open" in raw_output.lower():
-            issues.append("Sobtop 无法打开输入文件 —— 检查路径")
-            hint = "确保 mol2 和 chg 文件路径正确且可读"
-        if "fortran" in raw_output.lower() or "rc=24" in raw_output.lower():
-            issues.append("Fortran 清理错误 (rc=24) —— 通常非致命")
-            hint = "检查输出文件是否已生成。若已生成，可忽略此错误。"
-        if "unknown atom" in raw_output.lower():
-            issues.append("未知原子类型 —— 力场无法覆盖某些原子")
-            hint = "尝试 UFF 力场或 LigParGen (OPLS-AA)"
-
+    if tool_name == "tools_diagnose_error_topology":
+        raw = args.get("raw_output", "")
+        entry = None
+        if workspace is not None and args.get("molecule_name") and manifest_path(workspace).is_file():
+            try:
+                entry = component_for_name(load_manifest(workspace), args["molecule_name"])
+            except (OSError, json.JSONDecodeError):
+                pass
+        issues: list[str] = []
+        hint = "检查 manifest 中记录的本次 .mol2/.chg 和后端日志。"
+        lower = raw.lower()
+        if "atomtype" in lower:
+            issues.append("atomtype 缺失或参数冲突")
+        if "rc=24" in lower or "fortran" in lower:
+            issues.append("Sobtop rc=24 仅在 ITP/GRO 完整并通过校验时可接受")
+        if "cannot open" in lower:
+            issues.append("后端无法读取 manifest 指定的输入文件")
+        if entry and not entry.get("chg") and args["error_source"] == "sobtop":
+            issues.append("Sobtop 组件缺少 .chg")
         if not issues:
-            issues.append("无特定错误模式被识别。检查原始输出。")
-        if not hint:
-            hint = "检查 .mol2 和 .chg 格式，或尝试 LigParGen 作为替代"
+            issues.append("未识别特定模式；请检查原始输出")
+        result = DiagnosisResult(source="topology", severity="error", issues=issues, hint=hint,
+                                 extra={"manifest_component": entry or {}})
+        return json.dumps(result.to_dict(), ensure_ascii=False)
 
-        from willy.errors import DiagnosisResult
-        dr = DiagnosisResult(
-            source="topology",
-            severity="error" if issues else "info",
-            issues=issues,
-            evidence=evidence,
-            hint=hint,
-            extra={"error_source": error_source, "mol2_path": mol2_path or "", "chg_path": chg_path or ""},
-        )
-        return _json.dumps(dr.to_dict(), ensure_ascii=False)
+    try:
+        workspace = _workspace(work_dir)
+    except ValueError as exc:
+        return _tool_failure(str(exc))
+    active_config = Path(config_path) if config_path else workspace / "config.json"
 
-    elif tool_name == "tools_modify_config_topology":
-        config_path = ROOT / "config.json"
+    if tool_name == "tools_retry_topo_gaff":
+        return json.dumps(_retry_backend(workspace, args["molecule_name"], "sobtop").to_dict(), ensure_ascii=False)
+    if tool_name == "tools_retry_topo_opls":
+        return json.dumps(_retry_backend(workspace, args["molecule_name"], "oplsaa").to_dict(), ensure_ascii=False)
+    if tool_name == "tools_retry_top_assembly":
+        from willy.topology.top_assembly import build
         try:
-            with open(config_path) as f:
-                config = _json.load(f)
-        except (FileNotFoundError, _json.JSONDecodeError) as e:
-            return _json.dumps({"ok": False, "error": f"无法读取 config.json: {e}"})
-
-        topo = config.setdefault("topology", {})
-        topo_fields = ["backend", "force_field", "default_net_charge",
-                       "default_lbcc", "default_opt_steps"]
-        updated = []
-        for f in topo_fields:
-            if args.get(f) is not None:
-                topo[f] = args[f]
-                updated.append(f)
-
-        config_path.write_text(_json.dumps(config, indent=2, ensure_ascii=False) + "\n")
-        return _json.dumps({
-            "ok": True,
-            "updated_fields": updated,
-            "current_topology": {k: topo.get(k) for k in topo_fields},
-        }, ensure_ascii=False)
-
-    elif tool_name == "tools_skip_molecule_topology":
-        name = args["molecule_name"]
-        reason = args.get("reason", "Agent 标记跳过")
-        config_path = ROOT / "config.json"
+            with manifest_lock(workspace):
+                manifest = load_manifest(workspace)
+                granted, reason = claim_retry(
+                    manifest,
+                    backend=str(manifest.get("backend", "unknown")),
+                    molecule_id="__topology__",
+                    action="assembly",
+                )
+                if not granted:
+                    return _tool_failure(reason, ErrorKind.RETRY_LIMIT_EXCEEDED)
+                _write_manifest_dict(workspace, manifest)
+                return json.dumps(build(config_path=str(active_config), topo_dir=str(workspace)).to_dict(), ensure_ascii=False)
+        except (OSError, json.JSONDecodeError) as exc:
+            return _tool_failure(f"无法读取 manifest: {exc}", ErrorKind.FILE_NOT_FOUND)
+    if tool_name == "tools_modify_config_topology":
         try:
-            with open(config_path) as f:
-                config = _json.load(f)
-        except (FileNotFoundError, _json.JSONDecodeError):
-            config = {}
-        skipped = config.setdefault("skipped_molecules", [])
-        if name not in skipped:
-            skipped.append(name)
-        config.setdefault("skip_reasons", {})[name] = reason
-        config_path.write_text(_json.dumps(config, indent=2, ensure_ascii=False) + "\n")
-        return _json.dumps({
-            "ok": True,
-            "molecule": name,
-            "reason": reason,
-            "warning": f"⚠ {name} 已跳过，MD 模拟将排除此分子",
+            config = json.loads(active_config.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            return json.dumps({"ok": False, "error": f"无法读取 config.json: {exc}"}, ensure_ascii=False)
+        topology = dict(config.get("topology", {}))
+        for field in ("backend", "force_field", "default_lbcc", "default_opt_steps"):
+            if field in args:
+                topology[field] = args[field]
+        normalized, issues, _ = normalize_topology_config(topology)
+        if issues:
+            return json.dumps({"ok": False, "error": "; ".join(issues)}, ensure_ascii=False)
+        if manifest_path(workspace).is_file():
+            try:
+                with manifest_lock(workspace):
+                    manifest = load_manifest(workspace)
+                    if (normalized["backend"], normalized["force_field"]) != (
+                        manifest.get("backend"), manifest.get("forcefield_family"),
+                    ):
+                        return json.dumps({
+                            "ok": False,
+                            "error": "当前运行不能切换 forcefield_family；请派生一个新的 OPLS-AA 或 Sobtop run。",
+                        }, ensure_ascii=False)
+                    for entry in manifest.get("components", []):
+                        if "default_lbcc" in args:
+                            entry["lbcc"] = normalized["default_lbcc"]
+                        if "default_opt_steps" in args:
+                            entry["opt_steps"] = normalized["default_opt_steps"]
+                    _write_manifest_dict(workspace, manifest)
+            except (OSError, json.JSONDecodeError) as exc:
+                return json.dumps({"ok": False, "error": f"无法读取 manifest: {exc}"}, ensure_ascii=False)
+        config["topology"] = normalized
+        write_json(active_config, config)
+        return json.dumps({"ok": True, "current_topology": normalized}, ensure_ascii=False)
+    if tool_name == "tools_skip_molecule_topology":
+        return json.dumps({
+            "ok": False,
+            "error": "Topology skip_molecule 已禁用：无法原子同步 manifest 与 residues 时不得跳过。",
         }, ensure_ascii=False)
-
-    return _json.dumps({"error": f"未知工具: {tool_name}"})
+    return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)

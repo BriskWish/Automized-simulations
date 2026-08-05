@@ -1,140 +1,151 @@
-"""
-llm_config.py
-=============
-config.json 的验证、写入、分子列表扫描。
+"""OpenAI-compatible LLM connection configuration.
 
-用法:
-  from willy.llm_config import validate_config, apply_config, _available_residues
+This module is the single authority for the LLM endpoint, model, credential
+lookup, and OpenAI client construction.  It intentionally does not contain
+any simulation ``config.json`` validation; that responsibility lives in
+``workflow_config.py``.
+
+Environment precedence for every setting is process environment, then the
+project-local ``.env``.  ``DEEPSEEK_API_KEY`` remains a read-only legacy
+fallback so existing deployments continue to work after the migration.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-import json
-import copy
+from typing import Literal
+from urllib.parse import urlparse
+import os
 
 from willy._paths import get_project_root
-
-ROOT = get_project_root()
-CONFIG_PATH = ROOT / "config.json"
+from willy.env_registry import dotenv_value
 
 
-def _available_residues() -> dict[str, dict]:
-    """扫描 struct/ 下所有 .gjf，从 config.json 补充已知电荷/自旋/基组。"""
-    struct_dir = ROOT / "struct"
-    residues = {}
-    if struct_dir.exists():
-        for gjf in sorted(struct_dir.glob("*.gjf")):
-            name = gjf.stem
-            if name.endswith("_run"):
-                continue
-            residues[name] = {"charge": None, "spin": None, "basis": None}
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            existing = json.load(f)
-        mols = existing.get("molecules", {})
-        for name in residues:
-            if name in mols:
-                residues[name]["charge"] = mols[name].get("charge")
-                residues[name]["spin"] = mols[name].get("spin")
-                residues[name]["basis"] = mols[name].get("basis", "b3lyp/6-311+g(d,p)")
-    return residues
+DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LLM_MODEL = "deepseek-v4-pro"
+LLM_API_KEY_ENV = "WILLY_LLM_API_KEY"
+LLM_BASE_URL_ENV = "WILLY_LLM_BASE_URL"
+LLM_MODEL_ENV = "WILLY_LLM_MODEL"
+LEGACY_DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
 
-def validate_config(config_dict: dict) -> list[str]:
-    """验证生成的 config.json 是否合法。返回问题列表，空列表 = 通过。"""
-    issues = []
-    residues = config_dict.get("residues", {})
-    if not residues:
-        issues.append("residues 不能为空")
-    total = sum(residues.values())
-    if total == 0:
-        issues.append("总分子数为 0")
-    if total > 10000:
-        issues.append(f"总分子数 {total} 很大，可能计算时间极长")
-    molecules = config_dict.get("molecules", {})
-    for name in residues:
-        if name not in molecules:
-            issues.append(f"residues 中的 '{name}' 未在 molecules 中定义")
-    md = config_dict.get("md", {})
-    if md:
-        ref_t = md.get("ref_t", 298)
-        if ref_t < 0 or ref_t > 2000:
-            issues.append(f"ref_t={ref_t} 超出合理范围")
-        dt = md.get("dt", 0.001)
-        if dt < 0.0001 or dt > 0.01:
-            issues.append(f"dt={dt} 超出合理范围")
-    return issues
+class LLMConfigError(ValueError):
+    """Raised when a configured OpenAI-compatible endpoint is invalid."""
 
 
-def apply_config(config_dict: dict, backup: bool = True) -> Path:
-    """将验证通过的配置写回 config.json。"""
-    if backup and CONFIG_PATH.exists():
-        backup_path = CONFIG_PATH.with_suffix(".json.bak")
-        CONFIG_PATH.rename(backup_path)
-        print(f"[llm_config] 已备份: {backup_path}")
-    complete = _apply_defaults(config_dict)
-    CONFIG_PATH.write_text(json.dumps(complete, indent=2, ensure_ascii=False) + "\n")
-    print(f"[llm_config] config.json 已更新")
-    return CONFIG_PATH
+@dataclass(frozen=True)
+class LLMSettings:
+    """Resolved settings for one OpenAI-compatible chat-completions service.
+
+    ``api_key`` is intentionally retained only in this in-memory object.  Its
+    public status representation never includes it.
+    """
+
+    api_key: str
+    base_url: str
+    model: str
+    source: Literal["environment", "dotenv", "form"]
+    legacy_key: bool = False
+
+    def public_dict(self) -> dict[str, str | bool]:
+        return {
+            "base_url": self.base_url,
+            "model": self.model,
+            "source": self.source,
+            "legacy_key": self.legacy_key,
+        }
 
 
-def _apply_defaults(config_dict: dict) -> dict:
-    """将 LLM 输出的 config 与默认值合并，写入 config.json 前调用。"""
-    out = copy.deepcopy(config_dict)
-    # 剥离 LLM 协议字段，只保留运行时配置
-    out.pop("error", None)
-    out.pop("warnings", None)
-    out.setdefault("backend", "g16")
-    out.setdefault("defaults", {"mem": "5GB", "nproc": 8})
-    out["defaults"].setdefault("mem", "5GB")
-    out["defaults"].setdefault("nproc", 8)
-    available = _available_residues()
-    residues = out.get("residues", {})
-    molecules = out.setdefault("molecules", {})
-    for name in residues:
-        if name not in molecules:
-            info = available.get(name, {})
-            molecules[name] = {
-                "charge": info.get("charge", 0),
-                "spin": info.get("spin", 1),
-                "basis": info.get("basis", "b3lyp/6-311+g(d,p)"),
-                "solvent": "acetone",
-                "mem": "",
-                "nproc": None,
-            }
-        molecules[name].setdefault("charge", 0)
-        molecules[name].setdefault("spin", 1)
-        molecules[name].setdefault("basis", "b3lyp/6-311+g(d,p)")
-        molecules[name].setdefault("mem", "")
-        molecules[name].setdefault("nproc", None)
-        molecules[name].setdefault("solvent", "acetone")
-    out.setdefault("md", {})
-    md = out["md"]
-    md.setdefault("dt", 0.001)
-    md.setdefault("ref_t", 298.15)
-    md.setdefault("ref_p", 1.01325)
-    md.setdefault("eq_ns", 10)
-    md.setdefault("prod_ns", 10)
-    md.setdefault("tcoupl", "V-rescale")
-    md.setdefault("tau_t", 0.5)
-    md.setdefault("pcoupl", "C-rescale")
-    md.setdefault("pcoupltype", "isotropic")
-    md.setdefault("compressibility", "8.5e-5")
-    md.setdefault("constraints", "hbonds")
-    md.setdefault("rcoulomb", 1.0)
-    md.setdefault("rvdw", 1.0)
-    md.setdefault("coulombtype", "PME")
-    md.setdefault("vdwtype", "Cut-off")
-    out.setdefault("topology", {})
-    topo = out["topology"]
-    topo.setdefault("backend", "sobtop")
-    topo.setdefault("force_field", "gaff")
-    topo.setdefault("default_net_charge", 0)
-    topo.setdefault("default_lbcc", False)
-    topo.setdefault("default_opt_steps", 0)
-    out.setdefault("box", {})
-    out["box"].setdefault("density", 6.0)
-    out["box"].setdefault("box_size", None)
-    out["box"].setdefault("tolerance", 2.0)
-    return out
+def _configured_value(name: str, project_root: str | Path | None) -> tuple[str, str]:
+    """Resolve one whitelisted setting and report only its non-secret source."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value, "environment"
+    value = dotenv_value(name, project_root).strip()
+    return (value, "dotenv") if value else ("", "")
+
+
+def _validate_single_line(value: str, label: str) -> str:
+    if not isinstance(value, str):
+        raise LLMConfigError(f"{label} 必须是文本")
+    cleaned = value.strip()
+    if not cleaned or "\n" in cleaned or "\r" in cleaned:
+        raise LLMConfigError(f"{label} 不能为空且不能包含换行")
+    return cleaned
+
+
+def validate_llm_values(api_key: str, base_url: str, model: str) -> tuple[str, str, str]:
+    """Validate UI or environment values without constructing a network client."""
+    key = _validate_single_line(api_key, "API Key")
+    url = _validate_single_line(base_url, "Base URL").rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise LLMConfigError("Base URL 必须是完整的 http(s) 地址")
+    if parsed.query or parsed.fragment:
+        raise LLMConfigError("Base URL 不能包含查询参数或片段")
+    resolved_model = _validate_single_line(model, "Model")
+    return key, url, resolved_model
+
+
+def load_llm_settings(project_root: str | Path | None = None) -> LLMSettings | None:
+    """Resolve one OpenAI-compatible service, or ``None`` when no key exists."""
+    root = Path(project_root) if project_root is not None else get_project_root()
+    api_key, source = _configured_value(LLM_API_KEY_ENV, root)
+    legacy_key = False
+    if not api_key:
+        api_key, source = _configured_value(LEGACY_DEEPSEEK_API_KEY_ENV, root)
+        legacy_key = bool(api_key)
+    if not api_key:
+        return None
+
+    base_url, _ = _configured_value(LLM_BASE_URL_ENV, root)
+    model, _ = _configured_value(LLM_MODEL_ENV, root)
+    key, url, resolved_model = validate_llm_values(
+        api_key,
+        base_url or DEFAULT_LLM_BASE_URL,
+        model or DEFAULT_LLM_MODEL,
+    )
+    return LLMSettings(
+        api_key=key,
+        base_url=url,
+        model=resolved_model,
+        source=source,  # source describes the credential, never its value.
+        legacy_key=legacy_key,
+    )
+
+
+def create_openai_client(settings: LLMSettings):
+    """Construct the SDK client for a resolved OpenAI-compatible endpoint."""
+    try:
+        from openai import OpenAI
+    except ImportError as exc:  # pragma: no cover - dependency declared by project
+        raise LLMConfigError("未安装 OpenAI Python SDK") from exc
+    return OpenAI(api_key=settings.api_key, base_url=settings.base_url)
+
+
+def form_llm_settings(api_key: str, base_url: str, model: str) -> LLMSettings:
+    """Build ephemeral settings from form values without reading or writing .env."""
+    key, url, resolved_model = validate_llm_values(api_key, base_url, model)
+    return LLMSettings(
+        api_key=key,
+        base_url=url,
+        model=resolved_model,
+        source="form",
+    )
+
+
+def configured_llm_client(project_root: str | Path | None = None):
+    """Return ``(client, settings)`` or ``(None, None)`` when not configured."""
+    settings = load_llm_settings(project_root)
+    if settings is None:
+        return None, None
+    return create_openai_client(settings), settings
+
+
+def llm_form_defaults(project_root: str | Path | None = None) -> tuple[str, str]:
+    """Return non-secret form defaults for the configuration UI."""
+    settings = load_llm_settings(project_root)
+    if settings is None:
+        return DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL
+    return settings.base_url, settings.model

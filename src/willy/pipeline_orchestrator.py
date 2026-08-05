@@ -14,51 +14,67 @@ LLM 编排的流水线执行器。
 """
 
 from __future__ import annotations
-import os, sys, json
+import sys, json
+import secrets
+import shutil
 from pathlib import Path
 from typing import Optional
 
 from willy._paths import get_project_root
+from willy.config_store import copy_file, write_json
 from willy.env_checker import ensure
-from willy.errors import StepResult, StepError, ErrorKind
+from willy.errors import StepResult, StepError, ErrorKind, public_error_summary
 from willy.layer_agent import LayerAgent
+from willy.llm_config import LLMConfigError, configured_llm_client
 from willy.pipeline_state import PipelineStateMachine, State
+from willy.run_registry import RunRegistry, RunRegistryError
+from willy.action_contract import build_default_tool_catalog
+from willy.recovery_policy import default_recovery_policy
+from willy.llm_budget import LLMBudget
+from willy.step_registry import EM_STEP, EQ_STEP, MDP_STEP, PACKMOL_STEP, PROD_STEP, STEP_REGISTRY
 
 ROOT = get_project_root()
 
-# 步骤 index → 层名映射
-_STEP_LAYER = {1: "quantum", 2: "quantum", 3: "quantum",
-               4: "topology", 5: "topology", 6: "simulation", 7: "simulation"}
-
-
 class PipelineOrchestrator:
-    """流水线编排器 —— 执行 7 步流水线，失败时调用 LLM Agent。支持断点续跑。"""
+    """流水线编排器 —— 执行 10 步流水线，失败时调用 LLM Agent。支持断点续跑。"""
 
     def __init__(self, backend: str = "g16", use_llm: bool = True,
-                 resume_from: int = -1, resume_run_dir: str = ""):
+                 resume_from: int = 0, resume_run_dir: str = "",
+                 confirmed_action_id: str = ""):
         self.backend = backend
         self.use_llm = use_llm
         self.llm_client = None
+        self.llm_model: str | None = None
         self._agents: dict[int, Optional[LayerAgent]] = {
             1: None, 2: None, 3: None,
         }
-        self._skipped_molecules: set = set()
+        self._run_dir: Optional[Path] = None
+        self._run_config_path: Optional[Path] = None
+        self._run_registry: Optional[RunRegistry] = None
+        self._rollback_attempts: dict[int, int] = {}
+        self._rollback_to_step: int | None = None
+        self._rerun_step: int | None = None
+        self._repair_rerun_attempts: dict[tuple[int, str], int] = {}
+        self._confirmed_action_id = confirmed_action_id.strip()
+        self._tool_catalog = build_default_tool_catalog()
+        self._recovery_policy = default_recovery_policy(self._tool_catalog)
+        self._llm_budget = LLMBudget.from_env() if use_llm else None
 
-        # ── 断点续跑：读取上次进度 ──
-        if resume_from >= 0:
-            self._resume_from = min(resume_from, 1)
-            self._resume_run_dir = resume_run_dir
-        else:
-            prev = PipelineStateMachine.read()
-            self._resume_from = max(prev.done_steps) if prev.done_steps else 0
-            self._resume_run_dir = prev.extra.get("run_dir") if prev.extra else None
-            self._resume_from = min(self._resume_from, 1)
+        # 断点续跑必须由调用方显式指定。绝不能从根 status.json 猜测，
+        # 否则新任务会错误继承上个 run 的 done_steps 并跳过结构优化。
+        self._resume_from = min(max(int(resume_from), 0), 1)
+        self._resume_run_dir = Path(resume_run_dir) if resume_run_dir else None
+        if self._resume_from and self._resume_run_dir is None:
+            raise ValueError("断点续跑必须提供原运行目录")
         if self._resume_from > 0:
             print(f"[orchestrator] 🔄 断点续跑：Step 1 结构优化已完成，从 Step 2 开始")
             if self._resume_run_dir:
                 print(f"[orchestrator]    复用运行目录: {self._resume_run_dir}")
 
-        self._sm = PipelineStateMachine(total_steps=7)
+        # A run is not a UI fact until its isolated workspace has been
+        # registered.  Deferring writes prevents failed duplicate launches
+        # from overwriting another run's status.json at the project root.
+        self._sm = PipelineStateMachine(total_steps=STEP_REGISTRY.total_steps, defer_writes=True)
         for s in range(1, self._resume_from + 1):
             self._sm.mark_done(s)
 
@@ -67,19 +83,17 @@ class PipelineOrchestrator:
             self._init_agents()
 
     def _init_llm(self):
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        if not api_key:
-            env_file = ROOT / ".env"
-            if env_file.exists():
-                for line in env_file.read_text().split("\n"):
-                    if line.startswith("DEEPSEEK_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-        if not api_key:
-            print("[orchestrator] ⚠ DEEPSEEK_API_KEY 未设置，禁用 LLM Agent")
+        try:
+            self.llm_client, settings = configured_llm_client(ROOT)
+        except LLMConfigError as exc:
+            print(f"[orchestrator] ⚠ LLM 服务配置无效，禁用 LLM Agent: {exc}")
             self.use_llm = False
             return
-        from openai import OpenAI
-        self.llm_client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        if self.llm_client is None or settings is None:
+            print("[orchestrator] ⚠ 未配置 OpenAI-compatible LLM 服务，禁用 LLM Agent")
+            self.use_llm = False
+            return
+        self.llm_model = settings.model
 
     def _init_agents(self):
         if not self.llm_client:
@@ -90,15 +104,28 @@ class PipelineOrchestrator:
 
         self._agents[1] = QuantumAgent(
             llm_client=self.llm_client, max_retries=5,
+            model=self.llm_model,
             on_action=lambda a: self._sm.add_action(a),
+            on_decision=self._record_agent_decision,
+            recovery_policy=self._recovery_policy, tool_catalog=self._tool_catalog,
+            llm_budget=self._llm_budget,
         )
         self._agents[2] = TopologyAgent(
             llm_client=self.llm_client, max_retries=4,
+            model=self.llm_model,
             on_action=lambda a: self._sm.add_action(a),
+            on_decision=self._record_agent_decision,
+            recovery_policy=self._recovery_policy, tool_catalog=self._tool_catalog,
+            llm_budget=self._llm_budget,
         )
         self._agents[3] = SimulationAgent(
             llm_client=self.llm_client, max_retries=3,
+            model=self.llm_model,
             on_action=lambda a: self._sm.add_action(a),
+            on_decision=self._record_agent_decision,
+            on_config_updated=self._record_simulation_config_update,
+            recovery_policy=self._recovery_policy, tool_catalog=self._tool_catalog,
+            llm_budget=self._llm_budget,
         )
 
     # ============================================================
@@ -108,78 +135,235 @@ class PipelineOrchestrator:
     def _build_steps(self, run_dir: Path) -> list[tuple]:
         from willy.quantum.struct_g16 import run_all as g16_struct
         from willy.quantum.struct_orca import run_all as orca_struct
-        from willy.quantum.fchk_mol2 import batch_convert as fchk_mol2
         from willy.quantum.chg_resp import batch_make_chg as chg_resp
-        from willy.topology.topo_gaff import batch_make_topo
+        from willy.topology.backends import dispatch_topology
         from willy.topology.top_assembly import build as build_top
         from willy.simulation.mdp import build_all as build_mdp
         from willy.simulation.box import auto_from_config, InpGenerator
+        from willy.simulation._gmx_utils import build_stage_inputs
+        from willy.simulation.em import run_em
+        from willy.simulation.eq import run_eq
+        from willy.simulation.prod import run_prod
 
-        def _run_box(rd: str) -> StepResult:
-            config = auto_from_config(output_dir=rd, gro_dir=rd, pdb_dir=rd)
-            gen = InpGenerator(config)
-            return gen.run()
+        def _run_box(rd: str, config_path: str) -> StepResult:
+            from willy.simulation.box import validate_box_preflight
+            preflight = validate_box_preflight(config_path, rd)
+            if not preflight.success:
+                return preflight
+            try:
+                config = auto_from_config(
+                    config_path=config_path, output_dir=rd, gro_dir=rd, pdb_dir=rd,
+                )
+                gen = InpGenerator(config)
+                result = gen.run()
+                result.extra.setdefault("preflight", preflight.extra.get("preflight", {}))
+                return result
+            except (OSError, ValueError, RuntimeError) as exc:
+                return StepResult(
+                    step_name="box", step_index=PACKMOL_STEP, success=False,
+                    error=StepError(ErrorKind.INPUT_CONTRACT, f"建盒前置校验失败: {exc}"),
+                )
 
-        on_prog = lambda msg: self._sm.set_detail(msg)
-        cfg = str(ROOT / "config.json")
+        def _run_gromacs_stage(stage: str) -> StepResult:
+            inputs = build_stage_inputs(run_dir, stage)
+            kwargs = {
+                "work_dir": str(run_dir),
+                "mdp": str(inputs.mdp),
+                "conf": str(inputs.coordinates),
+                "topol": str(inputs.topol),
+                "itps": [str(path) for path in inputs.itps],
+                "tpr": str(inputs.tpr),
+                "on_progress": on_prog,
+                "on_heartbeat": lambda _snapshot: self._sm.heartbeat(),
+            }
+            if stage == "em":
+                result = run_em(**kwargs)
+            elif stage == "eq":
+                result = run_eq(**kwargs)
+            else:
+                result = run_prod(**kwargs)
+            result.target_type = "stage"
+            result.target = stage
+            return result
+
+        gromacs_steps = [
+            (STEP_REGISTRY.label_for(EM_STEP), lambda: _run_gromacs_stage("em"), "gromacs_em", False, 3),
+            (STEP_REGISTRY.label_for(EQ_STEP), lambda: _run_gromacs_stage("eq"), "gromacs_eq", False, 3),
+            (STEP_REGISTRY.label_for(PROD_STEP), lambda: _run_gromacs_stage("prod"), "gromacs_prod", False, 3),
+        ]
+
+        on_prog = lambda activity: self._sm.set_activity(**activity)
+        cfg = str(self._run_config_path or (run_dir / "config.json"))
 
         if self.backend == "orca":
             return [
-                ("ORCA 结构优化",    lambda: orca_struct(on_progress=on_prog),
+                ("ORCA 结构优化",    lambda: orca_struct(
+                    config_path=cfg, struct_dir=str(run_dir), on_progress=on_prog),
                  "struct_orca", True, 1),
-                ("SP + molden→mol2", lambda: _orca_sp_and_mol2(cfg, on_prog),
+                ("SP + molden→mol2", lambda: _orca_sp_and_mol2(
+                    cfg, on_prog, work_dir=run_dir),
                  "sp_orca", True, 1),
-                ("RESP 电荷",        lambda: chg_resp(on_progress=on_prog),
+                ("RESP 电荷",        lambda: chg_resp(
+                    struct_dir=str(run_dir), config_path=cfg, on_progress=on_prog),
                  "chg_resp", True, 1),
-                ("mol2+chg→itp+gro", lambda: batch_make_topo(output_dir=str(run_dir)),
-                 "topo_gaff", True, 2),
-                ("主拓扑 + 修订 itp", lambda: build_top(topo_dir=str(run_dir)),
+                ("分子拓扑参数化", lambda: dispatch_topology(
+                    config_path=cfg, workspace=run_dir, on_progress=on_prog),
+                 None, True, 2),
+                ("主拓扑 + 修订 itp", lambda: build_top(
+                    config_path=cfg, topo_dir=str(run_dir)),
                  None, False, 2),
-                ("生成 mdp",          lambda: build_mdp(output_dir=str(run_dir)),
+                ("生成 mdp",          lambda: build_mdp(
+                    config_path=cfg, output_dir=str(run_dir), on_progress=on_prog),
                  None, False, 3),
-                ("Packmol 盒子",      lambda: _run_box(str(run_dir)),
+                ("Packmol 盒子",      lambda: _run_box(str(run_dir), cfg),
                  "box", False, 3),
-            ]
+            ] + gromacs_steps
         return [
-            ("g16 优化 + formchk", lambda: g16_struct(on_progress=on_prog),
+            ("g16 优化 + formchk", lambda: g16_struct(
+                config_path=cfg, struct_dir=str(run_dir), on_progress=on_prog),
              "struct_g16", True, 1),
-            ("SP + mol2",           lambda: _g16_sp_and_mol2(cfg, on_prog),
+            ("SP + mol2",           lambda: _g16_sp_and_mol2(
+                cfg, on_prog, work_dir=run_dir),
              "sp_g16", True, 1),
-            ("RESP 电荷",           lambda: chg_resp(on_progress=on_prog),
+            ("RESP 电荷",           lambda: chg_resp(
+                struct_dir=str(run_dir), config_path=cfg, on_progress=on_prog),
              "chg_resp", True, 1),
-            ("mol2+chg→itp+gro",    lambda: batch_make_topo(output_dir=str(run_dir)),
-             "topo_gaff", True, 2),
-            ("主拓扑 + 修订 itp",    lambda: build_top(topo_dir=str(run_dir)),
+            ("分子拓扑参数化",       lambda: dispatch_topology(
+                config_path=cfg, workspace=run_dir, on_progress=on_prog),
+             None, True, 2),
+            ("主拓扑 + 修订 itp",    lambda: build_top(
+                config_path=cfg, topo_dir=str(run_dir)),
              None, False, 2),
-            ("生成 mdp",             lambda: build_mdp(output_dir=str(run_dir)),
+            ("生成 mdp",             lambda: build_mdp(
+                config_path=cfg, output_dir=str(run_dir), on_progress=on_prog),
              None, False, 3),
-            ("Packmol 盒子",         lambda: _run_box(str(run_dir)),
+            ("Packmol 盒子",         lambda: _run_box(str(run_dir), cfg),
              "box", False, 3),
-        ]
+        ] + gromacs_steps
+
+    def _prepare_run_directory(self, run_dir: Path) -> Path:
+        """Create an isolated run workspace from the immutable project inputs.
+
+        A precomputed Step 1 result is optional.  For the selected backend it
+        is copied into the run workspace when available; otherwise the source
+        ``.gjf`` is copied and Step 1 will create the intermediate normally.
+        A molecule is invalid only when neither form of quantum input exists.
+        """
+        run_dir.mkdir(parents=True, exist_ok=True)
+        config_source = ROOT / "config.json"
+        config_snapshot = run_dir / "config.json"
+        if not config_snapshot.exists():
+            if not config_source.exists():
+                raise FileNotFoundError(f"缺少项目配置文件: {config_source}")
+            copy_file(config_source, config_snapshot)
+
+        # Bind status persistence as soon as this run owns a workspace.  Any
+        # following setup failure belongs to this run, never to a root status.
+        self._run_dir = run_dir
+        self._run_config_path = config_snapshot
+        self._run_registry = RunRegistry(ROOT)
+        self._run_registry.register_run(
+            run_dir,
+            backend=self.backend,
+            total_steps=self._sm.total_steps,
+        )
+        from willy.env_registry import public_capabilities
+        capabilities = public_capabilities()
+        self._run_registry.record_environment_report(run_dir, capabilities)
+        self._sm.bind_status_path(run_dir / "status.json")
+        self._sm.bind_observer(self._record_run_status)
+        self._sm.set_extra(run_id=run_dir.name)
+
+        with config_snapshot.open() as f:
+            config = json.load(f)
+        from willy.workflow_config import validate_config
+        issues = validate_config(config)
+        if issues:
+            raise ValueError("配置契约无效: " + "; ".join(issues))
+        md = config.setdefault("md", {})
+        run_seed = md.get("run_seed")
+        if run_seed is None:
+            run_seed = secrets.randbelow(2_147_483_646) + 1
+            md["run_seed"] = run_seed
+            write_json(config_snapshot, config)
+        else:
+            run_seed = int(run_seed)
+        reusable_suffix = ".fchk" if self.backend == "g16" else ".molden"
+        missing_quantum_inputs: list[str] = []
+        for name in config.get("molecules", {}):
+            source_gjf = ROOT / "struct" / f"{name}.gjf"
+            source_intermediate = ROOT / "struct" / f"{name}{reusable_suffix}"
+            target_gjf = run_dir / source_gjf.name
+            target_intermediate = run_dir / source_intermediate.name
+
+            if source_intermediate.is_file():
+                if not target_intermediate.exists():
+                    shutil.copy2(source_intermediate, target_intermediate)
+                continue
+            if source_gjf.is_file():
+                # Missing .fchk/.molden is an expected new-run condition.  It
+                # must reach the Step 1 optimizer without becoming a UI error.
+                if not target_gjf.exists():
+                    shutil.copy2(source_gjf, target_gjf)
+                continue
+            missing_quantum_inputs.append(name)
+
+        if missing_quantum_inputs:
+            expected = f"{reusable_suffix} 或 .gjf"
+            raise ValueError(
+                f"缺少量子输入（{expected}）: {', '.join(missing_quantum_inputs)}"
+            )
+
+        for agent in self._agents.values():
+            if agent is not None and hasattr(agent, "set_workspace"):
+                agent.set_workspace(str(run_dir), str(config_snapshot))
+        from willy.simulation.manifest import initialize_manifest
+        initialize_manifest(run_dir, config_snapshot, random_seed=run_seed)
+        from willy.run_provenance import create_or_refresh_provenance
+        create_or_refresh_provenance(
+            run_dir,
+            project_root=ROOT,
+            backend=self.backend,
+            config_path=config_snapshot,
+            random_seed=run_seed,
+            capabilities=capabilities,
+            llm_model=self.llm_model,
+            prompt_versions={
+                agent.name: agent.prompt_version
+                for agent in self._agents.values()
+                if agent is not None
+            },
+        )
+        return config_snapshot
 
     # ============================================================
     # 执行
     # ============================================================
 
     def run(self, run_dir: Optional[Path] = None) -> bool:
+        if self._confirmed_action_id:
+            if run_dir is None:
+                raise ValueError("确认后的 EQ 重跑必须提供原运行目录")
+            return self._run_confirmed_eq_action(Path(run_dir).resolve())
         # ── 断点续跑：复用上次运行目录 ──
         if run_dir is None:
             if self._resume_run_dir:
                 run_dir = Path(self._resume_run_dir)
                 if not run_dir.exists():
-                    print(f"[orchestrator] ⚠ 续跑目录 {run_dir} 不存在，创建新目录")
-                    from willy.simulation.setup import _next_run_dir
-                    run_dir = _next_run_dir()
-                    run_dir.mkdir(parents=True, exist_ok=True)
-                    self._resume_from = 0  # 目录没了，不能续跑
+                    raise ValueError(f"续跑目录不存在: {run_dir}")
             else:
-                from willy.simulation.setup import _next_run_dir
-                run_dir = _next_run_dir()
-                run_dir.mkdir(parents=True, exist_ok=True)
+                raise ValueError("必须通过 PipelineLaunch 分配 run_dir")
 
-        # ── 记录 run_dir 到状态机 extra ──
-        self._sm._status.extra = {"run_dir": str(run_dir)}
-        self._sm._write()
+        run_dir = run_dir.resolve()
+        try:
+            config_path = self._prepare_run_directory(run_dir)
+        except (OSError, ValueError, json.JSONDecodeError, RunRegistryError) as exc:
+            self._sm.set_error(
+                public_error_summary("流水线", "运行初始化", "当前体系", ErrorKind.CONFIG_INVALID),
+                ErrorKind.CONFIG_INVALID.value,
+            )
+            self._sm.transition(State.ABORTED)
+            return False
 
         print(f"[orchestrator] 运行目录: {run_dir}")
         print(f"[orchestrator] 后端: {self.backend}")
@@ -187,46 +371,47 @@ class PipelineOrchestrator:
         if self._resume_from > 0:
             print(f"[orchestrator] 断点续跑: 仅跳过 Step 1 结构优化，Step 2+ 全部重跑")
 
-        # 读取 skipped_molecules
-        config_path = ROOT / "config.json"
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    cfg = json.load(f)
-                skipped = cfg.get("skipped_molecules", [])
-                if skipped:
-                    self._skipped_molecules = set(skipped)
-                    reasons = cfg.get("skip_reasons", {})
-                    for name in skipped:
-                        reason = reasons.get(name, "未指定")
-                        print(f"[orchestrator] ⚠ 跳过的分子: {name}（原因: {reason}）")
-            except (json.JSONDecodeError, OSError):
-                pass
-
         steps = self._build_steps(run_dir)
         accumulated_artifacts: dict[str, list[str]] = {}
 
         self._sm.transition(State.RUNNING)
 
-        for i, (label, func, dep_module, is_batch, layer_index) in enumerate(steps, 1):
+        if self._abort_if_stop_requested(run_dir):
+            return False
+
+        step_position = 1
+        while step_position <= len(steps):
+            if self._abort_if_stop_requested(run_dir):
+                return False
+            i = step_position
+            label, func, dep_module, is_batch, layer_index = steps[i - 1]
             # ── 断点续跑：跳过已完成步骤 ──
             if i <= self._resume_from:
-                print(f"\n  {i}/7 {label}  ⏭ 已完成，跳过")
+                print(f"\n  {i}/{len(steps)} {label}  ⏭ 已完成，跳过")
+                step_position += 1
                 continue
+
+            self._sm.set_step(i, label, STEP_REGISTRY.layer_for(i))
+            self._sm.set_activity(**self._initial_activity(i))
 
             if dep_module:
                 try:
                     ensure(dep_module)
                 except RuntimeError as e:
-                    self._sm.set_error(str(e), "dependency_missing")
+                    self._set_public_error(ErrorKind.DEPENDENCY_MISSING)
                     self._sm.transition(State.ABORTED)
                     return False
 
-            self._sm.set_step(i, label, _STEP_LAYER.get(i, ""))
-
-            print(f"\n{'='*60}\n  {i}/7 {label}\n{'='*60}")
+            print(f"\n{'='*60}\n  {i}/{len(steps)} {label}\n{'='*60}")
 
             result = func()
+            if self._abort_if_stop_requested(run_dir):
+                return False
+            if is_batch:
+                for item in result:
+                    self._record_step_result(item, label)
+            else:
+                self._record_step_result(result, label)
 
             if is_batch:
                 ok = self._handle_batch_result(result, label, run_dir, accumulated_artifacts, layer_index, i)
@@ -234,13 +419,352 @@ class PipelineOrchestrator:
                 ok = self._handle_single_result(result, label, run_dir, accumulated_artifacts, layer_index, i)
 
             if ok:
+                if self._rerun_step == i:
+                    self._rerun_step = None
+                    continue
+                if self._rollback_to_step is not None:
+                    step_position = self._rollback_to_step
+                    self._rollback_to_step = None
+                    continue
+                completion_failure = self._completion_contract_failure(i, run_dir)
+                if completion_failure is not None:
+                    self._record_step_result(completion_failure, label)
+                    self._set_public_error(completion_failure.error, completion_failure.target)
+                    self._sm.transition(State.ABORTED)
+                    print(f"[{label}] ❌ 阶段完成契约未满足，禁止进入下一步")
+                    return False
                 self._sm.mark_done(i)
+                step_position += 1
             else:
                 return False
 
         self._sm.transition(State.DONE)
         print(f"\n{'='*60}\n  ✅ 全流程完成\n  产物: {run_dir}/\n{'='*60}")
         return True
+
+    def _bind_confirmed_action_run(self, run_dir: Path) -> Path:
+        """Bind an existing waiting run without reinitializing its inputs."""
+        config_path = run_dir / "config.json"
+        if not config_path.is_file():
+            raise ValueError("恢复运行缺少配置快照")
+        registry = RunRegistry(ROOT)
+        registry.register_run(run_dir, backend=self.backend, total_steps=self._sm.total_steps)
+        status = registry.get_run_status(run_dir.name)
+        if status.get("state") not in {
+            State.AWAITING_CONFIRMATION.value,
+            State.RETRYING.value,
+        }:
+            raise ValueError("当前运行不处于等待确认状态")
+        pending = status.get("extra", {}).get("pending_action", {})
+        if not isinstance(pending, dict) or pending.get("action_id") != self._confirmed_action_id:
+            raise ValueError("待确认方案与当前运行不匹配")
+        self._run_dir = run_dir
+        self._run_config_path = config_path
+        self._run_registry = registry
+        self._sm.bind_status_path(run_dir / "status.json")
+        self._sm.bind_observer(self._record_run_status)
+        self._sm.restore_for_controlled_resume(status)
+        for agent in self._agents.values():
+            if agent is not None and hasattr(agent, "set_workspace"):
+                agent.set_workspace(str(run_dir), str(config_path))
+        return config_path
+
+    def _run_confirmed_eq_action(self, run_dir: Path) -> bool:
+        """Apply one user-approved EQ proposal and rerun EQ before PROD."""
+        try:
+            self._bind_confirmed_action_run(run_dir)
+            from willy.simulation.pending_action import apply_pending_action, public_pending_action
+            action = apply_pending_action(run_dir, self._confirmed_action_id)
+            from willy.env_registry import public_capabilities
+            from willy.run_provenance import create_or_refresh_provenance
+            config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+            create_or_refresh_provenance(
+                run_dir,
+                project_root=ROOT,
+                backend=self.backend,
+                config_path=run_dir / "config.json",
+                random_seed=int(config.get("md", {}).get("run_seed", 1)),
+                capabilities=public_capabilities(),
+                llm_model=self.llm_model,
+                prompt_versions={
+                    agent.name: agent.prompt_version
+                    for agent in self._agents.values()
+                    if agent is not None
+                },
+            )
+        except (OSError, ValueError, RunRegistryError) as exc:
+            self._sm.set_error(
+                public_error_summary("流水线", "确认重跑", "当前体系", ErrorKind.CONFIG_INVALID),
+                ErrorKind.CONFIG_INVALID.value,
+            )
+            self._sm.transition(State.ABORTED)
+            print(f"[orchestrator] 确认后的 EQ 重跑无法启动: {exc}")
+            return False
+
+        public_action = public_pending_action(action)
+        restart_step = int(public_action["restart_step"])
+
+        def record_execution(success: bool, summary: str, error_kind: str = "") -> None:
+            if self._run_registry is None:
+                return
+            try:
+                from willy.simulation.pending_action import pending_action_executed
+                executed = pending_action_executed(
+                    action,
+                    success=success,
+                    result_summary=summary,
+                    output_keys=("eq", "prod") if success else (),
+                    error_kind=error_kind,
+                )
+                self._run_registry.append_decision_trace(run_dir, {
+                    "decision_id": executed.decision_id,
+                    "action_id": executed.decision_id,
+                    "layer": executed.action.proposal.layer,
+                    "step": executed.action.proposal.failed_step,
+                    "policy_id": executed.action.policy_id,
+                    "selected_tool": executed.action.proposal.tool_name,
+                    "tool_effect": executed.action.effective_effect.value,
+                    "parameter_changes": [change.field_name for change in executed.action.proposal.parameter_changes],
+                    "model_id": executed.action.proposal.model_id,
+                    "prompt_version": executed.action.proposal.prompt_version,
+                    "restart_step": restart_step,
+                    "result": "executed",
+                    "success": executed.success,
+                })
+            except (OSError, ValueError):
+                pass
+
+        # A user approval first becomes an auditable controlled retry.  Do not
+        # advertise normal execution until all affected MDPs have been rebuilt
+        # and the replay is about to invoke the first scientific stage.
+        self._sm.start_retry("simulation", 1, 1)
+        self._sm.invalidate_for_controlled_restart(restart_step)
+        self._sm.set_step(restart_step, STEP_REGISTRY.label_for(restart_step), "simulation")
+        self._sm.add_adjustments(public_action.get("adjustments", []))
+        self._sm.add_action(
+            "用户已确认 EQ 修复方案，重新生成参数并从指定阶段重新验收"
+        )
+        if self._abort_if_stop_requested(run_dir):
+            record_execution(False, "用户在确认后的 EQ 重跑前请求停止")
+            return False
+
+        from willy.simulation.mdp import build_all
+        mdp_result = build_all(
+            config_path=str(self._run_config_path),
+            output_dir=str(run_dir),
+            stages=("em", "eq", "prod") if restart_step == PACKMOL_STEP else ("eq", "prod"),
+            on_progress=lambda activity: self._sm.set_activity(**activity),
+        )
+        self._record_step_result(mdp_result, "重新生成受影响 MDP", source="pending_action")
+        if not mdp_result.success:
+            self._set_public_error(mdp_result.error, "eq")
+            self._sm.transition(State.ABORTED)
+            record_execution(False, "受影响 MDP 重新生成失败", ErrorKind.CONFIG_INVALID.value)
+            return False
+
+        steps = self._build_steps(run_dir)
+        artifacts: dict[str, list[str]] = {}
+        self._sm.transition(State.RUNNING)
+        for step_i in STEP_REGISTRY.indices_from(restart_step):
+            if self._abort_if_stop_requested(run_dir):
+                record_execution(False, "用户在确认后的 EQ 重跑期间请求停止")
+                return False
+            label, func, dep_module, _is_batch, layer_index = steps[step_i - 1]
+            self._sm.set_step(step_i, label, STEP_REGISTRY.layer_for(step_i))
+            self._sm.set_activity(**self._initial_activity(step_i))
+            if dep_module:
+                try:
+                    ensure(dep_module)
+                except RuntimeError:
+                    self._set_public_error(ErrorKind.DEPENDENCY_MISSING)
+                    self._sm.transition(State.ABORTED)
+                    record_execution(False, "重跑依赖不可用", ErrorKind.DEPENDENCY_MISSING.value)
+                    return False
+            result = func()
+            if self._abort_if_stop_requested(run_dir):
+                record_execution(False, "用户在确认后的 EQ 重跑期间请求停止")
+                return False
+            self._record_step_result(result, label)
+            if not self._handle_single_result(result, label, run_dir, artifacts, layer_index, step_i):
+                kind = result.error.kind.value if result.error else ErrorKind.UNKNOWN.value
+                record_execution(False, "确认后的 EQ 重跑未通过后续验收", kind)
+                return False
+            completion_failure = self._completion_contract_failure(step_i, run_dir)
+            if completion_failure is not None:
+                self._record_step_result(completion_failure, label)
+                self._set_public_error(completion_failure.error, completion_failure.target)
+                self._sm.transition(State.ABORTED)
+                kind = completion_failure.error.kind.value if completion_failure.error else ErrorKind.UNKNOWN.value
+                record_execution(False, "确认后的重跑未满足阶段产物契约", kind)
+                return False
+            self._sm.mark_done(step_i)
+
+        self._sm.transition(State.DONE)
+        record_execution(True, "确认后的 EQ 重跑及 PROD 已完成")
+        print(f"[orchestrator] 已完成确认后的 EQ 重跑及 PROD: {run_dir}")
+        return True
+
+    def abort_from_signal(self) -> None:
+        """Finalize a UI/terminal signal as a user stop when a run is bound."""
+        if self._run_dir is None:
+            return
+        try:
+            from willy.simulation.manifest import clear_stop_request
+            clear_stop_request(self._run_dir)
+        except OSError:
+            pass
+        self._sm.set_aborted(user_requested=True)
+
+    def _abort_if_stop_requested(self, run_dir: Path) -> bool:
+        """Consume a persisted user request before an error can enter retry logic."""
+        try:
+            from willy.simulation.manifest import clear_stop_request, stop_requested
+            if not stop_requested(run_dir):
+                return False
+            clear_stop_request(run_dir)
+        except OSError:
+            return False
+        self._sm.set_aborted(user_requested=True)
+        print("[orchestrator] 已按用户请求中止当前运行")
+        return True
+
+    def _record_run_status(self, status, event_type: str) -> None:
+        """Mirror state into the active run; failures are handled by the observer."""
+        if self._run_registry is not None and self._run_dir is not None:
+            self._run_registry.record_status(self._run_dir, status.__dict__, event_type)
+
+    def _record_agent_decision(self, trace: dict[str, object]) -> None:
+        """Persist one bounded Agent decision only after a run is bound."""
+        if self._run_registry is None or self._run_dir is None:
+            return
+        try:
+            self._run_registry.append_decision_trace(self._run_dir, trace)
+        except OSError:
+            pass
+
+    def _record_step_result(self, result: StepResult, label: str, source: str = "pipeline") -> None:
+        """Add a read-only audit record without changing pipeline success semantics."""
+        if self._run_registry is None or self._run_dir is None:
+            return
+        try:
+            self._run_registry.record_step_result(
+                self._run_dir,
+                result,
+                label=label,
+                source=source,
+                activity=self._sm._status.activity,
+            )
+        except Exception as exc:
+            print(f"[orchestrator] ⚠ 运行步骤审计写入失败: {exc}")
+
+    def _initial_activity(self, step: int) -> dict:
+        """Return a public, Chinese activity placeholder before a callback fires."""
+        backend_tool = "ORCA" if self.backend == "orca" else "G16"
+        activities = {
+            STEP_REGISTRY.by_id("quantum_optimize").index: (backend_tool, "结构优化", "molecule", "待处理分子", 0, 0),
+            STEP_REGISTRY.by_id("quantum_singlepoint_mol2").index: (backend_tool, "单点计算与 mol2 转换", "molecule", "待处理分子", 0, 0),
+            STEP_REGISTRY.by_id("quantum_resp").index: ("Multiwfn", "RESP 电荷计算", "molecule", "待处理分子", 0, 0),
+            STEP_REGISTRY.by_id("topology_parameterize").index: ("拓扑工具", "拓扑参数化", "molecule", "待处理分子", 0, 0),
+            STEP_REGISTRY.by_id("topology_assemble").index: ("拓扑组装", "主拓扑生成", "system", "当前体系", 1, 1),
+            MDP_STEP: ("MDP", "参数生成", "stage", "待生成阶段", 0, 4),
+            PACKMOL_STEP: ("Packmol", "初始盒子构建", "system", "当前体系", 1, 1),
+            EM_STEP: ("GROMACS", "输入预处理", "stage", "em", 0, 2),
+            EQ_STEP: ("GROMACS", "输入预处理", "stage", "eq", 0, 2),
+            PROD_STEP: ("GROMACS", "输入预处理", "stage", "prod", 0, 2),
+        }
+        tool, operation, target_type, target, current, total = activities[step]
+        return {
+            "tool": tool, "operation": operation,
+            "target_type": target_type, "target": target,
+            "current": current, "total": total,
+        }
+
+    def _set_public_error(self, error: StepError | ErrorKind | None, target: str = "") -> None:
+        """Persist only a tool/action/object summary to the public state."""
+        activity = self._sm._status.activity
+        if not activity:
+            step = self._sm._status.step
+            activity = self._initial_activity(step) if step else {
+                "tool": "流水线", "operation": "工序执行",
+                "target_type": "system", "target": "当前体系",
+                "current": 1, "total": 1,
+            }
+        resolved_target = target or activity["target"]
+        kind = error.kind if isinstance(error, StepError) else error
+        self._sm.set_error(
+            public_error_summary(activity["tool"], activity["operation"], resolved_target, error),
+            kind.value if isinstance(kind, ErrorKind) else "unknown",
+        )
+
+    def _record_simulation_config_update(
+        self,
+        before: dict,
+        after: dict,
+        updated_fields: list[str],
+    ) -> None:
+        """Expose only a whitelist of applied MD configuration deltas to the UI."""
+        field_specs = {
+            "dt": ("时间步长", ("md", "dt"), " ps"),
+            "ref_p": ("目标压力", ("md", "ref_p"), " bar"),
+            "tcoupl": ("恒温器", ("md", "tcoupl"), ""),
+            "tau_t": ("恒温耦合时间", ("md", "tau_t"), " ps"),
+            "pcoupl": ("压强耦合器", ("md", "pcoupl"), ""),
+            "constraints": ("键长约束", ("md", "constraints"), ""),
+            "rcoulomb": ("静电截断半径", ("md", "rcoulomb"), " nm"),
+            "rvdw": ("范德华截断半径", ("md", "rvdw"), " nm"),
+            "nsteps": ("能量最小化步数", ("md", "nsteps"), ""),
+            "emtol": ("最小化力阈值", ("md", "emtol"), ""),
+            "emstep": ("最小化步长", ("md", "emstep"), ""),
+            "lincs_iter": ("LINCS 迭代次数", ("md", "lincs_iter"), ""),
+            "lincs_order": ("LINCS 阶数", ("md", "lincs_order"), ""),
+            "eq_high_temperature": ("EQ 高温点", ("md", "eq", "high_temperature"), " K"),
+            "eq_transition_temperature": ("EQ 过渡温度", ("md", "eq", "transition_temperature"), " K"),
+            "eq_target_temperature": ("EQ 目标温度", ("md", "eq", "target_temperature"), " K"),
+            "eq_tau_p": ("EQ 压强耦合时间", ("md", "eq", "tau_p"), " ps"),
+            "prod_duration_ns": ("生产模拟时长", ("md", "prod", "duration_ns"), " ns"),
+            "prod_temperature": ("生产模拟温度", ("md", "prod", "temperature"), " K"),
+            "prod_tau_p": ("生产模拟压强耦合时间", ("md", "prod", "tau_p"), " ps"),
+            "outputs.trr": ("完整精度轨迹输出", ("md", "outputs", "trr"), ""),
+            "box.target_mass_density_g_cm3": ("初始质量密度", ("box", "target_mass_density_g_cm3"), " g/cm3"),
+            "box.packing_number_density_nm3": ("建盒数密度", ("box", "packing_number_density_nm3"), " 分子/nm3"),
+            "box.box_size": ("建盒边长", ("box", "box_size"), " A"),
+            "box.tolerance": ("建盒间距", ("box", "tolerance"), " A"),
+        }
+        adjustments = []
+        for field in updated_fields:
+            spec = field_specs.get(field)
+            if spec is None:
+                continue
+            name, path, unit = spec
+            old_value = self._nested_value(before, path)
+            new_value = self._nested_value(after, path)
+            if old_value == new_value or old_value is None or new_value is None:
+                continue
+            adjustments.append({
+                "name": name,
+                "before": self._format_public_config_value(old_value, unit),
+                "after": self._format_public_config_value(new_value, unit),
+            })
+        self._sm.add_adjustments(adjustments)
+
+    @staticmethod
+    def _nested_value(payload: dict, path: tuple[str, ...]):
+        value = payload
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                return None
+            value = value[key]
+        return value
+
+    @staticmethod
+    def _format_public_config_value(value: object, unit: str) -> str:
+        if isinstance(value, bool):
+            return ("开启" if value else "关闭") + unit
+        if isinstance(value, float):
+            text = f"{value:g}"
+        else:
+            text = str(value)
+        return f"{text}{unit}"
 
     # ============================================================
     # 结果处理
@@ -249,6 +773,15 @@ class PipelineOrchestrator:
     def _handle_batch_result(self, results: list[StepResult], label: str,
                               run_dir: Path, artifacts: dict, layer_index: int,
                               step_i: int) -> bool:
+        if self._abort_if_stop_requested(run_dir):
+            return False
+        if not results:
+            message = f"{label} 未产生任何结果，检查本次运行目录中的输入文件"
+            self._set_public_error(ErrorKind.FILE_NOT_FOUND)
+            self._sm.transition(State.ABORTED)
+            print(f"[{label}] ❌ {message}")
+            return False
+
         ok = sum(1 for r in results if r.success)
         failed = [r for r in results if not r.success]
 
@@ -261,32 +794,12 @@ class PipelineOrchestrator:
             print(f"[{label}] ✅ {ok}/{len(results)} 全部成功")
             return True
 
-        # 过滤 skipped_molecules：将其从失败列表中移除
-        if self._skipped_molecules:
-            real_failed = []
-            for r in failed:
-                # 尝试从 error message / outputs 中匹配分子名
-                is_skipped = False
-                for mol_name in self._skipped_molecules:
-                    err_msg = r.error.message if r.error else ""
-                    if mol_name in err_msg or mol_name in str(r.outputs):
-                        is_skipped = True
-                        print(f"[{label}] ⏭ 跳过 {mol_name}（在 skip 列表中）")
-                        # 将跳过的分子产物仍收集起来（如果有部分输出的话）
-                        for k, v in r.outputs.items():
-                            artifacts.setdefault(k, []).append(v)
-                        break
-                if not is_skipped:
-                    real_failed.append(r)
-            if not real_failed:
-                print(f"[{label}] ✅ {ok}/{len(results)} 成功（{len(failed) - len(real_failed)} 个已跳过）")
-                return True
-            failed = real_failed
-
         # 记录错误到状态机
         first_err = failed[0].error
         if first_err:
-            self._sm.set_error(first_err.message[:200], first_err.kind.value)
+            self._set_public_error(first_err, failed[0].target)
+        else:
+            self._set_public_error(ErrorKind.UNKNOWN, failed[0].target)
 
         print(f"[{label}] ❌ {ok}/{len(results)} 成功, {len(failed)} 失败")
         for r in failed:
@@ -299,25 +812,56 @@ class PipelineOrchestrator:
             self._sm.transition(State.ABORTED)
             return False
 
-        return self._invoke_agent(failed[0], label, run_dir, artifacts, layer_index)
+        for failed_result in failed:
+            if not self._invoke_agent(failed_result, label, run_dir, artifacts, layer_index):
+                return False
+        return True
 
     def _handle_single_result(self, result: StepResult, label: str,
                                run_dir: Path, artifacts: dict, layer_index: int,
                                step_i: int) -> bool:
+        if self._abort_if_stop_requested(run_dir):
+            return False
         if result.success:
             print(f"[{label}] ✅ 完成 ({result.duration_s:.1f}s)")
             for k, v in result.outputs.items():
                 artifacts.setdefault(k, []).append(v)
+            if step_i == PACKMOL_STEP:
+                try:
+                    from willy.simulation.manifest import box_parameters_changed, record_box_attempt
+                    record_box_attempt(run_dir, result.extra.get("box_parameters", {}))
+                    if not box_parameters_changed(run_dir):
+                        self._set_public_error(ErrorKind.INPUT_CONTRACT)
+                        self._sm.transition(State.ABORTED)
+                        print("[Packmol 盒子] ❌ 回滚后盒子体积或建盒参数未发生实际变化")
+                        return False
+                except (OSError, ValueError) as exc:
+                    self._set_public_error(ErrorKind.INPUT_CONTRACT)
+                    self._sm.transition(State.ABORTED)
+                    print(f"[Packmol 盒子] ❌ 无法记录建盒参数: {exc}")
+                    return False
             return True
 
         err = result.error
         if err:
-            self._sm.set_error(err.message[:200], err.kind.value)
+            self._set_public_error(err, result.target)
             print(f"[{label}] ❌ [{err.kind.value}] {err.message[:100]}")
             if err.hint: print(f"  → {err.hint}")
         else:
-            self._sm.set_error("未知错误")
+            self._set_public_error(ErrorKind.UNKNOWN, result.target)
             print(f"[{label}] ❌ 失败（无详细错误信息）")
+
+        # EQ protocol or acceptance failures are never auto-repaired.  The
+        # model may diagnose and propose a bounded change, but the run remains
+        # parked until the user approves that exact proposal.
+        if step_i == EQ_STEP and layer_index == 3:
+            return self._await_eq_user_confirmation(result, label, run_dir)
+
+        rollback_step = result.extra.get("rollback_to_step")
+        if rollback_step is not None and self._schedule_simulation_rollback(
+            result, run_dir, int(rollback_step), step_i,
+        ):
+            return True
 
         if not self.use_llm or layer_index is None:
             self._sm.transition(State.ABORTED)
@@ -325,8 +869,151 @@ class PipelineOrchestrator:
 
         return self._invoke_agent(result, label, run_dir, artifacts, layer_index)
 
+    def _await_eq_user_confirmation(
+        self,
+        result: StepResult,
+        label: str,
+        run_dir: Path,
+    ) -> bool:
+        """Persist a proposal for an EQ failure and intentionally stop the runner."""
+        agent = self._agents.get(3)
+        if agent is None or not hasattr(agent, "propose_eq_recovery"):
+            self._sm.transition(State.ABORTED)
+            print(f"[{label}] ❌ 无可用 Simulation Agent，无法生成待确认方案")
+            return False
+        print(f"\n[{label}] 🤖 正在生成 EQ 修复方案，等待用户确认...")
+        proposal = agent.propose_eq_recovery(
+            result,
+            str(self._run_config_path or (run_dir / "config.json")),
+        )
+        try:
+            from willy.simulation.pending_action import (
+                PendingActionError,
+                create_eq_pending_action,
+                public_pending_action,
+            )
+            eq_result = result.extra.get("eq_result")
+            details = getattr(eq_result, "details", {})
+            vacuum = details.get("vacuum", {}) if isinstance(details, dict) else {}
+            requires_box_rebuild = result.extra.get("rollback_to_step") == PACKMOL_STEP
+            action = create_eq_pending_action(
+                run_dir,
+                proposal=proposal,
+                requires_box_rebuild=requires_box_rebuild or bool(
+                    isinstance(vacuum, dict) and vacuum.get("detected")
+                ),
+            )
+            self._sm.set_awaiting_confirmation(public_pending_action(action))
+            if self._run_registry is not None:
+                try:
+                    from willy.simulation.pending_action import pending_action_validated
+                    validated = pending_action_validated(action)
+                    self._run_registry.append_decision_trace(run_dir, {
+                        "decision_id": validated.decision_id,
+                        "action_id": validated.decision_id,
+                        "layer": validated.proposal.layer,
+                        "step": validated.proposal.failed_step,
+                        "error_kind": result.error.kind.value if result.error else "unknown",
+                        "policy_id": validated.policy_id,
+                        "selected_tool": validated.proposal.tool_name,
+                        "tool_effect": validated.declaration.effect.value,
+                        "parameter_changes": [change.field_name for change in validated.proposal.parameter_changes],
+                        "restart_step": action.get("restart_step"),
+                        "requires_confirmation": validated.requires_confirmation,
+                        "result": "awaiting_confirmation",
+                    })
+                except (OSError, ValueError):
+                    pass
+        except (OSError, ValueError, PendingActionError) as exc:
+            self._sm.transition(State.ABORTED)
+            print(f"[{label}] ❌ 无法生成待确认方案: {exc}")
+            return False
+        print(f"[{label}] ⏸ 已生成待确认 EQ 方案，等待用户回复")
+        return False
+
+    def _schedule_simulation_rollback(
+        self,
+        result: StepResult,
+        run_dir: Path,
+        target_step: int,
+        failed_step: int,
+    ) -> bool:
+        """Return an EM/EQ failure to Packmol with bounded, audited cleanup."""
+        if target_step != PACKMOL_STEP:
+            return False
+        attempts = self._rollback_attempts.get(failed_step, 0)
+        max_attempts = self._max_box_rollbacks()
+        if attempts >= max_attempts:
+            self._sm.add_action(
+                f"Step {failed_step} 已达到 {max_attempts} 次 Packmol 回滚上限，转入 Agent 处理"
+            )
+            return False
+
+        self._rollback_attempts[failed_step] = attempts + 1
+        reason = result.extra.get("rollback_reason", f"Step {failed_step} 需要重新建盒")
+        multiplier = result.extra.get("box_density_multiplier")
+        if multiplier is not None:
+            adjustment = self._adjust_box_density(float(multiplier))
+            if adjustment:
+                reason = f"{reason}；{adjustment}"
+
+        self._remove_gromacs_outputs(run_dir)
+        self._sm.rollback_to(PACKMOL_STEP, STEP_REGISTRY.label_for(PACKMOL_STEP), "simulation", reason)
+        self._rollback_to_step = PACKMOL_STEP
+        print(f"[orchestrator] ↩ {reason}")
+        return True
+
+    def _max_box_rollbacks(self) -> int:
+        try:
+            config_path = self._run_config_path
+            if config_path is None:
+                return 1
+            value = json.loads(config_path.read_text()).get("md", {}).get("max_box_rollbacks", 1)
+            return max(0, int(value))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return 1
+
+    def _adjust_box_density(self, multiplier: float) -> str:
+        """Persist a bounded EQ-vacuum repair in the isolated run snapshot only."""
+        config_path = self._run_config_path
+        if config_path is None:
+            return ""
+        try:
+            config = json.loads(config_path.read_text())
+            box = config.setdefault("box", {})
+            uses_mass_density = "target_mass_density_g_cm3" in box
+            field = "target_mass_density_g_cm3" if uses_mass_density else "packing_number_density_nm3"
+            density = float(box.get(field, 1.0 if uses_mass_density else 6.0))
+            new_density = round(density * multiplier, 6)
+            box[field] = new_density
+            if box.get("box_size") is not None:
+                old_size = float(box["box_size"])
+                box["box_size"] = round(old_size * (density / new_density) ** (1 / 3), 6)
+            write_json(config_path, config)
+            label = "初始质量密度" if uses_mass_density else "填充数密度"
+            return f"已将{label}调整为原来的 {multiplier:.2f} 倍"
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self._sm.add_action(f"无法持久化 EQ 真空区的密度修复: {exc}")
+            return ""
+
+    @staticmethod
+    def _remove_gromacs_outputs(run_dir: Path) -> None:
+        """Remove only known, regenerable GROMACS artifacts inside one run."""
+        names = {
+            f"{stage}.{suffix}"
+            for stage in ("em", "eq", "prod")
+            for suffix in ("tpr", "gro", "xtc", "edr", "log", "cpt", "trr")
+        }
+        names.update({"density.xvg", "temp.xvg"})
+        for name in names:
+            path = run_dir / name
+            if path.is_file():
+                path.unlink()
+
     def _invoke_agent(self, step_result: StepResult, label: str,
                        run_dir: Path, artifacts: dict, layer_index: int) -> bool:
+        if self._abort_if_stop_requested(run_dir):
+            return False
         agent = self._agents.get(layer_index)
         if agent is None:
             print(f"[{label}] ⚠ 无可用 Agent（层 {layer_index}），跳过自动修复")
@@ -334,6 +1021,11 @@ class PipelineOrchestrator:
             return False
 
         print(f"\n[{label}] 🤖 调用 {agent.name} Agent 进行自动修复...")
+
+        # A batch may contain several failed molecules.  The public retry
+        # state must follow the item being repaired rather than retaining the
+        # first failure selected by _handle_batch_result().
+        self._set_public_error(step_result.error or ErrorKind.UNKNOWN, step_result.target)
 
         # 进入 RETRYING
         self._sm.start_retry(agent.name, 0, agent.max_retries)
@@ -345,22 +1037,78 @@ class PipelineOrchestrator:
             elif isinstance(v, str):
                 flat_artifacts[k] = v
 
+        # 失败步骤也可能已生成可用于修复的中间产物（例如 Step 2 的
+        # *_opt.fchk）。它们必须覆盖同名的历史产物，供 Agent 精确重试。
+        for k, v in step_result.outputs.items():
+            if v:
+                flat_artifacts[k] = str(v)
+
         repair_result = agent.handle_failure(
             step_result=step_result,
-            config_path=str(ROOT / "config.json"),
+            config_path=str(self._run_config_path or (run_dir / "config.json")),
             run_dir=str(run_dir),
             artifacts=flat_artifacts,
             state_machine=self._sm,
         )
 
+        if self._abort_if_stop_requested(run_dir):
+            return False
+
         if repair_result.success:
+            restart_step, identity_failure = self._repair_restart_step(
+                step_result, repair_result, run_dir,
+            )
+            if identity_failure is not None:
+                self._record_step_result(identity_failure, label, source=f"agent:{agent.name}")
+                self._set_public_error(identity_failure.error, identity_failure.target)
+                self._sm.transition(State.ABORTED)
+                print(f"[{label}] ❌ Agent 修复结果不具备当前步骤完成资格")
+                return False
+
+            if restart_step is not None:
+                self._record_step_result(repair_result, label, source=f"agent:{agent.name}")
+                for k, v in repair_result.outputs.items():
+                    artifacts.setdefault(k, []).append(v)
+                return self._schedule_repair_restart(
+                    step_result, repair_result, restart_step, label,
+                )
+
+            contract_failure = self._repair_contract_failure(step_result, repair_result, run_dir)
+            if contract_failure is not None:
+                self._record_step_result(contract_failure, label, source=f"agent:{agent.name}")
+                rerun_key = (step_result.step_index, step_result.target)
+                attempts = self._repair_rerun_attempts.get(rerun_key, 0)
+                if attempts < 1:
+                    self._repair_rerun_attempts[rerun_key] = attempts + 1
+                    self._rerun_step = step_result.step_index
+                    self._sm.add_action(
+                        f"{step_result.target} 的修复仅补足上游产物，重跑当前步骤"
+                    )
+                    self._sm.transition(State.RUNNING, step=step_result.step_index)
+                    print(f"[{label}] ↩ Agent 修复未满足步骤产物契约，重跑当前步骤")
+                    return True
+
+                self._set_public_error(contract_failure.error, contract_failure.target)
+                self._sm.transition(State.ABORTED)
+                print(f"[{label}] ❌ Agent 修复未满足步骤产物契约")
+                return False
+
+            self._record_step_result(repair_result, label, source=f"agent:{agent.name}")
             print(f"[{label}] ✅ Agent 修复成功")
             self._sm.transition(State.RUNNING, step=step_result.step_index)
             for k, v in repair_result.outputs.items():
                 artifacts.setdefault(k, []).append(v)
             return True
 
+        self._record_step_result(repair_result, label, source=f"agent:{agent.name}")
+
         if repair_result.escalated:
+            # The original step error remains the public physical failure.
+            # Agent escalation text describes remediation, not a new engine
+            # outcome, and must not overwrite error type or target.
+            final_error = step_result.error or repair_result.error or ErrorKind.UNKNOWN
+            final_target = step_result.target or repair_result.target
+            self._set_public_error(final_error, final_target)
             escalation = repair_result.extra.get("escalation", {})
             self._sm.set_escalated(escalation)
             print(f"\n[{label}] 🆘 自动修复失败，已升级到用户")
@@ -371,13 +1119,206 @@ class PipelineOrchestrator:
                 for act in escalation.get("actions_tried", []):
                     print(f"    - {act}")
         else:
+            final_error = repair_result.error or step_result.error or ErrorKind.UNKNOWN
+            final_target = repair_result.target or step_result.target
+            self._set_public_error(final_error, final_target)
             self._sm.transition(State.ABORTED)
             print(f"[{label}] ❌ Agent 修复失败")
 
         return False
 
+    def _repair_restart_step(
+        self,
+        failed_step: StepResult,
+        repair_result: StepResult,
+        run_dir: Path,
+    ) -> tuple[int | None, StepResult | None]:
+        """Classify a successful repair without granting downstream completion.
 
-def _g16_sp_and_mol2(config_path: str, on_progress) -> list:
+        A repair tool may execute the failed step itself, or it may complete a
+        prerequisite such as MDP regeneration, Packmol, or EM.  In the latter
+        case the original failed step must be re-executed (or the whole
+        invalidated simulation suffix must be replayed).  A tool may never use
+        a later step to satisfy an earlier failure.
+        """
+        if repair_result.step_index == failed_step.step_index:
+            if (
+                failed_step.target
+                and repair_result.target
+                and failed_step.target != repair_result.target
+            ):
+                return None, self._repair_identity_failure(
+                    failed_step, repair_result,
+                    "修复对象与失败对象不一致",
+                )
+            return None, None
+
+        if repair_result.step_index > failed_step.step_index:
+            return None, self._repair_identity_failure(
+                failed_step, repair_result,
+                "下游步骤不能替代上游失败步骤",
+            )
+
+        source_stage = STEP_REGISTRY.stage_for(repair_result.step_index)
+        if source_stage is not None:
+            source_failure = self._completion_contract_failure(repair_result.step_index, run_dir)
+            if source_failure is not None:
+                return None, source_failure
+
+        restart_step = failed_step.step_index
+        invalidated_stages = repair_result.extra.get("invalidated_stages", [])
+        if failed_step.step_index >= STEP_REGISTRY.by_id("simulation_mdp").index and isinstance(invalidated_stages, list):
+            invalidated_steps = [
+                STEP_REGISTRY.index_for_stage(stage)
+                for stage in invalidated_stages
+                if STEP_REGISTRY.index_for_stage(stage) is not None
+            ]
+            if invalidated_steps:
+                restart_step = min(invalidated_steps)
+        elif failed_step.step_index >= STEP_REGISTRY.by_id("simulation_mdp").index and repair_result.step_index == PACKMOL_STEP:
+            # A rebuilt Packmol box changes the EM input even if the tool did
+            # not expose its invalidation list.
+            restart_step = EM_STEP
+
+        return restart_step, None
+
+    def _schedule_repair_restart(
+        self,
+        failed_step: StepResult,
+        repair_result: StepResult,
+        restart_step: int,
+        label: str,
+    ) -> bool:
+        """Persist an explicit rerun/rollback directive for an upstream repair."""
+        rerun_key = (failed_step.step_index, failed_step.target)
+        attempts = self._repair_rerun_attempts.get(rerun_key, 0)
+        if attempts >= 1:
+            failure = self._repair_identity_failure(
+                failed_step,
+                repair_result,
+                "修复后仍未完成目标步骤",
+            )
+            self._set_public_error(failure.error, failure.target)
+            self._sm.transition(State.ABORTED)
+            print(f"[{label}] ❌ Agent 修复后仍未完成目标步骤")
+            return False
+
+        self._repair_rerun_attempts[rerun_key] = attempts + 1
+        source = STEP_REGISTRY.label_for(repair_result.step_index)
+        if restart_step < failed_step.step_index:
+            target_label = STEP_REGISTRY.label_for(restart_step)
+            self._sm.rollback_to(
+                restart_step,
+                target_label,
+                STEP_REGISTRY.layer_for(restart_step),
+                f"{source} 修复影响上游阶段，需重新验收后续工序",
+            )
+            self._rollback_to_step = restart_step
+            print(f"[{label}] ↩ Agent 已修复 {source}，从 Step {restart_step} 重新验收")
+            return True
+
+        self._rerun_step = failed_step.step_index
+        self._sm.add_action(f"{source} 修复完成，重跑当前步骤进行验收")
+        self._sm.transition(State.RUNNING, step=failed_step.step_index)
+        print(f"[{label}] ↩ Agent 修复完成，重跑当前步骤")
+        return True
+
+    @staticmethod
+    def _repair_identity_failure(
+        failed_step: StepResult,
+        repair_result: StepResult,
+        reason: str,
+    ) -> StepResult:
+        return StepResult(
+            step_name=failed_step.step_name,
+            step_index=failed_step.step_index,
+            success=False,
+            error=StepError(
+                ErrorKind.INPUT_CONTRACT,
+                f"{failed_step.step_name}: {reason}（修复工具实际执行 Step {repair_result.step_index}）",
+            ),
+            target_type=failed_step.target_type,
+            target=failed_step.target,
+        )
+
+    @staticmethod
+    def _repair_contract_failure(
+        failed_step: StepResult,
+        repair_result: StepResult,
+        run_dir: Path,
+    ) -> StepResult | None:
+        """Reject an Agent success that did not produce the failed step's outputs.
+
+        A Step 2 repair may legitimately create its missing Step 1 ``.fchk``.
+        That is useful upstream progress, but it is not a successful SP/mol2
+        repair until the Step 2 artifacts themselves exist in this run.
+        """
+        if failed_step.step_index != 2 or not failed_step.target:
+            return None
+        target = failed_step.target
+        required = [run_dir / f"{target}_opt.fchk", run_dir / f"{target}.mol2"]
+        missing = [path.name for path in required if not path.is_file()]
+        if not missing:
+            return None
+        return StepResult(
+            step_name=failed_step.step_name,
+            step_index=failed_step.step_index,
+            success=False,
+            error=StepError(
+                ErrorKind.INPUT_CONTRACT,
+                f"{target}: Agent 修复未生成 Step 2 必需产物: {', '.join(missing)}",
+            ),
+            target_type=failed_step.target_type,
+            target=target,
+        )
+
+    @staticmethod
+    def _completion_contract_failure(step_index: int, run_dir: Path) -> StepResult | None:
+        """Return a failure unless a completed MD step has private evidence.
+
+        ``StepResult.success`` is an execution claim.  For EM/EQ/PROD the
+        private MD manifest and non-empty stage outputs are the authority that
+        grants a pipeline completion permission.
+        """
+        stage = STEP_REGISTRY.stage_for(step_index)
+        if stage is None:
+            return None
+
+        required_status = "completed" if stage == "prod" else "accepted"
+        required_outputs = ["tpr", "gro", "xtc", "edr"]
+        if stage in {"eq", "prod"}:
+            required_outputs.append("cpt")
+        try:
+            from willy.simulation.manifest import ManifestError, load_manifest
+            manifest = load_manifest(run_dir)
+            record = manifest.get("stages", {}).get(stage, {})
+            if record.get("status") != required_status:
+                raise ManifestError(
+                    f"{stage.upper()} 尚未写入 {required_status} 阶段许可"
+                )
+            missing = [
+                name for name in required_outputs
+                if not (run_dir / f"{stage}.{name}").is_file()
+                or (run_dir / f"{stage}.{name}").stat().st_size <= 0
+            ]
+            if missing:
+                raise ManifestError(
+                    f"{stage.upper()} 缺少非空阶段产物: {', '.join(missing)}"
+                )
+        except (ManifestError, OSError, ValueError) as exc:
+            return StepResult(
+                step_name=stage,
+                step_index=step_index,
+                success=False,
+                error=StepError(ErrorKind.INPUT_CONTRACT, str(exc)),
+                target_type="stage",
+                target=stage,
+            )
+        return None
+
+
+def _g16_sp_and_mol2(config_path: str, on_progress=None,
+                     work_dir: str | Path | None = None) -> list:
     """Step 2 (G16): *_opt.fchk → *_opt.fchk + .mol2."""
     import json
     from willy.quantum.singlepoint_g16 import run as sp_run
@@ -386,31 +1327,44 @@ def _g16_sp_and_mol2(config_path: str, on_progress) -> list:
     with open(config_path) as f:
         molecules = json.load(f).get("molecules", {})
 
+    workspace = Path(work_dir) if work_dir is not None else ROOT / "struct"
     results = []
     total = len(molecules)
     for i, (name, cfg) in enumerate(molecules.items(), 1):
         if on_progress:
-            on_progress(f"分子 {i}/{total}: {name}")
-        fchk_path = str(ROOT / "struct" / f"{name}.fchk")
+            on_progress({
+                "tool": "G16", "operation": "单点计算与 mol2 转换",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
+        fchk_path = str(workspace / f"{name}.fchk")
         if not Path(fchk_path).exists():
             results.append(StepResult(
                 step_name="sp_mol2_g16", step_index=2, success=False,
                 error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
-                                message=f"{name}.fchk 不存在，需先运行 Step 1 结构优化")))
+                                message=f"{name}.fchk 不存在，需先运行 Step 1 结构优化"),
+                target_type="molecule", target=name))
             continue
         charge = cfg.get("charge", 0)
         spin = cfg.get("spin", 1)
-        sr = sp_run(fchk_path, charge=charge, spin=spin)
+        sr = sp_run(fchk_path, charge=charge, spin=spin, workdir=str(workspace))
         if sr.success:
             opt_fchk = sr.outputs["fchk"]
             sr2 = mol2_convert(opt_fchk)
-            sr.outputs["mol2"] = sr2.outputs.get("mol2", "")
-            sr.artifacts.extend(sr2.artifacts)
+            if sr2.success:
+                sr.outputs["mol2"] = sr2.outputs["mol2"]
+                sr.artifacts.extend(sr2.artifacts)
+            else:
+                sr.success = False
+                sr.error = sr2.error
+        sr.target_type = "molecule"
+        sr.target = name
         results.append(sr)
     return results
 
 
-def _orca_sp_and_mol2(config_path: str, on_progress) -> list:
+def _orca_sp_and_mol2(config_path: str, on_progress=None,
+                      work_dir: str | Path | None = None) -> list:
     """Step 2 (ORCA): *_opt.molden → *_opt.fchk → .mol2."""
     import json
     from willy.quantum.singlepoint_orca import run as sp_run
@@ -419,26 +1373,38 @@ def _orca_sp_and_mol2(config_path: str, on_progress) -> list:
     with open(config_path) as f:
         molecules = json.load(f).get("molecules", {})
 
+    workspace = Path(work_dir) if work_dir is not None else ROOT / "struct"
     results = []
     total = len(molecules)
     for i, (name, cfg) in enumerate(molecules.items(), 1):
         if on_progress:
-            on_progress(f"分子 {i}/{total}: {name}")
-        molden_path = str(ROOT / "struct" / f"{name}.molden")
+            on_progress({
+                "tool": "ORCA", "operation": "单点计算与 mol2 转换",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
+        molden_path = str(workspace / f"{name}.molden")
         if not Path(molden_path).exists():
             results.append(StepResult(
                 step_name="sp_orca", step_index=2, success=False,
                 error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
-                                message=f"{name}.molden 不存在，需先运行 Step 1 结构优化")))
+                                message=f"{name}.molden 不存在，需先运行 Step 1 结构优化"),
+                target_type="molecule", target=name))
             continue
         charge = cfg.get("charge", 0)
         spin = cfg.get("spin", 1)
-        sr = sp_run(molden_path, charge=charge, spin=spin)
+        sr = sp_run(molden_path, charge=charge, spin=spin, workdir=str(workspace))
         if sr.success:
             opt_fchk = sr.outputs["fchk"]
             sr2 = mol2_convert(opt_fchk)
-            sr.outputs["mol2"] = sr2.outputs.get("mol2", "")
-            sr.artifacts.extend(sr2.artifacts)
+            if sr2.success:
+                sr.outputs["mol2"] = sr2.outputs["mol2"]
+                sr.artifacts.extend(sr2.artifacts)
+            else:
+                sr.success = False
+                sr.error = sr2.error
+        sr.target_type = "molecule"
+        sr.target = name
         results.append(sr)
     return results
 

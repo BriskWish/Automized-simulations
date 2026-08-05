@@ -70,7 +70,7 @@ class TestToolDefinitions:
 # ============================================================
 
 class TestToolsValidateConfig:
-    """配置验证工具应调用 llm_config.validate_config 并返回 JSON 结果。"""
+    """配置验证工具应调用 workflow_config.validate_config 并返回 JSON 结果。"""
 
     def test_handler_validates_config(self):
         from willy.toolist_global import handle_tool_call
@@ -104,26 +104,21 @@ class TestMoleculeRegistry:
         return reg
 
     def test_registry_has_entries(self, registry):
-        """注册表应至少包含知识库中的分子（如果加载成功）。"""
-        if len(registry._names) == 0:
-            pytest.skip("MoleculeRegistry 未加载知识库数据")
+        """注册表必须提供知识库或内置兜底分子。"""
         assert len(registry._names) > 0
 
-    def test_lookup_exact_name(self, registry):
-        """精确名称应匹配（如果注册表有数据）。"""
-        result = registry.lookup("LiTFSI")
-        if result is None:
-            # 如果注册表未加载（测试环境），跳过断言
-            pytest.skip("MoleculeRegistry 未加载知识库数据")
-        assert "LiTFSI" in str(result) or isinstance(result, dict)
+    def test_lookup_exact_registered_name(self, registry):
+        """精确注册的离子名必须返回其结构化条目。"""
+        result = registry.lookup("TFSI")
+        assert result is not None
+        assert result["name"] == "TFSI"
+        assert result["charge"] == -1
 
     def test_lookup_case_insensitive(self, registry):
-        """查找应不区分大小写（如果实现支持）。"""
-        # 取决于实现 —— 别名可能处理大小写
-        result = registry.lookup("litfsi")
-        # 注意：大小写敏感性取决于实现
-        # 此测试记录当前行为
-        assert result is not None or result is None  # 无断言，仅记录
+        """ASCII 分子名应不区分大小写。"""
+        result = registry.lookup("tfsi")
+        assert result is not None
+        assert result["name"] == "TFSI"
 
     def test_lookup_unknown_returns_none(self, registry):
         """完全未知的分子应返回 None。"""
@@ -131,12 +126,10 @@ class TestMoleculeRegistry:
         assert result is None
 
     def test_alias_lookup(self, registry):
-        """别名查找应正常工作。"""
-        # LiTFSI 具有别名
-        result = registry.lookup("双三氟甲基磺酰亚胺锂")  # 中文全名
-        # 如果注册表中有此别名则匹配，否则为 None
-        # 记录行为
-        assert True  # 仅验证不崩溃
+        """知识库中的中文别名应返回对应离子。"""
+        result = registry.lookup("双三氟甲磺酰亚胺")
+        assert result is not None
+        assert result["name"] == "TFSI"
 
 
 # ============================================================
@@ -204,12 +197,13 @@ class TestHandleToolCall:
         assert parsed.get("ok") is True or "refreshed" in str(parsed).lower()
 
     def test_get_box_density_known_system(self):
-        """tools_get_box_density 对已知体系返回密度值。"""
+        """tools_get_box_density returns the mass-density default contract."""
         from willy.toolist_global import handle_tool_call
         result = handle_tool_call("tools_get_box_density", {"system_type": "electrolyte"})
         parsed = json.loads(result)
-        # 应返回密度或回退消息
-        assert "density" in parsed or "density" in str(parsed).lower() or "error" not in str(parsed).lower()
+        assert parsed["target_mass_density_g_cm3"] == 1.5
+        assert parsed["unit"] == "g/cm3"
+        assert "初始体积将由使用默认1.5g/cm3的密度猜测" == parsed["note"]
 
     def test_lookup_md_defaults_for_electrolyte(self):
         """tools_lookup_md_defaults 对 electrolyte 返回合理默认值。"""

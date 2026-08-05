@@ -15,18 +15,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import subprocess
-import shutil
 import json
 import re
-import os
 
 from willy._paths import get_project_root
+from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.errors import StepResult, StepError, ErrorKind
+from willy.process_lifecycle import run_managed_command
 
 
 # ── 常量 ──
-G16_BIN = "g16"
-FORMCHK_BIN = "formchk"
 DEFAULT_MEM = "5GB"
 DEFAULT_NPROC = 8
 
@@ -42,7 +40,7 @@ STRUCT_DIR = ROOT / "struct"
 def check_env_ready() -> list[str]:
     """预检 g16 / formchk 是否可用。委托到 env_checker。"""
     from willy.env_checker import check_module
-    return check_module("struct_maker").failed_strs()
+    return check_module("struct_g16").failed_strs()
 
 
 # ============================================================
@@ -239,17 +237,38 @@ def run_one(name: str, cfg: dict, defaults: dict,
     work_gjf.write_text(new_gjf)
     print(f"[struct_maker]   已生成 {work_gjf.name}")
 
+    try:
+        g16 = require_tool("g16")
+        formchk = require_tool("formchk")
+        g16_env = build_tool_env("g16")
+        formchk_env = build_tool_env("formchk")
+    except EnvironmentRegistryError as exc:
+        work_gjf.unlink(missing_ok=True)
+        return StepResult(
+            step_name="struct_g16", step_index=1, success=False,
+            error=StepError(ErrorKind.DEPENDENCY_MISSING, str(exc)),
+            duration_s=time.time() - t0,
+        )
+
     # ── 运行 g16 ──
     print(f"[struct_maker]   运行 Gaussian…")
-    result = subprocess.run(
-        f"GAUSS_CDEF=0 OMP_NUM_THREADS=1 {G16_BIN}",
-        input=new_gjf,
-        shell=True,
-        capture_output=True,
-        text=True,
-        cwd=str(std),
-        timeout=7200,
-    )
+    try:
+        result = run_managed_command(
+            [str(g16.executable)],
+            input_text=new_gjf,
+            cwd=std,
+            timeout=7200,
+            env=g16_env,
+            run_dir=std,
+        )
+    except subprocess.TimeoutExpired:
+        work_gjf.unlink(missing_ok=True)
+        return StepResult(
+            step_name="struct_g16", step_index=1, success=False,
+            error=StepError(kind=ErrorKind.TIMEOUT,
+                            message=f"{name}: G16 结构优化超时 (7200s)"),
+            duration_s=time.time() - t0,
+        )
     out_path = std / f"{name}.log"
     out_path.write_text(result.stdout)
 
@@ -279,15 +298,22 @@ def run_one(name: str, cfg: dict, defaults: dict,
     print(f"[struct_maker]   ✅ {name}.chk 已生成")
 
     # ── formchk ──（用绝对路径，避免 cwd 嵌套）
-    result = subprocess.run(
-        f"GAUSS_CDEF=0 OMP_NUM_THREADS=1 {FORMCHK_BIN} "
-        f"{chk_path.resolve()} {fchk_path.resolve()}",
-        shell=True,
-        capture_output=True,
-        text=True,
-        cwd=str(std),
-        timeout=60,
-    )
+    try:
+        result = run_managed_command(
+            [str(formchk.executable), str(chk_path.resolve()), str(fchk_path.resolve())],
+            cwd=std,
+            timeout=60,
+            env=formchk_env,
+            run_dir=std,
+        )
+    except subprocess.TimeoutExpired:
+        work_gjf.unlink(missing_ok=True)
+        return StepResult(
+            step_name="struct_g16", step_index=1, success=False,
+            error=StepError(kind=ErrorKind.TIMEOUT,
+                            message=f"{name}: formchk 超时 (60s)"),
+            duration_s=time.time() - t0,
+        )
     if not fchk_path.exists():
         print(f"[struct_maker] ❌ {name}: formchk 失败, {result.stderr[-200:]}")
         work_gjf.unlink(missing_ok=True)
@@ -317,7 +343,7 @@ def run_all(config_path: str = "config.json",
             on_progress=None) -> list[StepResult]:
     """
     串行运行 config.json 中所有分子。
-    on_progress(name, i, total) — 每分子开始前回调。
+    on_progress(activity) — 每分子开始前回调，activity 为公开结构化字段。
     """
     issues = check_env_ready()
     if issues:
@@ -338,8 +364,14 @@ def run_all(config_path: str = "config.json",
     for i, (name, cfg) in enumerate(molecules.items(), 1):
         print(f"\n[{i}/{total}] {name}")
         if on_progress:
-            on_progress(f"分子 {i}/{total}: {name}")
+            on_progress({
+                "tool": "G16", "operation": "结构优化",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
         result = run_one(name, cfg, defaults, struct_dir)
+        result.target_type = "molecule"
+        result.target = name
         results.append(result)
 
     ok = sum(1 for r in results if r.success)

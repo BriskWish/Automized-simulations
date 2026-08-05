@@ -1,126 +1,89 @@
-"""
-itp_revise.py
-==============
-itp 文件修订器。
+"""Section-aware, idempotent ITP post-processing."""
 
-功能:
-  1. 删除 [ atomtypes ] 段（atomtype 已迁移到主 .top）
-  2. 将 [ atoms ] 中所有 RESNAME 改为残基名（itp 文件名）
-"""
+from __future__ import annotations
 
 from pathlib import Path
+import re
 
 
-def _replace_resname_in_atoms(lines: list[str], resname: str) -> list[str]:
-    """
-    在 [ atoms ] 段内，将每行原子条目的 resname 字段替换为指定值。
+_ATOM_RESNAME = re.compile(r"^(\s*\S+\s+\S+\s+\S+\s+)(\S+)(.*)$")
 
-    GROMACS [ atoms ] 格式:
-        index  type  resnr  resname  atom  cgnr  charge  mass
-    """
+
+def _section_name(line: str) -> str | None:
+    stripped = line.strip()
+    if not (stripped.startswith("[") and "]" in stripped):
+        return None
+    return stripped[1:stripped.index("]")].strip().lower()
+
+
+def _replace_resname_in_atoms(lines: list[str], resname: str) -> tuple[list[str], bool]:
+    """Update valid ``[ atoms ]`` rows without reformatting comments or sections."""
     in_atoms = False
-    result = []
-
+    changed = False
+    result: list[str] = []
     for line in lines:
-        # 检测是否进入/离开 [ atoms ] 段
-        stripped = line.strip()
-        if stripped.startswith("[") and "atoms" in stripped.lower():
-            in_atoms = True
+        section = _section_name(line)
+        if section is not None:
+            in_atoms = section == "atoms"
             result.append(line)
             continue
-        if in_atoms and stripped.startswith("["):
-            in_atoms = False
-            result.append(line)
-            continue
-
         if not in_atoms:
             result.append(line)
             continue
-
-        # 跳过注释和空行
-        if stripped == "" or stripped.startswith(";"):
+        code, separator, comment = line.partition(";")
+        line_ending = ""
+        if not separator:
+            if code.endswith("\r\n"):
+                code, line_ending = code[:-2], "\r\n"
+            elif code.endswith("\n"):
+                code, line_ending = code[:-1], "\n"
+        fields = code.split()
+        # A legal GROMACS atom row has index/type/resnr/resname/atom/cgnr/q/m.
+        if len(fields) < 8 or not fields[0].lstrip("+-").isdigit() or not fields[2].lstrip("+-").isdigit():
             result.append(line)
             continue
-
-        # 原子数据行：第 4 个字段是 resname
-        parts = line.split()
-        if len(parts) >= 8:
-            parts[3] = resname
-            # 重建行，保持可读对齐
-            new_line = (f"{parts[0]:>6s} {parts[1]:>6s} {parts[2]:>6s} "
-                        f"{parts[3]:>6s} {parts[4]:>6s} {parts[5]:>6s} "
-                        f"{parts[6]:>12s} {parts[7]:>12s}")
-            result.append(new_line)
-        else:
+        match = _ATOM_RESNAME.match(code)
+        if match is None or fields[3] == resname:
             result.append(line)
+            continue
+        result.append(match.group(1) + resname + match.group(3) + line_ending + separator + comment)
+        changed = True
+    return result, changed
 
-    return result
 
+def revise_itp(itp_path: str, residue_name: str | None = None) -> bool:
+    """Remove ``[ atomtypes ]`` and normalize atom residue names once.
 
-def revise_itp(itp_path: str) -> bool:
-    """
-    修订单个 .itp 文件:
-      1. 删除 [ atomtypes ] 段
-      2. RESNAME → 残基名
-
-    Returns:
-        True 表示有修改，False 表示无需修改
+    The caller must collect atom types from the immutable backend ITP before
+    revising its separate assembly copy.
     """
     path = Path(itp_path)
-    resname = path.stem  # 文件名去扩展名 = 残基名
-    content = path.read_text()
-    lines = content.split("\n")
-    modified = False
+    resname = residue_name or path.stem
+    original = path.read_text()
+    lines = original.splitlines(keepends=True)
+    result: list[str] = []
+    skipping_atomtypes = False
+    removed_atomtypes = False
+    for line in lines:
+        section = _section_name(line)
+        if section is not None:
+            if section == "atomtypes":
+                skipping_atomtypes = True
+                removed_atomtypes = True
+                continue
+            if skipping_atomtypes:
+                skipping_atomtypes = False
+        if not skipping_atomtypes:
+            result.append(line)
 
-    # ── Step 1: 删除 [ atomtypes ] 段 ──
-    start = None
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and "atomtypes" in stripped.lower():
-            start = i
-            break
-
-    if start is not None:
-        end = None
-        for i in range(start + 1, len(lines)):
-            if lines[i].strip() == "":
-                end = i
-                break
-        if end is None:
-            end = len(lines) - 1
-
-        del lines[start:end + 1]
-        modified = True
-        print(f"[itp_revise] ✅ {path.name}: 已删除 [atomtypes] 段")
-    else:
-        print(f"[itp_revise] ⏭  {path.name}: 无 [atomtypes] 段，跳过删除")
-
-    # ── Step 2: 替换 RESNAME ──
-    lines = _replace_resname_in_atoms(lines, resname)
-    # 只有在确实发生了替换时才标记
-    # (检查 resname 是否不同于原来的 "MOL")
-    modified = True  # 即使 atomtypes 已删，resname 替换也要写回
-
-    path.write_text("\n".join(lines))
-    print(f"[itp_revise] ✅ {path.name}: RESNAME → {resname}")
-
-    return modified
+    result, replaced_resname = _replace_resname_in_atoms(result, resname)
+    revised = "".join(result)
+    if removed_atomtypes or replaced_resname:
+        path.write_text(revised)
+        return True
+    return False
 
 
-def revise_all(itp_dir: str = "topo") -> int:
-    """
-    批量修订目录下所有 .itp 文件。
-
-    Returns:
-        修订的文件数量
-    """
-    count = 0
-    for itp in sorted(Path(itp_dir).glob("*.itp")):
-        if revise_itp(str(itp)):
-            count += 1
-    print(f"[itp_revise] 完成: {count} 个文件已修订")
-    return count
-
-
-if __name__ == "__main__":
-    revise_all("topo")
+def revise_all(itp_dir: str) -> int:
+    """Revise all ITPs in an explicit run-local directory."""
+    return sum(revise_itp(str(path)) for path in sorted(Path(itp_dir).glob("*.itp")))

@@ -1,181 +1,89 @@
 # Willy 文档索引
 
-> 按角色和场景导航 14 份文档。最后更新：2026-07-31。
+> 本文件是 `docs/` 的唯一导航入口。文档用途、责任人和生命周期状态以 [`document_registry.md`](document_registry.md) 为准。最后整理：2026-08-05。
 
----
+## 文档架构
 
-## 快速导航（按阅读目的）
+```text
+仓库根 README.md                 产品入口与公开能力
+docs/README.md                   导航、分类和阅读路径
+docs/document_registry.md        权威文档台账与维护规范
+docs/<主题>.md                   领域知识、设计、计划、规范或评估
+```
+
+文档按首要维护目的分类，不移动既有文件，以保持代码、README 和文档之间的相对链接稳定。状态不在本索引中重复维护；发现不一致时，先在文档台账标记，再由对应领域负责人修正事实来源。
+
+## 快速导航
 
 | 你想做什么 | 读这份 |
 |------|------|
 | 快速了解项目是什么、怎么跑 | [`README.md`](../README.md) |
-| 理解整体架构和全流程 | [`Willy.md`](Willy.md) |
-| 查某个分子参数、基组、力场 | [`knowledge.md`](knowledge.md) |
-| 理解 LLM 输出错误/警告格式 | [`ERR_WARN_Build.md`](ERR_WARN_Build.md) |
-| 给前端接流水线状态 | [`status_api.md`](status_api.md) |
-| 加一个 tool 或 agent，遵循命名规则 | [`naming_convention.md`](naming_convention.md) |
-| 改量子层代码，知道要同步哪些文件 | [`reconstruction.md`](reconstruction.md) |
-| 制定后续修订路线、明确模块边界和验收规则 | [`revision_strategy.md`](revision_strategy.md) |
-| 理解量子层的设计和坑 | [`quantum_design.md`](quantum_design.md) |
-| 理解拓扑层的设计（GAFF/OPLS-AA） | [`topology_design.md`](topology_design.md) |
-| 了解 0 号总工程师职责、团队分工和共识原则 | [`employees.md`](employees.md) |
-| 查当前项目的已知缺口和修bug优先级 | [`project_gap_analysis.md`](project_gap_analysis.md) |
-| 看当前项目的综合评估、优缺点和完整性判断 | [`project_evaluation.md`](project_evaluation.md) |
-| 锂电池电解质体系调研背景 | [`lithium-salts.md`](lithium-salts.md) (孤立文档，未被引用) |
-
----
+| 理解整体架构、主流程和当前能力 | [`Willy.md`](Willy.md) |
+| 查团队职责、文档所有权和共同约束 | [`employees.md`](employees.md) |
+| 查分子参数、基组、力场、MD 参数或运行诊断证据状态 | [`knowledge.md`](knowledge.md) |
+| 查询锂盐电解质的领域调研资料 | [`lithium-salts.md`](lithium-salts.md) |
+| 理解量子、拓扑、模拟、后处理或外部软件运行环境 | [`quantum_design.md`](quantum_design.md)、[`topology_design.md`](topology_design.md)、[`simulation_design.md`](simulation_design.md)、[`postprocessing_design.md`](postprocessing_design.md)、[`environment_registry_design.md`](environment_registry_design.md) |
+| 给前端或调用方接入状态与运行审计 | [`status_api.md`](status_api.md) |
+| 制定修订路线、确定边界和验收规则 | [`revision_strategy.md`](revision_strategy.md) |
+| 建设运行助理、运行历史与受控续跑 | [`run_assistant_design.md`](run_assistant_design.md) |
+| 运行回归、真实 smoke 与发布门禁 | [`testing_strategy.md`](testing_strategy.md) |
+| 查询任一测试的对象、内容、方式和执行 ID | [`test_case_catalog.md`](test_case_catalog.md) |
+| 新增或重命名 tool、toolist、agent 或模块 | [`naming_convention.md`](naming_convention.md)、[`reconstruction.md`](reconstruction.md) |
+| 遵循 LLM Error/Warning 输出协议 | [`ERR_WARN_Build.md`](ERR_WARN_Build.md) |
+| 了解项目现状、缺口和修复优先级 | [`project_evaluation.md`](project_evaluation.md)、[`project_gap_analysis.md`](project_gap_analysis.md) |
+| 查询任意文档的用途、状态、责任人或更新条件 | [`document_registry.md`](document_registry.md) |
 
 ## 文档分类
 
-### 入口与架构（3 份）
+### 产品与架构类
 
-| 文档 | 行数 | 受众 | 状态 |
-|------|:---:|------|:---:|
-| `../README.md` | 170 | 所有人 | ✅ 同步 |
-| `Willy.md` | 177 | 开发者、架构师 | ⚠️ 文件名和工具数过期（见下方矛盾清单） |
-| `employees.md` | 161 | 0 号总工程师、领域工程师、团队职责边界 | ⚠️ 0号已同步，领域成果旧名待修 |
-
-### 知识库与协议（2 份）
-
-| 文档 | 行数 | 说明 | 状态 |
-|------|:---:|------|:---:|
-| `knowledge.md` | 223 | 11 分子 + 力场/基组/MD 参数，Agent TF-IDF 数据源 | ✅ 同步 |
-| `ERR_WARN_Build.md` | 51 | LLM 输出 Error/Warning 协议 | ✅ 同步 |
-
-### 设计文档（2 份）
-
-| 文档 | 行数 | 说明 | 状态 |
-|------|:---:|------|:---:|
-| `quantum_design.md` | 166 | 量子层 7 模块 + 7 项踩坑记录 + 扩展矩阵 | ⚠️ 文件名过期 |
-| `topology_design.md` | 221 | 拓扑层 4 模块 + 5 项踩坑记录 + 力场扩展矩阵 | ⚠️ 文件名过期 |
-
-### 规范与重构（3 份）
-
-| 文档 | 行数 | 说明 | 状态 |
-|------|:---:|------|:---:|
-| `naming_convention.md` | 236 | tools/toolist/agent 三套命名规范 + 实施状态 | ✅ 同步 |
-| `reconstruction.md` | 143 | 6 关联方检查清单 + 常见遗漏模式 | ⚠️ 文件名示例过期，原则有效 |
-| `revision_strategy.md` | 851 | 后续修订总计划、模块边界、跨层契约和验收规则 | ✅ 同步 |
-
-### 接口与分析（4 份）
-
-| 文档 | 行数 | 说明 | 状态 |
-|------|:---:|------|:---:|
-| `status_api.md` | 118 | PipelineStatus JSON 字段 + 前端渲染伪代码 | ✅ 同步 |
-| `project_gap_analysis.md` | 240 | 22 项缺口（3C/6H/8M/5L）+ 执行计划 | ✅ 同步 |
-| `project_evaluation.md` | 321 | 当前项目综合评估：优点、创新点、缺点、完整性和改进优先级 | ✅ 同步 |
-| `lithium-salts.md` | 303 | 锂电池盐类电解质调研 | ⚠️ 孤立，无引用 |
-
----
-
-## 文档间矛盾清单
-
-> 以下矛盾在 2026-07-29 全量交叉检查时发现。修改任一文档时需同步修正。
-
-### 矛盾 1：设计文档中的文件名 vs 实际代码文件名
-
-| 设计文档引用的文件名 | 实际文件名 | 影响范围 |
-|------|------|------|
-| `g16_struct_maker.py` | `struct_g16.py` | `quantum_design.md` §1.2, §6 |
-| `g16_mol2_maker.py` | `mol2_g16.py` | `quantum_design.md` §1.2, §6 |
-| `g16_chg_maker.py` | `chg_g16.py` | `quantum_design.md` §1.2, §6 |
-| `orca_struct_maker.py` | `struct_orca.py` | `quantum_design.md` §1.2, §6 |
-| `orca_mol2_maker.py` | `mol2_orca.py` | `quantum_design.md` §1.2, §6 |
-| `orca_chg_maker.py` | `chg_orca.py` | `quantum_design.md` §1.2, §6 |
-| `sobtop_interface.py` | `topo_gaff.py` | `topology_design.md` §2, `Willy.md` §一, `reconstruction.md` |
-| `ligpargen_interface.py` | `topo_opls.py` | `topology_design.md` §2, `Willy.md` §一 |
-| `top_maker.py` | `top_assembly.py` | `topology_design.md` §2 |
-| `itp_reviser.py` | `itp_revise.py` | `topology_design.md` §2 |
-| `mdp_maker.py` | `mdp.py` | `Willy.md` §一 |
-| `inp_generator.py` | `box.py` | `Willy.md` §一 |
-| `md_em.py` / `md_eq.py` / `md_prod.py` | `em.py` / `eq.py` / `prod.py` | `Willy.md` §一 |
-| `_md_utils.py` | `_gmx_utils.py` | `Willy.md` §一 |
-| `agent.py` | `agent_config.py` | `Willy.md` §一, `employees.md` |
-
-**修正方向**：以实际文件名为准，更新所有设计文档。
-
-### 矛盾 2：`quantum_design.md` §6 接口清单签名过期
-
-设计文档声明的返回类型与实际代码不符：
-
-| 函数 | 文档签名 | 实际返回类型 |
-|------|------|------|
-| `fchk_to_mol2` | `→ Path` | `→ StepResult` |
-| `batch_convert` (mol2) | `→ list[Path]` | `→ list[StepResult]` |
-| `make_chg_one` | `→ Path` | `→ StepResult` |
-| `batch_make_chg` | `→ list[Path]` | `→ list[StepResult]` |
-| `molden_to_fchk` | `→ Path \| None` | `→ StepResult` |
-| `run_one` (struct) | `→ Path` | `→ StepResult` |
-
-**修正方向**：以实际 `StepResult` 返回类型更新 §6。Phase 1 的 StepResult 统一化已经完成，文档未跟进。
-
-### 矛盾 3：`topology_design.md` §6 接口清单签名过期
-
-| 函数 | 文档签名 | 实际返回类型 |
-|------|------|------|
-| `make_itp_gro` | `→ dict` | `→ StepResult` |
-| `batch_make_topo` | `→ list[dict]` | `→ list[StepResult]` |
-| `build` | `→ Path` | `→ StepResult` |
-
-### 矛盾 4：`Willy.md` §三 工具数量与实际不符
-
-- 文档说 "LLM Tools (7)" — 实际 `toolist_global.py` 有 **9** 个工具
-- 工具名未更新为 `tools_` 前缀（如 `lookup_molecule` → `tools_lookup_molecule`）
-
-### 矛盾 5：`Willy.md` §一 项目结构过期
-
-- 列出 `prompts.py` — 已删除（内容已拆分到 `agent_*.py`）
-- 列出 `knowledge_tools.py` — 已更名为 `toolist_global.py`
-- 列出 `quantum_tools.py` / `topology_tools.py` / `simulation_tools.py` — 已更名为 `toolist_*.py`
-- 列出 `agent.py` — 已更名为 `agent_config.py`
-- 列出 `progress.py` — 文件存在但未出现在当前 tree 输出中
-- 缺少 `agent_quantum.py`、`agent_topology.py`、`agent_simulation.py`（新增）
-- 缺少 `docs/naming_convention.md`、`docs/project_gap_analysis.md`、`docs/reconstruction.md`
-- 缺少 `docs/lithium-salts.md`
-
-### 矛盾 6：`employees.md` 中领域成果清单仍含旧文件名
-
-| 描述 | 实际 |
+| 文档 | 用途 |
 |------|------|
-| 0 号总工程师职责 | 已更新为 `Codex — 总工程师`，负责路线图、边界裁决、质量门禁和文档治理 |
-| 1-3 号成果清单仍引用 `g16_struct_maker.py`、`sobtop_interface.py`、`mdp_maker.py` 等旧名 | 实际代码已重命名为 `struct_g16.py`、`topo_gaff.py`、`mdp.py` 等 |
-| `SIMULATION_AGENT_PROMPT (in prompts.py)` | prompt 已拆入 `agent_simulation.py`，`prompts.py` 已删除 |
+| [`Willy.md`](Willy.md) | 系统架构、端到端主流程、模块关系和产品能力说明。 |
+| [`employees.md`](employees.md) | 团队职责、文档所有权、跨层接口与共同工程原则。 |
 
-**修正方向**：0 号职责已同步；下一轮应由 1-3 号领域工程师把各自成果清单的旧文件名改为当前实际文件名。
+### 知识库类
 
-### 矛盾 7：`reconstruction.md` 文件名示例过期
+| 文档 | 用途 |
+|------|------|
+| [`knowledge.md`](knowledge.md) | 分子识别元数据、力场/基组/MD 参数与受限诊断记录；分子表是当前 Config Agent 检索数据源，但可启动性仍以 `struct/` 中的量子输入为准。 |
+| [`lithium-salts.md`](lithium-salts.md) | 锂电池盐类电解质的背景调研与参考资料。 |
 
-- 使用 `quantum/g16_struct_maker.py` 等旧名作为案例
-- 检查清单原则仍然有效，但示例文件名需更新为 `quantum/struct_g16.py` 等
+### 设计与接口类
 
----
+| 文档 | 用途 |
+|------|------|
+| [`quantum_design.md`](quantum_design.md) | 量子层后端、产物和错误处理契约。 |
+| [`topology_design.md`](topology_design.md) | GAFF/OPLS 参数化、主拓扑和 ITP 修订契约。 |
+| [`simulation_design.md`](simulation_design.md) | GROMACS 输入、EM/EQ/PROD、回滚和产物契约。 |
+| [`postprocessing_design.md`](postprocessing_design.md) | 模拟后处理和分析产物的设计约束。 |
+| [`environment_registry_design.md`](environment_registry_design.md) | 外部软件发现、环境变量优先级、预检和子进程环境的统一设计。 |
+| [`status_api.md`](status_api.md) | 流水线状态、run 级审计字段和前端消费接口。 |
 
-## 文档依赖图
+### 执行计划与运行类
 
-```
-README.md  ←── Willy.md  ←── knowledge.md
-                │               │
-                ├── ERR_WARN_Build.md
-                ├── status_api.md
-                ├── naming_convention.md
-                ├── reconstruction.md
-                ├── employees.md
-                ├── project_gap_analysis.md
-                │
-                ├── quantum_design.md
-                ├── topology_design.md
-                │
-                └── lithium-salts.md (孤立)
-```
+| 文档 | 用途 |
+|------|------|
+| [`revision_strategy.md`](revision_strategy.md) | 总体修订路线、优先级、模块边界和完成定义。 |
+| [`run_assistant_design.md`](run_assistant_design.md) | 运行助理的阶段计划、权限模型、审计契约和后续能力边界。 |
+| [`testing_strategy.md`](testing_strategy.md) | 测试分层、外部 smoke、LLM eval 和发布质量门禁。 |
+| [`test_case_catalog.md`](test_case_catalog.md) | 逐条 pytest 与 LLM mock eval 用例目录。 |
 
-箭头方向 = "引用/依赖"。`lithium-salts.md` 是唯一不被任何文档引用的孤立节点。
+### 规范与变更类
 
----
+| 文档 | 用途 |
+|------|------|
+| [`naming_convention.md`](naming_convention.md) | tool、toolist、agent 与执行模块的命名规范。 |
+| [`ERR_WARN_Build.md`](ERR_WARN_Build.md) | LLM Error/Warning 的结构和内容规范。 |
+| [`reconstruction.md`](reconstruction.md) | 改名或重构时必须检查的关联方和常见遗漏。 |
 
-## 维护规则
+### 评估与缺口类
 
-1. **改代码** → 同步更新受影响的 `*_design.md` 和 `Willy.md`
-2. **改文件名** → 按 [`reconstruction.md`](reconstruction.md) 的 6 关联方清单逐项检查；同时更新本文档的矛盾清单
-3. **加新文档** → 在本文档"快速导航"和"文档分类"各加一行
-4. **发现矛盾** → 在本文档矛盾清单中记录，标注影响范围
-5. **每次发版前** → 跑一遍矛盾清单逐项验证
+| 文档 | 用途 |
+|------|------|
+| [`project_evaluation.md`](project_evaluation.md) | 项目完整性、优缺点、风险和总体成熟度评估。 |
+| [`project_gap_analysis.md`](project_gap_analysis.md) | 可追踪的缺口清单、严重度和建议执行顺序。 |
+
+## 维护入口
+
+每次涉及代码、配置、测试、产物、公共接口或产品承诺的变更，都必须遵循 [`document_registry.md`](document_registry.md) 的维护规范。改动文档时，更新其台账条目的核验日期、状态或待同步说明；新增文档时，同时登记台账、快速导航和上方分类。

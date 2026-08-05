@@ -1,249 +1,209 @@
-"""
-env_checker.py
-==============
-统一环境检查器 —— 所有外部依赖的唯一定义源。
+"""Compatibility facade for centralized external dependency checks.
 
-用法:
-  CLI:  python3 -m willy.env_checker
-  API:  from willy.env_checker import check_all, check_module, ensure
+``env_registry`` resolves every non-bundled executable and builds its child
+environment.  This module keeps the historic check_all/check_module/ensure
+API used by the pipeline and adapters.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
-import shutil
 import os
 
 from willy._paths import get_project_root
+from willy.env_registry import (
+    AVAILABLE,
+    DEFAULT_BOSS_HOME,
+    MISCONFIGURED,
+    MISSING,
+    NOT_EXECUTABLE,
+    RUNTIME_UNAVAILABLE,
+    ResolvedTool,
+    resolve_tool,
+)
+from willy.step_registry import EXECUTION_MODULE_REGISTRY
+
 
 ROOT = get_project_root()
+SOBTOP_DIR = ROOT / "vendor" / "sobtop"
+# Backward-compatible import name. It is never written into os.environ.
+DEFAULT_BOSSDIR = DEFAULT_BOSS_HOME
 
-
-# ============================================================
-# 数据模型
-# ============================================================
 
 @dataclass
 class DepResult:
-    """单个依赖的检查结果。"""
-    name: str                                    # "g16", "sobtop", ...
-    kind: str                                    # "binary" | "file" | "file_exec"
-    path: str                                    # 实际检查的路径/命令名
-    status: str = "ok"                            # "ok" | "missing" | "no_exec"
+    """Compatibility result for one required dependency."""
+
+    name: str
+    kind: str
+    path: str
+    status: str = "ok"
     needed_by: list[str] = field(default_factory=list)
     hint: str = ""
+    source: str = ""
 
 
 @dataclass
 class EnvReport:
-    """环境检查报告。"""
+    """Environment check report consumed by existing pipeline callers."""
+
     results: list[DepResult]
 
     def is_ok(self, module: str) -> bool:
-        """指定模块所需的所有依赖是否都就绪。"""
-        for r in self.results:
-            if module in r.needed_by and r.status != "ok":
-                return False
-        return True
+        return all(result.status == "ok" for result in self.results if module in result.needed_by)
 
     def failed(self) -> list[DepResult]:
-        """返回所有未就绪的依赖。"""
-        return [r for r in self.results if r.status != "ok"]
+        return [result for result in self.results if result.status != "ok"]
 
     def failed_strs(self) -> list[str]:
-        """返回格式化的错误字符串列表（兼容旧 check_*_ready() 接口）。"""
-        out = []
-        for r in self.failed():
-            if r.status == "missing":
-                out.append(f"❌ {r.path} — {r.name} 不存在")
-            elif r.status == "no_exec":
-                out.append(f"❌ {r.path} — 无执行权限，请运行: chmod +x {r.path}")
-        return out
+        messages: list[str] = []
+        for result in self.failed():
+            if result.status == "no_exec":
+                messages.append(f"❌ {result.name} — 无执行权限，请检查安装权限")
+            elif result.status == "misconfigured":
+                messages.append(f"❌ {result.name} — 配置无效: {result.hint}")
+            elif result.status == "runtime_unavailable":
+                messages.append(f"❌ {result.name} — 运行依赖不可用: {result.hint}")
+            else:
+                messages.append(f"❌ {result.name} — 未找到: {result.hint}")
+        return messages
 
     def format(self) -> str:
-        """格式化为终端友好的表格。"""
-        lines = []
-        lines.append(" Environment Check")
-        lines.append(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f" {'Dependency':<20s} {'Kind':<10s} {'Status':<10s} {'Needed by'}")
-        lines.append(f" {'─'*20} {'─'*10} {'─'*10} {'─'*30}")
-
-        status_icon = {"ok": "✅", "missing": "❌", "no_exec": "🔒"}
-
-        for r in self.results:
-            modules = ", ".join(r.needed_by)
+        lines = [
+            " Environment Check",
+            " ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f" {'Dependency':<20s} {'Kind':<10s} {'Status':<22s} {'Needed by'}",
+            f" {'─' * 20} {'─' * 10} {'─' * 22} {'─' * 30}",
+        ]
+        icons = {
+            "ok": "✅", "missing": "❌", "no_exec": "🔒",
+            "misconfigured": "⚙", "runtime_unavailable": "⚠",
+        }
+        for result in self.results:
             lines.append(
-                f" {r.name:<20s} {r.kind:<10s} "
-                f"{status_icon[r.status]:<4s} {r.status:<6s} {modules}"
+                f" {result.name:<20s} {result.kind:<10s} "
+                f"{icons.get(result.status, '❌'):<4s} {result.status:<18s} {', '.join(result.needed_by)}"
             )
-
-        lines.append(f" {'─'*20} {'─'*10} {'─'*10} {'─'*30}")
-
-        ok_count = sum(1 for r in self.results if r.status == "ok")
-        bad_count = len(self.results) - ok_count
-        if bad_count == 0:
-            lines.append(f" ✅ All {ok_count} dependencies ready")
-        else:
-            lines.append(f" ⚠  {ok_count}/{len(self.results)} ready, {bad_count} issues")
-            lines.append("")
-            for r in self.failed():
-                lines.append(f"   • {r.name}: {r.hint}" if r.hint else f"   • {r.name}")
-
+        failed = self.failed()
+        lines.append(f" {'─' * 20} {'─' * 10} {'─' * 22} {'─' * 30}")
+        lines.append(
+            f" {'✅' if not failed else '⚠'} {len(self.results) - len(failed)}/{len(self.results)} dependencies ready"
+        )
+        for result in failed:
+            lines.append(f"   • {result.name}: {result.hint}" if result.hint else f"   • {result.name}")
         lines.append(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return "\n".join(lines)
 
 
-# ============================================================
-# 依赖注册表
-# ============================================================
+@dataclass(frozen=True)
+class _DependencyDefinition:
+    """One preflight display item owned by an execution-module dependency ID."""
 
-SOBTOP_DIR = get_project_root() / "vendor" / "sobtop"
+    name: str
+    kind: str
+    path: str
+    hint: str
+    tool_id: str = ""
+    bundled_dependency_id: str = ""
 
+    def needed_by(self) -> list[str]:
+        if self.tool_id:
+            return list(EXECUTION_MODULE_REGISTRY.modules_for_tool(self.tool_id))
+        return list(
+            EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency(
+                self.bundled_dependency_id
+            )
+        )
+
+
+_DEPENDENCY_DEFINITIONS: tuple[_DependencyDefinition, ...] = (
+    _DependencyDefinition("g16", "binary", "g16", "设置 WILLY_G16_BIN 或将 g16 加入 PATH", tool_id="g16"),
+    _DependencyDefinition("formchk", "binary", "formchk", "设置 WILLY_FORMCHK_BIN 或将 formchk 加入 PATH", tool_id="formchk"),
+    _DependencyDefinition("orca", "binary", "orca", "设置 WILLY_ORCA_HOME/WILLY_ORCA_BIN，或将 orca 加入 PATH", tool_id="orca"),
+    _DependencyDefinition("orca_2mkl", "binary", "orca_2mkl", "设置 WILLY_ORCA_HOME/WILLY_ORCA_2MKL_BIN，或将 orca_2mkl 加入 PATH", tool_id="orca_2mkl"),
+    _DependencyDefinition("Multiwfn", "binary", "Multiwfn", "设置 WILLY_MULTIWFN_BIN 或将 Multiwfn 加入 PATH", tool_id="multiwfn"),
+    _DependencyDefinition("sobtop", "file_exec", str(SOBTOP_DIR / "sobtop"), "项目内置 Sobtop 文件缺失", bundled_dependency_id="sobtop"),
+    _DependencyDefinition("atomtype", "file_exec", str(SOBTOP_DIR / "atomtype"), "项目内置 Sobtop 文件无执行权限", bundled_dependency_id="atomtype"),
+    _DependencyDefinition("sobtop.ini", "file", str(SOBTOP_DIR / "sobtop.ini"), "项目内置 Sobtop 配置缺失", bundled_dependency_id="sobtop_ini"),
+    _DependencyDefinition("LJ_param.dat", "file", str(SOBTOP_DIR / "LJ_param.dat"), "项目内置 Sobtop LJ 参数缺失", bundled_dependency_id="sobtop_lj_parameters"),
+    _DependencyDefinition("bonded_param.dat", "file", str(SOBTOP_DIR / "bonded_param.dat"), "项目内置 Sobtop 键参数缺失", bundled_dependency_id="sobtop_bonded_parameters"),
+    _DependencyDefinition("LigParGen", "binary", "LigParGen", "设置 WILLY_LIGPARGEN_BIN 或将 LigParGen 加入 PATH", tool_id="ligpargen"),
+    _DependencyDefinition("BOSSdir", "envvar", "BOSSdir", "设置 WILLY_BOSS_HOME；兼容 BOSSdir，默认目录为 ~/boss/boss", tool_id="boss"),
+    _DependencyDefinition("gmx", "binary", "gmx", "设置 WILLY_GMX_BIN 或将 gmx 加入 PATH", tool_id="gmx"),
+    _DependencyDefinition("packmol", "file_exec", str(ROOT / "vendor" / "packmol"), "项目内置 Packmol 文件缺失", bundled_dependency_id="packmol"),
+    _DependencyDefinition("obabel", "file_exec", str(ROOT / "vendor" / "obabel.bin"), "项目内置 OpenBabel 文件缺失", bundled_dependency_id="obabel"),
+    _DependencyDefinition("libopenbabel.so", "file", str(ROOT / "vendor" / "libopenbabel.so.7"), "项目内置 OpenBabel 库缺失", bundled_dependency_id="openbabel"),
+    _DependencyDefinition("libcoordgen.so", "file", str(ROOT / "vendor" / "libcoordgen.so.3"), "项目内置 OpenBabel 库缺失", bundled_dependency_id="coordgen"),
+)
+
+_DEPENDENCY_BY_NAME = {definition.name: definition for definition in _DEPENDENCY_DEFINITIONS}
 _DEPENDENCIES: list[DepResult] = [
-    # --- struct ---
-    DepResult(name="g16",       kind="binary",    path="g16",
-              needed_by=["struct_g16", "sp_g16"],
-              hint="Gaussian 16: 确保 g16 在 PATH 中"),
-    DepResult(name="orca",      kind="binary",    path="orca",
-              needed_by=["struct_orca", "sp_orca"],
-              hint="ORCA 6.x: https://orcaforum.kofo.mpg.de/"),
-    DepResult(name="orca_2mkl", kind="binary",    path="orca_2mkl",
-              needed_by=["struct_orca", "sp_orca"],
-              hint="ORCA 自带"),
-    DepResult(name="ORCA_DIR", kind="envvar", path="ORCA_DIR",
-              needed_by=["struct_orca", "sp_orca"],
-              hint="ORCA 安装目录: export ORCA_DIR=/path/to/orca"),
-    # ---
-    DepResult(name="formchk",   kind="binary",    path="formchk",
-              needed_by=["struct_g16", "sp_g16"],
-              hint="formchk 随 Gaussian 安装，确保在 PATH 中"),
-
-    # --- Multiwfn ---
-    DepResult(name="Multiwfn",  kind="binary",    path="Multiwfn",
-              needed_by=["sp_g16", "sp_orca", "chg_resp"],
-              hint="http://sobereva.com/multiwfn/ 下载并加入 PATH"),
-    DepResult(name="RESP_noopt.sh", kind="file_exec",
-              path=str(ROOT / "RESP_noopt.sh"),
-              needed_by=[],
-              hint="项目根目录自带（G16 两步法已不再依赖，保留备用）"),
-
-    # --- topo_gaff ---
-    DepResult(name="sobtop",    kind="file_exec",
-              path=str(SOBTOP_DIR / "sobtop"),
-              needed_by=["topo_gaff"],
-              hint="https://sobereva.com/soft/sobtop/ 下载"),
-    DepResult(name="atomtype",  kind="file_exec",
-              path=str(SOBTOP_DIR / "atomtype"),
-              needed_by=["topo_gaff"],
-              hint=f"chmod +x {SOBTOP_DIR}/atomtype"),
-    DepResult(name="sobtop.ini", kind="file",
-              path=str(SOBTOP_DIR / "sobtop.ini"),
-              needed_by=["topo_gaff"],
-              hint="Sobtop 配置文件，随 Sobtop 分发"),
-    DepResult(name="LJ_param.dat", kind="file",
-              path=str(SOBTOP_DIR / "LJ_param.dat"),
-              needed_by=["topo_gaff"],
-              hint="GAFF LJ 参数文件，随 Sobtop 分发"),
-    DepResult(name="bonded_param.dat", kind="file",
-              path=str(SOBTOP_DIR / "bonded_param.dat"),
-              needed_by=["topo_gaff"],
-              hint="GAFF 键合参数文件，随 Sobtop 分发"),
-
-    # --- topo_opls ---
-    DepResult(name="LigParGen", kind="binary", path="LigParGen",
-              needed_by=["topo_opls"],
-              hint="pip install ligpargen"),
-    DepResult(name="BOSSdir", kind="envvar", path="BOSSdir",
-              needed_by=["topo_opls"],
-              hint="从 http://zarbi.chem.yale.edu/software.html 下载 BOSS，"
-                    "解压后设置 export BOSSdir=/path/to/boss"),
-
-    # --- box ---
-    DepResult(name="gmx",       kind="binary",    path="gmx",
-              needed_by=["box"],
-              hint="GROMACS: apt install gromacs 或 conda install -c bioconda gromacs"),
-    DepResult(name="packmol",   kind="file_exec",
-              path=str(ROOT / "vendor" / "packmol"),
-              needed_by=["box"],
-              hint="https://github.com/mcubeg/packmol 下载编译"),
-    DepResult(name="obabel",   kind="file_exec",
-              path=str(ROOT / "vendor" / "obabel.bin"),
-              needed_by=["topo_gaff"],
-              hint="OpenBabel CLI, vendored"),
-    DepResult(name="libopenbabel.so", kind="file",
-              path=str(ROOT / "vendor" / "libopenbabel.so.7"),
-              needed_by=["topo_gaff"],
-              hint="OpenBabel 共享库, vendored"),
-    DepResult(name="libcoordgen.so", kind="file",
-              path=str(ROOT / "vendor" / "libcoordgen.so.3"),
-              needed_by=["topo_gaff"],
-              hint="OpenBabel 依赖库, vendored"),
+    DepResult(
+        definition.name,
+        definition.kind,
+        definition.path,
+        needed_by=definition.needed_by(),
+        hint=definition.hint,
+    )
+    for definition in _DEPENDENCY_DEFINITIONS
 ]
 
 
-# ============================================================
-# 公共 API
-# ============================================================
+def _copy(dep: DepResult) -> DepResult:
+    return DepResult(dep.name, dep.kind, dep.path, needed_by=list(dep.needed_by), hint=dep.hint)
+
+
+def _external_status(result: ResolvedTool) -> str:
+    if result.status == AVAILABLE:
+        return "ok"
+    if result.status == NOT_EXECUTABLE:
+        return "no_exec"
+    if result.status == MISCONFIGURED:
+        return "misconfigured"
+    if result.status == RUNTIME_UNAVAILABLE:
+        return "runtime_unavailable"
+    return "missing"
+
 
 def _check_one(dep: DepResult) -> DepResult:
-    """检查单个依赖，返回带 status 的副本。"""
-    result = DepResult(
-        name=dep.name, kind=dep.kind, path=dep.path,
-        needed_by=list(dep.needed_by), hint=dep.hint, status="ok",
-    )
-    p = Path(dep.path)
+    result = _copy(dep)
+    definition = _DEPENDENCY_BY_NAME[dep.name]
+    if definition.tool_id:
+        resolved = resolve_tool(definition.tool_id)
+        result.status = _external_status(resolved)
+        result.source = resolved.source
+        if resolved.public_reason:
+            result.hint = resolved.public_reason
+        return result
 
-    if dep.kind == "binary":
-        if shutil.which(dep.path) is None:
-            result.status = "missing"
-    elif dep.kind == "envvar":
-        if not os.environ.get(dep.path, ""):
-            result.status = "missing"
-        else:
-            env_val = os.environ[dep.path]
-            if not Path(env_val).exists():
-                result.status = "missing"
-                result.hint = f"${dep.path}={env_val} 目录不存在"
-    elif dep.kind in ("file", "file_exec"):
-        if not p.exists():
-            result.status = "missing"
-        elif dep.kind == "file_exec" and not os.access(p, os.X_OK):
-            result.status = "no_exec"
-
+    path = Path(dep.path)
+    if not path.exists():
+        result.status = "missing"
+    elif dep.kind == "file_exec" and not os.access(path, os.X_OK):
+        result.status = "no_exec"
     return result
 
 
 def check_all() -> EnvReport:
-    """检查所有已注册的依赖。"""
-    return EnvReport([_check_one(d) for d in _DEPENDENCIES])
+    """Check all registered bundled and external dependencies."""
+    return EnvReport([_check_one(dependency) for dependency in _DEPENDENCIES])
 
 
 def check_module(name: str) -> EnvReport:
-    """检查指定模块所需的依赖。"""
-    deps = [d for d in _DEPENDENCIES if name in d.needed_by]
-    return EnvReport([_check_one(d) for d in deps])
+    """Check only dependencies used by one canonical pipeline module."""
+    return EnvReport([_check_one(dep) for dep in _DEPENDENCIES if name in dep.needed_by])
 
 
 def ensure(module: str) -> None:
-    """
-    确保某模块的依赖就绪，否则 raise RuntimeError。
-
-    在流水线步骤执行前调用，比跑到 Fortran 崩溃更友好。
-    """
+    """Raise a user-safe error before the pipeline enters an unavailable module."""
     report = check_module(module)
     if not report.is_ok(module):
-        msg = f"[{module}] 依赖不满足:\n"
-        msg += "\n".join(report.failed_strs())
-        raise RuntimeError(msg)
+        raise RuntimeError(f"[{module}] 依赖不满足:\n" + "\n".join(report.failed_strs()))
 
-
-# ============================================================
-# CLI
-# ============================================================
 
 if __name__ == "__main__":
     report = check_all()
     print(report.format())
     if report.failed():
-        exit(1)
+        raise SystemExit(1)

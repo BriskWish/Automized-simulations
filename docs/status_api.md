@@ -1,86 +1,150 @@
 # 流水线状态接口文档
 
-前端通过读取 `status.json` 获取流水线实时状态。
+每次启动会先原子预占运行锁并立即分配 `run_id`。前端仅在运行助理对话框内的工程状态信息气泡展示状态；该摘要与运行助理对话通过 `RunRegistry` 读取 `md_run/<run_id>/status.json`、`manifest.json`、`events.jsonl` 以及脱敏的 `environment_report.json`、`mdrun_eta.json`。项目根目录 `status.json` 不是运行事实来源。前端与 LLM 必须通过 `RunRegistry` 查询运行，不能扫描任意目录。步骤编号、层级、公开标签、产物契约和模拟阶段由 `step_registry.py` 的 `STEP_REGISTRY` 唯一定义；本文件的步骤表仅为当前注册表的文档快照。
+
+`manifest.json` 是本接口唯一的公开运行审计 manifest。模拟层另有私有的 `md_manifest.json` 管理阶段许可与 checkpoint，拓扑层另有 `topology_manifest.json` 管理组件计划；两者不属于 `RunRegistry` 的公共读取面，也不能替代 `manifest.json` 作为 run 身份、状态或历史索引的依据。`RunRegistry` 可在内部读取 MD manifest，以发现公开状态已经越过一个仍在运行的阶段；这不会向前端或 LLM 返回私有 manifest 内容。
+
+公开状态表达六类信息：**工具、操作、对象、进度、摘要错误、自动修复摘要**。自动修复摘要仅可包含当前重试次数和已落盘配置的白名单差异（旧值到新值）；命令行、stderr、原始日志、绝对路径、堆栈、Agent 思维过程和任意工具原始参数不得写入状态或经前端、运行助理暴露。若 Simulation Agent 提议修改协议，使用固定的 `user_confirmation_required` 错误类型升级；不公开模型参数、拟议值或授权信息。
 
 ## 读取方式
 
 ```python
-from willy.pipeline_state import PipelineStateMachine
-status = PipelineStateMachine.read()  # → PipelineStatus
+from willy.run_registry import RunRegistry
+status = RunRegistry().get_run_status(run_id)
 ```
 
-或直接读文件：
+`PipelineStateMachine` 仅在运行目录注册成功后写入 `md_run/<run_id>/status.json`；该文件和运行索引均采用原子写入。未绑定 `run_id` 的启动冲突或启动失败只写入根目录 `startup_audit.json`，其公开消息仅为“已有任务运行”或“启动失败”。
 
-```python
-import json
-status = json.load(open("status.json"))
-```
+## 停止与失活对账
 
-文件路径：项目根目录 `status.json`（原子写入，不会读到半截数据）。
+停止意图只支持按钮的确定性 UI 路径：首次点击“中止流水线”只把按钮切换为“确认中止”，第二次点击才由前端服务端直接调用 `stop_pipeline`。首次操作不得写运行状态、`stop.request` 或发送进程信号；停止不得依赖浏览器 `window.confirm`，也不得经 LLM 或 Run Assistant tool。运行助理文本框中的“中止”“暂停”“稍后”“确认中止”及其等效讨论语只可产生对话提示或保留等待状态，绝不能调用停止、重跑或退出工程。
+
+当阶段失败并等待协议调整授权时，公开 `status.json` 可带受限的 `pending_action`。其只含 `action_id`、`state`、失败步骤的公开标签、`restart_step` 和至多 8 项已脱敏的核心修改项（名称、旧值、新值与简短目的）；还可带至多 8 项可复审参数（名称、当前值、允许范围和简短目的），供用户提出替代要求。`restart_step` 只能为 9（仅重跑 EQ）或 7（修改建盒后依次重跑 Box、EM、EQ、PROD）。不得含日志、路径、命令、模型推理、原始错误或内部配置。前端把它渲染为运行助理对话框内独立的固定调整气泡。`awaiting_confirmation` 的唯一语义是“LLM 已返回方案，尚未得到用户对当前 `action_id` 的明确确认”；它不能被渲染或解释成状态未知、自动重试或已在运行。
+
+用户只有以精确白名单批准语（“同意”“确认重跑”“按方案执行”）回应当前待确认方案时，才可经 `frontend_api.confirm_pending_action(action_id, run_id)` 请求受控重跑；该入口必须校验 run、action 和配置指纹。确认后编排器必须先持久化 `retrying`，重建受影响 MDP，再转为 `running` 并调用首个需重跑的科学阶段。未回复、暂停、稍后、否决或不匹配文本均保持 `awaiting_confirmation`，不改写配置、不发起重跑，也不终止工程。
+
+用户明确提出替代调整时，`frontend_api.revise_pending_action(action_id, request, run_id)` 可调用 Simulation Agent 生成一个完整的新方案。该入口只接受当前同一 run 的 pending 动作；替换方案仍经字段白名单、数值范围和冻结配置指纹校验，写入新的 `action_id` 与 `pending_action_revised` 事件。原动作随即失效，`config.json`、MDP、阶段许可和进程均不变，状态继续保持 `awaiting_confirmation`，直到用户再次确认新动作。无法生成或校验替代方案时，保留原动作和等待状态。
+
+建盒的真实几何不写入 `status.json` 或 `events.jsonl`。Step 7 成功时模拟层将请求/实际盒矢量、体积和初始质量密度写入私有 `md_manifest.json.box_attempts[]`；运行助理只能通过 `tools_get_box_parameters_run` 读取最近一条固定白名单字段，供“盒子/边长/初始密度”问题解释，不暴露路径、日志或命令。
+
+服务端确认后，前端先经 `RunRegistry` 写入 `run_stop_requested` 事件和 `state=stopping`，再请求目标进程退出。GROMACS 阶段通过 run 内 `stop.request` 请求安全点 `SIGINT`，以保留 checkpoint；其他阶段由受管进程组退出。按钮只有收到这一持久化请求的成功回执后才能锁定为“正在安全停止”；未获得回执时必须保持可交互并显示“中止请求未送达，请重试”。`stopping` 不是引擎失败，编排器收到该请求后必须直接写 `run_aborted`，不得调用 LayerAgent 重试。
+
+CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁。前端启动和轮询时只会对“最新且仍为 `running`/`retrying`/`stopping`、但经启动锁和受管进程检查确认已失活”的 run 写 `run_aborted_after_process_exit`；对账会清除遗留 `stop.request`。这避免页面重启后将已停止的 run 继续展示为运行中，同时不扫描或改写其他历史 run。
+
+当一个 transient `status.json` 已把步骤或 `done_steps` 写到仍为 `running` 的 EM/EQ/PROD 之后，`RunRegistry.get_run_status()` 只有同时观察到活跃 ETA 心跳或近期阶段产物写入时，才执行一次受限状态对账：撤销该活动阶段及下游步骤的公开完成标记，显示实际阶段、清除失配的公开错误，并追加 `stage_status_reconciled`。对账不会更改私有阶段许可、输入、产物、锁或受管进程；`stopping` 和 `aborted` 不参与此对账，以保留用户停止的优先级。
 
 ## 轮询频率
 
-推荐 `gr.Timer(3)`（3 秒），流水线内部更新频率远低于 3 秒。
+推荐 `gr.Timer(3)`（3 秒），流水线内部更新频率远低于 3 秒。每次刷新先一次性解析当前 `run_id`，再读取该 run 的状态摘要与待确认动作，组成同一公共快照。前端保留欢迎气泡为第一条，其下依次以独立气泡原位替换状态和调整信息；不追加到浏览器对话历史，也不把这些定时信息传给 LLM。可用 ETA 在状态气泡中仅显示“当前步骤预计结束：<本地时间>”，不重复显示预测观测时刻。
 
 ## PipelineStatus 字段
 
 ```json
 {
   "state":         "running",        // 见下方状态表
-  "step":          3,                // 当前步骤 index (1-7)，idle 时为 0
-  "step_label":    "RESP 电荷",      // 当前步骤描述
+  "step":          3,                // 当前步骤 index (1-10)，idle 时为 0
+  "step_label":    "RESP 电荷",      // 当前步骤描述（兼容字段，前端不依赖它渲染）
   "layer":         "quantum",        // 当前层: "config"|"quantum"|"topology"|"simulation"
-  "error":         "TFSI: SCF不收敛", // 最近错误消息（空串=无错误）
-  "error_kind":    "scf_not_converged", // ErrorKind 枚举值
-  "agent":         "quantum",        // Agent 名（仅 retrying 时有值）
-  "retry_n":       2,                // 当前重试次数（0=未在重试）
-  "retry_max":     5,                // 最大重试次数
-  "actions":       ["换基组 6-31g(d)","加 scf=xqc"],  // Agent 动作记录
-  "escalation":    {...},            // escalation 详情（仅 escalated 时有值）
+  "error":         "G16 结构优化失败：NO3\n原因：SCF 未收敛", // 摘要错误（空串=无错误）
+  "error_kind":    "scf_not_converged", // 前端仅以白名单类型渲染固定状态；`user_confirmation_required` 显示待用户确认
+  "repair": {
+    "attempt": 2,                 // 当前自动修复尝试；0 表示仍在诊断
+    "max_attempts": 3,
+    "adjustments": [
+      {"name": "恒温耦合时间", "before": "0.5 ps", "after": "2 ps"}
+    ]
+  },
+  "activity": {
+    "tool":        "G16",
+    "operation":   "结构优化",
+    "target_type": "molecule",
+    "target":      "NO3",
+    "current":     1,
+    "total":       4
+  },
   "started_at":    "2026-07-28T12:00:00Z",  // 启动时间
   "updated_at":    "2026-07-28T12:05:30Z",  // 最后更新时间
-  "total_steps":   7,                // 总步骤数
-  "done_steps":    [1, 2]            // 已完成的步骤 index
+  "total_steps":   10,               // 总步骤数
+  "done_steps":    [1, 2],           // 已完成的步骤 index
+  "extra":         {"run_id": "md_202607310001"}
 }
 ```
+
+`activity` 是唯一的公开工序模型，由 `set_activity(tool, operation, target_type, target, current, total)` 原子写入。字段严格固定，`target_type` 仅允许 `molecule`、`stage`、`system`。`repair` 仅在自动修复期间或存在已应用配置差异时出现；其差异由配置写入成功后的白名单字段生成，最多保留 8 项。run 级状态额外含有顶层 `run_id`，不写入绝对运行目录。
+
+等待用户授权时，`extra` 增加受限的 `pending_action`，而私有动作记录仅保存在同一 run 的 `pending_action.json`。公开字段示例：
+
+```json
+{
+  "pending_action": {
+    "action_id": "act-...",
+    "state": "pending",
+    "step_label": "GROMACS 三点式退火平衡",
+    "restart_step": 9,
+    "summary": "降低时间步长并延长末段保温后，重新验收 EQ。",
+    "adjustments": [
+      {"name": "时间步长", "before": "0.001 ps", "after": "0.0005 ps", "purpose": "降低高温段数值不稳定风险"}
+    ]
+  }
+}
+```
+
+`pending_action` 不包含可执行路径、完整配置、原始错误或模型原文。前端轮询、替代方案和确认入口只能读取同一当前 `run_id` 的待确认动作，禁止扫描历史 run 查找任意 `awaiting_confirmation` 项；活动流水线优先使用启动锁登记的 `run_id`，无活动流水线时才按索引的更新时间和 `run_id` 确定当前工程。新 run 一旦成为当前工程，旧 run 的动作必须隐藏且不可被文本确认。服务端确认时以私有记录中的 run ID、动作 ID、`config.json` 指纹和允许字段重新校验，再写入配置快照和启动恢复进程。
+
+确认和替代方案输入由前端确定性识别，不交给只读运行助理解释，且二者的唯一控制前置条件是：当前工程的公开待确认动作状态为 `awaiting_confirmation`。`确认`、`同意`、`同意该方案并重跑` 等无歧义批准表达才会调用受控确认接口；修改词和受限参数词才会请求 LLM 生成替代方案。涉及拒绝、取消、暂停或等待的表达绝不触发重跑。其他文本在任意状态下都进入只读运行助理，包括非等待状态中的“确认”或“修改”文本；它们不能触发配置或进程操作。接口取得启动锁并再次校验后，先写入 `confirmation_retry_started` 与 `state=retrying`，再启动恢复进程，因此刷新不会显示旧的等待快照。恢复进程只接受同一动作的 `awaiting_confirmation` 或已受理 `retrying` 快照；若进程无法创建，服务端写入 `confirmation_launch_failed` 并恢复原等待快照和待确认方案。
+
+新 run 的 `done_steps` 必须从空列表开始。只有显式指定原 run 与已验证断点的受控操作才能预置完成步骤。批量量子步骤只有配置中的每个分子都满足本步骤产物契约后才写入 `step_succeeded`；因此 Step 3 不得将部分 `*_opt.fchk` 的 RESP 结果记作整体成功。
+
+对于 Step 8--10，`mark_done()` 还必须通过私有阶段完成门禁：EM 为 `accepted` 加 `em.tpr/.gro/.xtc/.edr`，EQ 为 `accepted` 加 `eq.tpr/.gro/.xtc/.edr/.cpt`，PROD 为 `completed` 加 `prod.tpr/.gro/.xtc/.edr/.cpt`。Agent 工具结果只可触发重跑或回滚指令，不能绕过该门禁。
+
+## 运行审计接口
+
+每个被 `RunRegistry` 登记的运行目录包含：
+
+| 文件 | 用途 | 写入方式 |
+|---|---|---|
+| `manifest.json` | 配置哈希、冻结量子输入（`.gjf`、复用的 `.fchk`/`.molden`）哈希、后端、产物登记 | 原子替换 |
+| `provenance.json` | Git/运行时版本、配置修订哈希、输入指纹、随机种子、脱敏能力与 LLM 版本 | 原子替换 |
+| `.run-transaction.json` | 未完成 JSON/JSONL 写入包的私有、可重放意图；成功后删除 | 原子替换、恢复后删除 |
+| `status.json` | 此 run 最新的 `PipelineStatus` 快照 | 原子替换 |
+| `events.jsonl` | run 创建、状态变化、步骤结果的公开摘要 | 运行级单调序列单行追加、`fsync` 并加锁 |
+| `environment_report.json` | 外部软件能力、发现来源的脱敏快照 | 原子替换 |
+| `mdrun_eta.json` | GROMACS `mdrun -v` 的 ETA 预测，以及独立的进程/阶段产物心跳 | 原子替换 |
+| `md_run/index.json` | 历史 run 的安全摘要 | 原子替换并加锁 |
+
+`events.jsonl` 的公共字段为 `sequence`、`timestamp`、`event_type`、`run_id`、`details`；由可恢复写入包产生的记录另带不含业务信息的 `transaction_id`。`sequence` 与同一 run 的决策审计、进程生命周期记录共享单调递增序列。步骤结果的 `details` 仅包含 `step_id`、注册表产物契约 `artifact_contract`、`activity`、`success`、`error_kind` 和摘要 `error`；状态事件可额外包含与 `status.json` 相同的受限 `repair` 或 `pending_action` 摘要。停止事件仅说明已请求停止或已中止，不携带底层信号、命令或日志。不会写入原始错误消息、`hint`、命令行、绝对路径、产物路径、日志内容或 Agent 原始工具参数。EM 收敛失败或 EQ 真空区触发重建时，状态机只记录公开状态变化。
+
+`mdrun_eta.json` 不属于 `PipelineStatus`，不改变状态机字段。运行助理通过 `tools_get_md_eta_run` 读取经过校验的字段：`status`、`stage`、`process_alive`、`observed_at`、`last_progress_at`、`last_progress_step`，以及仅在 `available` 时存在的 `step`、`remaining_seconds`、`eta_observed_at`、`estimated_end_at`。`observed_at` 是当前心跳，`eta_observed_at` 才是 GROMACS 给出 ETA 的时刻；`last_progress_*` 只能证明日志或阶段产物仍在写入。GROMACS 2025 的 `will finish <ctime>` 按产生该输出的主机本地时区转换；持久化时间统一为 UTC，运行工具同时返回带 `_local` 后缀的主机本地展示值；前端和 LLM 必须优先显示该字段，不得把 UTC 原值当作本地时间。只有 `status=available` 才表示 GROMACS 已产生预测；`waiting` 表示阶段正在运行但尚无预测，`finished` 表示该阶段已结束且没有实时 ETA，`unavailable` 表示无法估算。查询仅读取既有快照，不触发心跳，也不能把 ETA 视为承诺或根据总时长、步骤、文件更新时间补算 ETA。
+
+对批量步骤逐项重试时，`retrying` 和最终 `escalated` 的 `activity` 与摘要错误必须对应当前失败对象，不能保留该批次的首个失败对象。
 
 ## state 枚举
 
 | state | 含义 | 前端展示 |
 |-------|------|----------|
-| `idle` | 无运行中的流水线 | 隐藏进度面板 |
-| `running` | 正常执行中 | 显示当前步骤 + ⏳ |
-| `retrying` | Agent 正在修复 | 显示 🔄 + Agent 名 + 动作列表 |
-| `escalated` | Agent 放弃，需人工 | 显示 🆘 + escalation 详情 |
-| `done` | 全流程完成 | 显示 ✅ 全部完成 |
-| `aborted` | 已中止 | 显示 ⏹ 已中止 |
+| `idle` | 无运行中的流水线 | 运行助理工程状态显示暂无运行 |
+| `running` | 正常执行中 | 运行助理工程状态显示 `activity` 与运行圆环 |
+| `retrying` | 正在内部处理 | 显示 `activity`、第几次修复和已应用参数差异；不显示 Agent 诊断 |
+| `awaiting_confirmation` | LLM 已生成当前 EQ 协议调整方案，等待用户明确授权 | 展示固定脱敏方案摘要和“等待用户确认调整方案”；未收到明确批准语前保持等待，不启动任何进程。替代方案生成后仍保持该状态，且需再次确认。 |
+| `stopping` | 已确认停止，正在等待安全点或进程退出 | 显示“正在安全停止”；中止按钮禁用 |
+| `escalated` | 自动处理未完成 | 显示摘要错误；`error_kind=user_confirmation_required` 时明确当前 run 未改写，需确认新方案后重新启动 |
+| `done` | 全流程完成 | 运行圆环淡出、完成符淡入，并显示全部完成 |
+| `aborted` | 已中止 | 显示已中止 |
 
 ## 步骤 index 映射
 
 | index | step_label | layer |
 |:---:|------|------|
-| 1 | g16/ORCA 结构优化 | quantum |
-| 2 | fchk/molden→mol2 | quantum |
+| 1 | 结构优化 | quantum |
+| 2 | 单点计算与 mol2 转换 | quantum |
 | 3 | RESP 电荷 | quantum |
-| 4 | mol2+chg→itp+gro | topology |
-| 5 | 主拓扑 + 修订 itp | topology |
+| 4 | 分子拓扑参数化 | topology |
+| 5 | 主拓扑生成 | topology |
 | 6 | 生成 mdp | simulation |
 | 7 | Packmol 盒子 | simulation |
-
-## escalation 对象（仅 state=escalated）
-
-```json
-{
-  "layer":         "quantum",
-  "step":          "struct_maker",
-  "error_kind":    "scf_not_converged",
-  "attempts_made": 3,
-  "actions_tried": [ "换基组为 6-31g(d)", "加了 scf=xqc", "降 nproc 到 4" ],
-  "last_raw_output": "...",
-  "recommendation": "需要人工检查初始几何",
-  "backup_plan":    "用 ORCA 后端 + def2-SVP 基组尝试"
-}
-```
+| 8 | GROMACS 能量最小化 | simulation |
+| 9 | GROMACS 三点式退火平衡 | simulation |
+| 10 | GROMACS 生产模拟 | simulation |
 
 ## 前端渲染伪代码
 
@@ -89,22 +153,15 @@ def render_progress(status):
     if status.state == "idle":
         return None  # 不显示
 
-    for i in range(1, 8):
-        if i in status.done_steps:
-            icon = "✅"
-        elif i == status.step:
-            icon = "🔄" if status.state == "retrying" else "⏳"
-        else:
-            icon = "⬚"
-
+    activity = status.activity
+    show(f"⏳ 正在使用 {activity['tool']} 进行{activity['operation']}")
+    show(f"当前进度：{activity['target']}（{activity['current']}/{activity['total']}）")
     if status.state == "retrying":
-        show(f"🤖 {status.agent} Agent 修复中 ({status.retry_n}/{status.retry_max})")
-        for action in status.actions:
-            show(f"  · {action}")
-
-    if status.state == "escalated":
-        show("🆘 自动修复失败")
-        show(f"建议: {status.escalation['recommendation']}")
+        show(f"自动修复：第 {status.repair.attempt}/{status.repair.max_attempts} 次")
+        for change in status.repair.adjustments:
+            show(f"已调整：{change.name} {change.before} → {change.after}")
+    if status.error:
+        show(status.error)
 ```
 
 ## 状态流转图
@@ -114,5 +171,9 @@ IDLE ──→ RUNNING ──→ RETRYING ──→ RUNNING ──→ ... ──
               │          │              ↑
               │          └──→ ESCALATED ─┘ (Agent 放弃)
               │
-              └──→ ABORTED (用户中止 / 配置错误)
+              ├──→ AWAITING_CONFIRMATION ──(替代方案)──┐
+              │                 │                         │
+              │                 └──(明确确认)→ RETRYING ─┘
+              │
+              └──→ STOPPING ──→ ABORTED (用户中止 / 进程已失活)
 ```

@@ -308,8 +308,11 @@ def parse_gromacs_log(log_path: str, stage: str = "em") -> dict:
     # ── 其他异常模式 ──
     other_checks = [
         (r"nan|inf", "检测到 NaN/Inf —— 模拟崩溃"),
+        (r"too many lincs warnings", "LINCS 警告超过 GROMACS 阈值 —— 模拟中止"),
         (r"Segmentation fault", "段错误 (Segfault) —— GROMACS 崩溃"),
-        (r"Domain decomposition.*failed", "域分解失败 —— 调 rcoulomb/rvdw 或换 mdrun 参数"),
+        (r"Domain decomposition.*failed|There is no domain decomposition", "域分解失败 —— 调 rcoulomb/rvdw 或换 mdrun 参数"),
+        (r"Particle .* moved too far", "粒子移动过远 —— 减小 dt 或检查初始结构重叠"),
+        (r"largest distance between excluded atoms", "排除原子距离过大 —— 检查分子是否跨越周期边界或拓扑是否错误"),
         (r"PME load.*imbalance", "PME 负载不均衡 —— 调整 PME 网格或处理器分配"),
         (r"step.*PME", "PME 步长问题 —— 检查 coulombtype 和 rcoulomb 设置"),
         (r"Water molecule.*not settled", "水分子未稳定 (SETTLE 约束失败) —— 减小 dt"),
@@ -336,7 +339,7 @@ def parse_gromacs_log(log_path: str, stage: str = "em") -> dict:
         if stage == "em" and not result["completed"]:
             result["hint"] = "EM 未收敛：增加 nsteps、增大 emtol、或重建盒子（增大 tolerance）"
         elif stage == "eq" and not result["completed"]:
-            result["hint"] = "EQ 失败：检查温度/密度趋势，调整 tau_p、tau_t 或延长 eq_ns"
+            result["hint"] = "EQ 失败：检查温度/密度趋势；经用户确认后调整 md.eq 的保持段、tau_p 或 tau_t"
         elif stage == "prod" and not result["completed"]:
             result["hint"] = "PROD 崩溃：尝试从 checkpoint 重启或减小 dt"
 

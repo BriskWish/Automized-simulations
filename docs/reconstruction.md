@@ -1,8 +1,8 @@
 # 重构检查清单
 
-> 版本 1.0 · 2026-07-29 · 基于 Quantum 层重构经验
+> 版本 1.2 · 2026-08-05 · 基于各执行层、动作契约与运行管理重构经验
 
-重构引擎层（`quantum/`、`topology/`、`simulation/`）任一文件时，必须同步检查以下 **6 个关联方**。
+重构执行层（`quantum/`、`topology/`、`simulation/`）或运行管理层（`run_registry.py`、`pipeline_launch.py`、`run_store.py`）任一文件时，必须同步检查下列关联方。前六项覆盖执行调用链，后续项覆盖步骤注册、动作授权、持久化、运行事实、环境和公开接口。
 
 ---
 
@@ -37,8 +37,8 @@
 - [ ] 新增/删除了步骤？handler 分支需增减
 
 **本次案例**:
-- `tools_retry_mol2_conversion` 不知道新产物 `*_opt.fchk`，reparse 路径找到 `Li.fchk` 但找不到 `Li_opt.fchk`
-- `tools_retry_chg_g16` 仍传 `gjf_path` 给 maker，而 maker 已改为读 `*_opt.fchk`（传参兼容但语义不对）
+- 已修复：`tools_retry_mol2_conversion` 现在接收 Step 2 的显式 `*_opt.fchk` 路径，并调用统一的纯 Python 转换器。
+- 已修复：`tools_retry_chg_g16` 与 `tools_retry_chg_orca` 都接收显式 `*_opt.fchk` 路径，再调用统一的 `chg_resp` 接口。
 
 ---
 
@@ -88,7 +88,7 @@
 
 ## 5. config defaults — 配置默认值
 
-**文件**: `src/willy/llm_config.py`
+**文件**: `src/willy/workflow_config.py`
 
 **检查**:
 
@@ -106,6 +106,79 @@
 - [ ] 新增了外部依赖？`_DEPENDENCIES` 列表需补
 - [ ] 依赖改名了？`needed_by` 和 `path` 需同步
 - [ ] `ensure(module)` 的参数值需更新？
+
+`env_checker.py` 是兼容入口；新增或改名外部依赖时还必须检查 `env_registry.py` 中的工具声明、覆盖变量、解析优先级、子进程环境和脱敏报告。
+
+## 6.1 步骤与动作契约
+
+**文件**: `src/willy/step_registry.py`、`action_contract.py`、`recovery_policy.py`
+
+**检查**:
+
+- [ ] 增删步骤、修改标签、产物契约或重跑许可时，`STEP_REGISTRY` 是否仍是唯一来源？
+- [ ] 新增或调整 tool 时，五个 toolist 的 JSON Schema、`TOOL_META`、`ActionToolCatalog` 和恢复策略是否同步？
+- [ ] 新动作的效果等级、确认要求、失效阶段、重跑位置和 fork 限制是否有回归测试？
+
+禁止在调用方复制步骤数字、绕过工具效果判断，或把模型输出直接当作用户授权。
+
+## 6.2 配置与 run 持久化
+
+**文件**: `src/willy/config_schema.py`、`config_store.py`、`run_store.py`、`run_provenance.py`
+
+**检查**:
+
+- [ ] 新顶层配置字段是否同时更新外层 schema、默认值/语义校验、配置快照和文档？
+- [ ] 配置写入是否仍为带锁的原子替换，备份失败时是否保留旧活动配置？
+- [ ] 新 run 事实是否写入正确的 run-local manifest/provenance/事务记录，且不含密钥、绝对路径、原始 prompt 或日志？
+
+---
+
+## 7. RunRegistry — 公开运行事实
+
+**文件**: `src/willy/run_registry.py`、`src/willy/pipeline_state.py`
+
+**检查**:
+
+- [ ] `run_id`、`manifest.json`、`status.json`、`events.jsonl` 或公开字段变了吗？
+- [ ] `md_run/index.json` 的摘要和 `RunRegistry` 只读接口仍与真实 run 对齐吗？
+- [ ] 是否把内部的 `md_manifest.json` 或 `topology_manifest.json` 错当作公开运行审计事实？
+
+---
+
+## 8. Pipeline launch — 启动锁与绑定
+
+**文件**: `src/willy/pipeline_launch.py`、`src/willy/agent_config.py`
+
+**检查**:
+
+- [ ] 启动预占、run 绑定、清理和失败路径仍只影响当前项目与当前运行吗？
+- [ ] 未绑定 run 的冲突或失败是否只写入脱敏 `startup_audit.json`？
+- [ ] 新流程是否仍从空 `done_steps` 开始，续跑是否必须显式传入受控原 run？
+
+---
+
+## 9. 环境与状态公开接口
+
+**文件**: `src/willy/env_registry.py`、`src/willy/frontend_api.py`、`src/willy/toolist_run.py`
+
+**检查**:
+
+- [ ] 新工具、变量或环境报告是否已由 `env_registry` 解析，而不是在执行器中自行读取环境？
+- [ ] `environment_report.json`、`mdrun_eta.json`、状态事件和运行助理输出是否仍不泄露路径、密钥、命令或原始日志？
+- [ ] 前端与 LLM 是否继续只经 `RunRegistry` 和受限工具读取运行事实？
+
+新增外部命令或停止行为时，还必须检查 `process_lifecycle.py`：命令是否通过受管进程组启动，停止/超时是否按 `SIGINT -> SIGTERM -> SIGKILL` 升级，私有审计是否继续脱敏且不进入公共状态。
+
+---
+
+## 10. 测试与责任文档
+
+**检查**:
+
+- [ ] 对应的单元、契约、集成或 external smoke 已按 `testing_strategy.md` 增补？
+- [ ] 相关设计文档、`docs/README.md` 和 `document_registry.md` 已同步？
+- [ ] 改名、步骤、产物或公开字段是否已经全仓搜索旧名和旧契约？
+- [ ] 变更测试时，`scripts/generate_test_case_catalog.py` 是否重新生成且 CI 中无台账漂移？涉及外部工具时，是否新增或更新 required smoke/执行证据？
 
 ---
 
@@ -141,3 +214,4 @@ config.json → orchestrator._build_steps() → maker 函数
 | **step_name 漂移** | 错误返回用了其他步骤的名字 | 每步用一个唯一 step_name，全局搜索去重 |
 | **产物名变更传播断裂** | maker 输出 `*_opt.fchk`，toolist 还在找 `.fchk` | 产物名变更时全局 grep 旧名 |
 | **prompt 不同步** | 工具名/步骤描述与代码不一致 | 每次改 tool 参数或步骤后检查 prompt |
+| **修复身份覆盖** | 上游工具成功被重标为原失败下游步骤，状态越级进入后续阶段 | 保留工具返回的 `step_name`/`step_index`；由编排器根据实际阶段回滚或重跑，并在 MD 阶段完成前校验 manifest 许可与产物 |

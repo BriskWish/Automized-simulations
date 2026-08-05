@@ -10,7 +10,9 @@ Layer 0 — Config Agent 的 10 个工具定义与处理函数 + TF-IDF 向量�
   tools_set_backend_quantum, tools_skip_molecule_global
 """
 
-from willy.llm_config import _available_residues
+from willy.workflow_config import _available_residues
+from willy._paths import get_project_root
+from willy.config_store import write_json
 
 
 
@@ -71,16 +73,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_get_box_density",
-            "description": "根据体系类型推荐 Packmol 盒子填充密度 (分子/nm³)。",
+            "description": "返回 Packmol 初始建盒的目标质量密度默认值；实际边长由当前拓扑质量计算。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "system_type": {
                         "type": "string",
-                        "description": "体系类型",
+                        "description": "体系类型，仅用于说明默认值适用范围",
                         "enum": ["ionic_liquid", "solvent_mix", "aqueous", "organic"]
-                    },
-                    "has_ions": {"type": "boolean", "description": "是否含离子"}
+                    }
                 },
                 "required": []
             }
@@ -193,16 +194,16 @@ TOOLS = [
 # ============================================================
 
 TOOL_META = {
-    "tools_lookup_molecule":       {"category": "query",      "mutating": False, "risk": "low"},
-    "tools_resolve_compound":      {"category": "query",      "mutating": False, "risk": "low"},
-    "tools_lookup_md_defaults":    {"category": "query",      "mutating": False, "risk": "low"},
-    "tools_get_box_density":       {"category": "query",      "mutating": False, "risk": "low"},
-    "tools_lookup_basis_set":      {"category": "query",      "mutating": False, "risk": "low"},
-    "tools_refresh_structs":       {"category": "refresh",    "mutating": False, "risk": "low"},
-    "tools_diagnose_error_config": {"category": "diagnostic", "mutating": False, "risk": "low"},
-    "tools_validate_config":       {"category": "validation", "mutating": False, "risk": "low"},
-    "tools_set_backend_quantum":      {"category": "config",     "mutating": True,  "risk": "medium"},
-    "tools_skip_molecule_global":     {"category": "config",     "mutating": True,  "risk": "medium"},
+    "tools_lookup_molecule":       {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_resolve_compound":      {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_lookup_md_defaults":    {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_get_box_density":       {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_lookup_basis_set":      {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_refresh_structs":       {"category": "refresh",    "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_diagnose_error_config": {"category": "diagnostic", "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_validate_config":       {"category": "validation", "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_set_backend_quantum":   {"category": "config",     "mutating": True,  "risk": "medium", "effect": "requires_confirmation"},
+    "tools_skip_molecule_global":  {"category": "config",     "mutating": True,  "risk": "medium", "effect": "requires_confirmation"},
 }
 
 # ============================================================
@@ -231,7 +232,6 @@ class _MoleculeRegistry:
         self._load()
 
     def _load(self):
-        from willy._paths import get_project_root
         path = get_project_root() / "docs" / "knowledge.md"
         if not path.exists():
             self._data = dict(_FALLBACK_MOLECULES)
@@ -289,12 +289,17 @@ class _MoleculeRegistry:
             return {"name": q, "charge": info["charge"], "spin": info["spin"],
                     "atom_count": info["atom_count"], "basis": info["basis"],
                     "forcefield": info["forcefield"], "aliases": info["aliases"]}
-        # ② 精确匹配：中文别名
+        # ② 名称或别名匹配。ASCII 分子名按大小写无关处理。
         for name, info in self._data.items():
-            if q in info.get("aliases", []):
+            aliases = info.get("aliases", [])
+            if (
+                q in aliases
+                or q.casefold() == name.casefold()
+                or any(q.casefold() == alias.casefold() for alias in aliases)
+            ):
                 return {"name": name, "charge": info["charge"], "spin": info["spin"],
-                        "atom_count": info["atom_count"], "basis": info["basis"],
-                        "forcefield": info["forcefield"], "aliases": info["aliases"]}
+                    "atom_count": info["atom_count"], "basis": info["basis"],
+                    "forcefield": info["forcefield"], "aliases": info["aliases"]}
         # ③ 向量语义检索（兜底，提高阈值防误匹配）
         if self._matrix is None or self._matrix.shape[0] == 0:
             return None
@@ -393,29 +398,35 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
 
     elif tool_name == "tools_lookup_md_defaults":
         st = args.get("system_type", "solvent_mix")
+        eq = {
+            "high_temperature": 500,
+            "transition_temperature": 400,
+            "target_temperature": 298,
+            "segments_ns": {
+                "heat": 2, "hold_high": 1, "cool_transition": 2,
+                "hold_transition": 1, "cool_target": 2, "hold_target": 2,
+            },
+        }
         defaults = {
-            "ionic_liquid": {"ref_t": 298, "prod_ns": 10, "eq_ns": 5, "dt": 0.001,
+            "ionic_liquid": {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.001,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale",
                              "note": "含 Li 体系 dt=1fs"},
-            "solvent_mix":  {"ref_t": 298, "prod_ns": 10, "eq_ns": 5, "dt": 0.001,
+            "solvent_mix":  {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.001,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale"},
-            "aqueous":      {"ref_t": 298, "prod_ns": 10, "eq_ns": 5, "dt": 0.002,
+            "aqueous":      {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.002,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale"},
-            "organic":      {"ref_t": 298, "prod_ns": 10, "eq_ns": 5, "dt": 0.002,
+            "organic":      {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.002,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale"},
         }
         return _json.dumps(defaults.get(st, defaults["solvent_mix"]))
 
     elif tool_name == "tools_get_box_density":
-        has_ions = args.get("has_ions", True)
-        st = args.get("system_type", "")
-        if st == "ionic_liquid": d = 6.0
-        elif st == "solvent_mix" and has_ions: d = 5.0
-        elif st == "aqueous": d = 3.0
-        elif st == "organic": d = 4.0
-        else: d = 5.0
-        formula = f"box = ceil(∛(N / {d}) × 10) Å"
-        return _json.dumps({"density": d, "unit": "molecules/nm³", "formula": formula})
+        return _json.dumps({
+            "target_mass_density_g_cm3": 1.5,
+            "unit": "g/cm3",
+            "method": "由每个组分 .itp 的 [ atoms ] 质量计算总质量和立方盒边长",
+            "note": "初始体积将由使用默认1.5g/cm3的密度猜测",
+        })
 
     elif tool_name == "tools_lookup_basis_set":
         n = args.get("atom_count", 10)
@@ -449,7 +460,7 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
             cfg = _json.loads(args["config_json"]) if isinstance(args["config_json"], str) else args["config_json"]
         except (_json.JSONDecodeError, TypeError):
             return _json.dumps({"valid": False, "issues": ["JSON 解析失败——检查格式是否正确"]})
-        from willy.llm_config import validate_config
+        from willy.workflow_config import validate_config
         issues = validate_config(cfg)
         if issues:
             return _json.dumps({"valid": False, "issues": issues})
@@ -477,7 +488,7 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
         except (_json.JSONDecodeError):
             cfg = {}
         cfg["backend"] = backend
-        cfg_path.write_text(_json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        write_json(cfg_path, cfg)
         return _json.dumps({
             "ok": True,
             "backend": backend,
@@ -500,7 +511,7 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
         if name not in skipped:
             skipped.append(name)
         cfg.setdefault("skip_reasons", {})[name] = reason
-        cfg_path.write_text(_json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        write_json(cfg_path, cfg)
         return _json.dumps({
             "ok": True,
             "molecule": name,

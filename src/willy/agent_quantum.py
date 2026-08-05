@@ -6,7 +6,11 @@ agent_quantum.py — Layer 1: Quantum Agent.
 """
 
 from willy.layer_agent import LayerAgent
+from willy.llm_config import DEFAULT_LLM_MODEL
 from willy.toolist_quantum import QUANTUM_TOOLS, handle_quantum_tool_call
+from willy.action_contract import ActionToolCatalog
+from willy.recovery_policy import RecoveryPolicy
+from willy.llm_budget import LLMBudget
 
 QUANTUM_AGENT_PROMPT = """你是 Willy Quantum Agent。你编排量子化学计算：结构优化（Gaussian 16 或 ORCA）、fchk/mol2 转换、以及 RESP 电荷拟合。
 
@@ -20,7 +24,7 @@ QUANTUM_AGENT_PROMPT = """你是 Willy Quantum Agent。你编排量子化学计�
 ## 可用工具
 1. tools_retry_struct_g16 —— 用修改后的参数为指定分子重试 Gaussian 结构优化 (Step 1)
 2. tools_retry_struct_orca —— 为指定分子重试 ORCA 结构优化 (Step 1)
-3. tools_retry_mol2_conversion —— 重试 *_opt.fchk→mol2 转换。reparse=重新解析 fchk，multiwfn=从 molden 重走 Multiwfn
+3. tools_retry_mol2_conversion —— 重试 *_opt.fchk→mol2 转换；传入 Step 2 生成的 fchk 路径
 4. tools_retry_chg_g16 —— 重试 RESP 电荷计算。从 *_opt.fchk 出发，Multiwfn 内部 ESP → .chg (G16+ORCA 统一)
 5. tools_retry_chg_orca —— 同上，与 tools_retry_chg_g16 完全等价。两者都从 *_opt.fchk 生成 .chg
 6. tools_diagnose_error_quantum —— 解析 Gaussian/ORCA 输出以识别具体失败模式
@@ -67,13 +71,36 @@ QUANTUM_AGENT_PROMPT = """你是 Willy Quantum Agent。你编排量子化学计�
 class QuantumAgent(LayerAgent):
     """Layer 1: 量子化学修复 Agent。"""
 
-    def __init__(self, llm_client, max_retries=5, on_action=None):
+    def __init__(self, llm_client, max_retries=5, on_action=None, on_decision=None, model: str = DEFAULT_LLM_MODEL,
+                 recovery_policy: RecoveryPolicy | None = None, tool_catalog: ActionToolCatalog | None = None,
+                 llm_budget: LLMBudget | None = None):
+        self._work_dir = None
+        self._config_path = None
         super().__init__(
             name="quantum",
             system_prompt=QUANTUM_AGENT_PROMPT,
             tools=QUANTUM_TOOLS,
-            tool_handler=handle_quantum_tool_call,
+            tool_handler=self._handle_tool_call,
             llm_client=llm_client,
+            model=model,
             max_retries=max_retries,
             on_action=on_action,
+            on_decision=on_decision,
+            prompt_version="quantum-agent-v1",
+            recovery_policy=recovery_policy,
+            tool_catalog=tool_catalog,
+            llm_budget=llm_budget,
+        )
+
+    def set_workspace(self, work_dir: str, config_path: str) -> None:
+        """Bind tool retries to the active, isolated pipeline run."""
+        self._work_dir = work_dir
+        self._config_path = config_path
+
+    def _handle_tool_call(self, tool_name: str, args: dict) -> str:
+        return handle_quantum_tool_call(
+            tool_name,
+            args,
+            work_dir=self._work_dir,
+            config_path=self._config_path,
         )

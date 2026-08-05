@@ -4,6 +4,9 @@ test_errors.py —— ErrorKind / StepError / StepResult / DiagnosisResult / Ret
 覆盖所有错误类型、属性、边界情况。
 """
 
+import json
+from pathlib import Path
+
 import pytest
 from willy.errors import (
     ErrorKind, StepError, StepResult, DiagnosisResult, RetryContext,
@@ -201,6 +204,27 @@ class TestStepResult:
         assert sr.duration_s == 0.0
         assert sr.extra == {}
         assert sr.escalated is False
+
+    def test_to_dict_preserves_protocol_fields_and_is_json_safe(self):
+        sr = StepResult(
+            step_name="prod", step_index=10, success=False,
+            error=StepError(kind=ErrorKind.MDRUN_FAILED, message="MD failed"),
+            outputs={"trajectory": Path("/tmp/prod.xtc")},
+            artifacts=[Path("/tmp/prod.log")],
+            extra={"retry": ("append",), "work_dir": Path("/tmp/run")},
+            escalated=True,
+        )
+
+        data = sr.to_dict()
+
+        assert data["_step_result"] is True
+        assert data["step_index"] == 10
+        assert data["error_kind"] == "mdrun_failed"
+        assert data["outputs"] == {"trajectory": "/tmp/prod.xtc"}
+        assert data["artifacts"] == ["/tmp/prod.log"]
+        assert data["extra"] == {"retry": ["append"], "work_dir": "/tmp/run"}
+        assert data["escalated"] is True
+        json.dumps(data)
 
 
 # ============================================================

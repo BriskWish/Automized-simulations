@@ -1,50 +1,21 @@
 {
   "backend": "g16",
   "molecules": {
-    "Li": {
-      "charge": 1,
-      "spin": 1,
-      "basis": "b3lyp/6-311+g(d,p)",
-      "mem": "",
-      "nproc": null,
-      "solvent": "acetone"
-    },
-    "NO3": {
-      "charge": -1,
-      "spin": 1,
-      "basis": "b3lyp/6-311+g(d,p)",
-      "mem": "",
-      "nproc": null,
-      "solvent": "acetone"
-    },
     "EC": {
       "charge": 0,
       "spin": 1,
       "basis": "b3lyp/6-311+g(d,p)",
+      "solvent": "acetone",
       "mem": "",
-      "nproc": null,
-      "solvent": "acetone"
-    },
-    "FEC": {
-      "charge": 0,
-      "spin": 1,
-      "basis": "b3lyp/6-311+g(d,p)",
-      "mem": "",
-      "nproc": null,
-      "solvent": "acetone"
+      "nproc": null
     }
   },
   "residues": {
-    "Li": 90,
-    "NO3": 90,
-    "EC": 800,
-    "FEC": 200
+    "EC": 300
   },
   "md": {
-    "ref_t": 298,
-    "prod_ns": 10,
-    "eq_ns": 5,
-    "dt": 0.001,
+    "schema_version": 2,
+    "dt": 0.002,
     "ref_p": 1.01325,
     "tcoupl": "V-rescale",
     "tau_t": 0.5,
@@ -55,22 +26,57 @@
     "rcoulomb": 1.0,
     "rvdw": 1.0,
     "coulombtype": "PME",
-    "vdwtype": "Cut-off"
+    "vdwtype": "Cut-off",
+    "dispersion_correction": "EnerPres",
+    "nsteps": 10000,
+    "emtol": 100.0,
+    "emstep": 0.01,
+    "lincs_iter": 1,
+    "lincs_order": 4,
+    "max_box_rollbacks": 1,
+    "outputs": {
+      "trr": false
+    },
+    "system_type": "uniform_liquid",
+    "eq": {
+      "high_temperature": 500,
+      "transition_temperature": 400,
+      "target_temperature": 298,
+      "segments_ns": {
+        "heat": 2,
+        "hold_high": 1,
+        "cool_transition": 2,
+        "hold_transition": 1,
+        "cool_target": 2,
+        "hold_target": 2
+      },
+      "tau_p": 1.0,
+      "acceptance": {
+        "window_ns": 1.0,
+        "temperature_abs_tolerance_k": 5.0,
+        "max_relative_drift": 0.1,
+        "max_trend_zscore": 2.0
+      }
+    },
+    "prod": {
+      "duration_ns": 10,
+      "temperature": 298,
+      "tau_p": 2.0
+    }
+  },
+  "topology": {
+    "backend": "sobtop",
+    "force_field": "gaff_uff",
+    "default_lbcc": false,
+    "default_opt_steps": 0
+  },
+  "box": {
+    "box_size": null,
+    "target_mass_density_g_cm3": 1.5,
+    "tolerance": 2.0
   },
   "defaults": {
     "mem": "5GB",
     "nproc": 8
-  },
-  "topology": {
-    "backend": "ligpargen",
-    "force_field": "gaff",
-    "default_net_charge": 0,
-    "default_lbcc": false,
-    "default_opt_steps": 1
-  },
-  "box": {
-    "density": 6.0,
-    "box_size": null,
-    "tolerance": 2.0
   }
 }

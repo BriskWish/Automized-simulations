@@ -15,6 +15,7 @@ from pathlib import Path
 
 from willy._paths import get_project_root
 from willy.errors import StepResult, StepError, ErrorKind
+from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import find_multiwfn
 
 ROOT = get_project_root()
@@ -78,10 +79,12 @@ def make_chg(
     # Multiwfn RESP: 7→18→2→y→q
     commands = "7\n18\n2\ny\nq\n"
     try:
-        subprocess.run(
+        run_managed_command(
             [multiwfn, str(fp.resolve()), "-ispecial", "1"],
-            input=commands, capture_output=True, text=True,
-            cwd=workdir, timeout=600,
+            input_text=commands,
+            cwd=workdir,
+            timeout=600,
+            run_dir=workdir,
         )
     except subprocess.TimeoutExpired:
         return StepResult(
@@ -129,13 +132,34 @@ def batch_make_chg(
             cfg = json.load(f)
     except Exception:
         cfg = {}
-    registered = set(cfg.get("molecules", {}).keys())
-
-    fchks = [f for f in sorted(Path(struct_dir).glob("*_opt.fchk"))
-             if f.stem.replace("_opt", "") in registered or not registered]
+    registered = list(cfg.get("molecules", {}).keys())
+    workspace = Path(struct_dir)
+    if registered:
+        expected_fchks = [(name, workspace / f"{name}_opt.fchk") for name in registered]
+        missing = [(name, path) for name, path in expected_fchks if not path.is_file()]
+        if missing:
+            return [StepResult(
+                step_name="chg_resp", step_index=3, success=False,
+                error=StepError(
+                    kind=ErrorKind.FILE_NOT_FOUND,
+                    message=f"{name}_opt.fchk 不存在，需先完成 Step 2 单点计算与 mol2 转换",
+                ),
+                target_type="molecule", target=name,
+            ) for name, _ in missing]
+        fchks = [path for _, path in expected_fchks]
+    else:
+        # Keep the standalone utility usable when no config is supplied.
+        fchks = sorted(workspace.glob("*_opt.fchk"))
     if not fchks:
         print(f"[chg_resp] ⚠ {struct_dir}/ 下没有 *_opt.fchk")
-        return []
+        return [StepResult(
+            step_name="chg_resp", step_index=3, success=False,
+            error=StepError(
+                kind=ErrorKind.FILE_NOT_FOUND,
+                message=f"{struct_dir}/ 下没有可用于 RESP 的 *_opt.fchk",
+                hint="确认本次运行的 Step 2 已生成完整 FCHK 文件。",
+            ),
+        )]
 
     results = []
     total = len(fchks)
@@ -143,10 +167,16 @@ def batch_make_chg(
         name = fchk.stem.replace("_opt", "")
         mol_info = cfg.get("molecules", {}).get(name, {})
         if on_progress:
-            on_progress(f"分子 {i}/{total}: {name}")
+            on_progress({
+                "tool": "Multiwfn", "operation": "RESP 电荷计算",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
         sr = make_chg(str(fchk), charge=mol_info.get("charge", 0),
                        spin=mol_info.get("spin", 1),
                        output_name=name)
+        sr.target_type = "molecule"
+        sr.target = name
         results.append(sr)
 
     ok = sum(1 for r in results if r.success)

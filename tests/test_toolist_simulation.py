@@ -5,9 +5,8 @@ test_toolist_simulation.py —— Layer 3 (Simulation Agent) 工具测试。
 1. tools_retry_prod — 检查点与追加参数透传
 2. tools_retry_mdp — stage 参数过滤
 3. tools_retry_em / tools_retry_eq — 覆盖参数传递
-4. tools_skip_molecule_simulation — 跳过逻辑
-5. tools_diagnose_error_simulation — GROMACS 日志诊断
-6. tools_modify_config_simulation — config.json 更新
+4. tools_diagnose_error_simulation — GROMACS 日志诊断
+5. tools_modify_config_simulation — config.json 更新
 """
 
 import json
@@ -28,10 +27,10 @@ class TestSimulationToolDefinitions:
         from willy.toolist_simulation import SIMULATION_TOOLS
         return SIMULATION_TOOLS
 
-    def test_eight_tools_defined(self, sim_tools):
-        """应有 8 个工具定义（包括 skip_molecule）。"""
+    def test_thirteen_tools_defined(self, sim_tools):
+        """应有 13 个工具定义，不暴露不完整的跳过分子功能。"""
         names = {t["function"]["name"] for t in sim_tools}
-        assert len(names) == 8, f"期望 8 个工具, 实际 {len(names)}: {names}"
+        assert len(names) == 13, f"期望 13 个工具, 实际 {len(names)}: {names}"
 
     def test_all_tool_names_present(self, sim_tools):
         """所有必需工具应存在。"""
@@ -42,9 +41,14 @@ class TestSimulationToolDefinitions:
             "tools_retry_em",
             "tools_retry_eq",
             "tools_retry_prod",
+            "tools_run_em_simulation",
+            "tools_run_eq_simulation",
+            "tools_run_prod_simulation",
+            "tools_configure_outputs_simulation",
+            "tools_configure_prod_simulation",
             "tools_diagnose_error_simulation",
             "tools_modify_config_simulation",
-            "tools_skip_molecule_simulation",
+            "tools_migrate_md_config_simulation",
         }
         missing = required - names
         assert not missing, f"缺少工具: {missing}"
@@ -57,12 +61,28 @@ class TestSimulationToolDefinitions:
         missing = names - meta_names
         assert not missing, f"TOOL_META 缺少: {missing}"
 
-    def test_skip_molecule_is_config_category(self):
-        """skip_molecule 应为 config 分类（低风险）。"""
-        from willy.toolist_simulation import TOOL_META
-        meta = TOOL_META["tools_skip_molecule_simulation"]
-        assert meta["category"] == "config"
-        assert meta["risk"] == "medium"
+    def test_skip_molecule_is_not_exposed(self, sim_tools):
+        names = {t["function"]["name"] for t in sim_tools}
+        assert "tools_skip_molecule_simulation" not in names
+
+    def test_eq_schema_exposes_all_three_annealing_temperatures(self, sim_tools):
+        tools = {tool["function"]["name"]: tool["function"] for tool in sim_tools}
+        for name in ("tools_retry_mdp", "tools_retry_eq", "tools_modify_config_simulation"):
+            fields = tools[name]["parameters"]["properties"]
+            assert {"eq_high_temperature", "eq_transition_temperature", "eq_target_temperature"} <= set(fields)
+            assert "eq_acceptance" in fields
+
+    def test_gromacs_run_tools_expose_file_contract(self, sim_tools):
+        by_name = {tool["function"]["name"]: tool["function"] for tool in sim_tools}
+        for stage in ("em", "eq", "prod"):
+            properties = by_name[f"tools_run_{stage}_simulation"]["parameters"]["properties"]
+            assert {"top_path", "itp_paths", "mdp_path", "pdb_path", "structure_path", "tpr_path"} <= set(properties)
+
+    def test_protocol_tools_do_not_expose_model_confirmed_flag(self, sim_tools):
+        """User approval is server-side, never a tool argument the model can forge."""
+        for tool in sim_tools:
+            properties = tool["function"]["parameters"]["properties"]
+            assert "confirmed" not in properties
 
 
 # ============================================================
@@ -79,14 +99,60 @@ class TestHandleSimulationToolCall:
         assert "error" in parsed
 
     def test_step_to_dict_format(self):
-        """_step_to_dict 应包含 _step_result 标记。"""
-        from willy.toolist_simulation import _step_to_dict
+        """StepResult.to_dict 应包含 _step_result 标记。"""
         from willy.errors import StepResult
         sr = StepResult(step_name="test", step_index=1, success=True)
-        d = _step_to_dict(sr)
+        d = sr.to_dict()
         assert d["_step_result"] is True
         assert d["success"] is True
         assert d["step_name"] == "test"
+
+    def test_migration_adoption_requires_confirmation_and_switches_active_config(self, tmp_path):
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({
+            "residues": {"A": 1},
+            "molecules": {"A": {"charge": 0, "spin": 1}},
+            "md": {"ref_t": 298, "eq_ns": 5, "prod_ns": 10},
+            "box": {"density": 6.0, "box_size": None, "tolerance": 2.0},
+        }))
+        refused = json.loads(handle_simulation_tool_call(
+            "tools_migrate_md_config_simulation", {"adopt": True},
+            work_dir=str(tmp_path), config_path=str(config),
+        ))
+        assert refused["_step_result"] is True
+        assert refused["error_kind"] == "user_confirmation_required"
+
+        adopted = json.loads(handle_simulation_tool_call(
+            "tools_migrate_md_config_simulation", {"adopt": True},
+            work_dir=str(tmp_path), config_path=str(config),
+            protocol_change_authorized=True,
+        ))
+        assert adopted["ok"] is True
+        assert adopted["adopted"] is True
+        archive = tmp_path / ".willy" / "config-migrations"
+        assert (archive / "config.pre-v2.json").is_file()
+        assert (archive / "config.migration.json").is_file()
+        assert not (tmp_path / "config.pre-v2.json").exists()
+        assert json.loads(config.read_text())["md"]["schema_version"] == 2
+
+    def test_model_supplied_confirmed_flag_cannot_authorize_protocol_change(self, tmp_project_root):
+        """Even an explicit LLM ``confirmed=true`` must leave config untouched."""
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        config = tmp_project_root / "config.json"
+        before = config.read_text()
+        result = json.loads(handle_simulation_tool_call(
+            "tools_modify_config_simulation",
+            {"dt": 0.0005, "confirmed": True},
+            config_path=str(config),
+        ))
+
+        assert result["_step_result"] is True
+        assert result["success"] is False
+        assert result["error_kind"] == "user_confirmation_required"
+        assert config.read_text() == before
 
 
 # ============================================================
@@ -94,7 +160,7 @@ class TestHandleSimulationToolCall:
 # ============================================================
 
 class TestRetryProd:
-    """生产重试应把恢复参数完整传到执行器。"""
+    """生产重试由 manifest 决定是否允许 checkpoint append。"""
 
     def test_run_prod_accepts_extra_mdrun(self):
         from willy.simulation.prod import run_prod
@@ -116,12 +182,10 @@ class TestRetryProd:
         assert "extra_mdrun" in params, \
             f"grompp_and_mdrun 应接受 extra_mdrun: {params}"
 
-    def test_handler_passes_restart_flags(self, tmp_path):
+    def test_handler_does_not_inject_unverified_restart_flags(self, tmp_path):
         from willy.errors import StepResult
         from willy.toolist_simulation import handle_simulation_tool_call
 
-        checkpoint = tmp_path / "prod.cpt"
-        checkpoint.touch()
         with patch("willy.simulation.prod.run_prod", return_value=StepResult(
             step_name="prod", step_index=10, success=True,
         )) as run_prod:
@@ -131,10 +195,41 @@ class TestRetryProd:
                 "append": True,
             })
 
-        run_prod.assert_called_once_with(
+        run_prod.assert_called_once_with(work_dir=str(tmp_path))
+
+
+class TestRunGromacsTools:
+    """Direct tools expose the stage executors while keeping paths in one run."""
+
+    def test_run_em_uses_bound_workspace(self, tmp_path):
+        from willy.errors import StepResult
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        with patch("willy.simulation.em.run_em", return_value=StepResult("em", 8, True)) as run_em:
+            result = handle_simulation_tool_call(
+                "tools_run_em_simulation",
+                {"top_path": "topol.top", "itp_paths": ["solute.itp"], "mdp_path": "em.mdp", "structure_path": "model.pdb", "tpr_path": "em.tpr"},
+                work_dir=str(tmp_path),
+                config_path=str(tmp_path / "config.json"),
+            )
+
+        assert json.loads(result)["success"] is True
+        assert run_em.call_args.kwargs["work_dir"] == str(tmp_path.resolve())
+        assert run_em.call_args.kwargs["topol"] == str((tmp_path / "topol.top").resolve())
+        assert run_em.call_args.kwargs["itps"] == [str((tmp_path / "solute.itp").resolve())]
+
+    def test_run_tool_rejects_path_outside_workspace(self, tmp_path):
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        result = handle_simulation_tool_call(
+            "tools_run_eq_simulation",
+            {"top_path": "/etc/passwd"},
             work_dir=str(tmp_path),
-            extra_mdrun=["-cpi", str(checkpoint), "-append"],
         )
+
+        parsed = json.loads(result)
+        assert parsed["success"] is False
+        assert parsed["error_kind"] == "config_invalid"
 
 
 # ============================================================
@@ -142,29 +237,60 @@ class TestRetryProd:
 # ============================================================
 
 class TestRetryMdp:
-    """MDP 重试应只重建请求的阶段，除非明确请求 all。"""
+    """MDP 重试应重建所有受全局协议变更影响的下游阶段。"""
 
-    def test_stage_is_forwarded_to_mdp_builder(self):
+    def test_stage_is_forwarded_to_mdp_builder(self, tmp_project_root, tmp_path):
         from willy.errors import StepResult
         from willy.toolist_simulation import handle_simulation_tool_call
 
         with patch("willy.simulation.mdp.build_all", return_value=StepResult(
             step_name="mdp", step_index=6, success=True,
         )) as build_all:
-            handle_simulation_tool_call("tools_retry_mdp", {"stage": "em"})
+            handle_simulation_tool_call(
+                "tools_retry_mdp", {"stage": "em"},
+                work_dir=str(tmp_path), config_path=str(tmp_project_root / "config.json"),
+            )
 
-        build_all.assert_called_once_with(overrides=None, stages=("em",))
+        build_all.assert_called_once_with(
+            config_path=str(tmp_project_root / "config.json"),
+            output_dir=str(tmp_path), stages=("em",),
+        )
 
-    def test_all_stage_requests_all_mdp_files(self):
+    def test_all_stage_requests_all_mdp_files(self, tmp_project_root, tmp_path):
         from willy.errors import StepResult
         from willy.toolist_simulation import handle_simulation_tool_call
 
         with patch("willy.simulation.mdp.build_all", return_value=StepResult(
             step_name="mdp", step_index=6, success=True,
         )) as build_all:
-            handle_simulation_tool_call("tools_retry_mdp", {"stage": "all"})
+            handle_simulation_tool_call(
+                "tools_retry_mdp", {"stage": "all"},
+                work_dir=str(tmp_path), config_path=str(tmp_project_root / "config.json"),
+            )
 
-        build_all.assert_called_once_with(overrides=None, stages=None)
+        build_all.assert_called_once_with(
+            config_path=str(tmp_project_root / "config.json"),
+            output_dir=str(tmp_path), stages=("em", "eq", "prod"),
+        )
+
+    def test_eq_change_rebuilds_eq_and_prod(self, tmp_project_root, tmp_path):
+        from willy.errors import StepResult
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        with patch("willy.simulation.mdp.build_all", return_value=StepResult(
+            step_name="mdp", step_index=6, success=True,
+        )) as build_all:
+            handle_simulation_tool_call(
+                "tools_retry_mdp",
+                {"stage": "eq", "eq_high_temperature": 550},
+                work_dir=str(tmp_path), config_path=str(tmp_project_root / "config.json"),
+                protocol_change_authorized=True,
+            )
+
+        build_all.assert_called_once_with(
+            config_path=str(tmp_project_root / "config.json"),
+            output_dir=str(tmp_path), stages=("eq", "prod"),
+        )
 
     def test_build_all_signature_accepts_overrides(self):
         """build_all 按关键字接受 overrides 参数。"""
@@ -202,16 +328,42 @@ class TestModifyConfigSimulation:
         """应更新 config.json 中的 md 字段。"""
         from willy.toolist_simulation import handle_simulation_tool_call
         import willy.toolist_simulation as ts
-        # 覆盖 ROOT
-        import willy.toolist_simulation
-        willy.toolist_simulation.ROOT = tmp_project_root
+        original_root = ts.ROOT
+        ts.ROOT = tmp_project_root
+        try:
+            result = handle_simulation_tool_call("tools_modify_config_simulation", {
+                "dt": 0.002,
+                "eq_target_temperature": 310.0,
+                "prod_temperature": 310.0,
+                "eq_segments_ns": {
+                    "heat": 2, "hold_high": 1, "cool_transition": 2,
+                    "hold_transition": 1, "cool_target": 2, "hold_target": 2,
+                },
+            }, protocol_change_authorized=True)
+            parsed = json.loads(result)
+            assert parsed.get("ok") is True
+            assert "dt" in parsed.get("updated_fields", [])
+        finally:
+            ts.ROOT = original_root
 
-        result = handle_simulation_tool_call("tools_modify_config_simulation", {
-            "dt": 0.002, "ref_t": 310.0, "eq_ns": 20,
-        })
-        parsed = json.loads(result)
-        assert parsed.get("ok") is True
-        assert "dt" in parsed.get("updated_fields", [])
+    def test_reports_config_delta_after_the_run_snapshot_is_updated(self, tmp_project_root):
+        from willy.toolist_simulation import handle_simulation_tool_call
+
+        observed = []
+        result = handle_simulation_tool_call(
+            "tools_modify_config_simulation",
+            {"tau_t": 2.0, "eq_tau_p": 2.0},
+            config_path=str(tmp_project_root / "config.json"),
+            on_config_updated=lambda before, after, fields: observed.append((before, after, fields)),
+            protocol_change_authorized=True,
+        )
+
+        assert json.loads(result)["ok"] is True
+        assert len(observed) == 1
+        before, after, fields = observed[0]
+        assert fields == ["tau_t", "eq_tau_p"]
+        assert before["md"]["tau_t"] != after["md"]["tau_t"]
+        assert before["md"]["eq"]["tau_p"] != after["md"]["eq"]["tau_p"]
 
     def test_missing_config_json(self, tmp_path):
         """config.json 不存在时应有错误。"""
@@ -219,7 +371,9 @@ class TestModifyConfigSimulation:
         original_root = ts.ROOT
         ts.ROOT = tmp_path
         try:
-            result = ts.handle_simulation_tool_call("tools_modify_config_simulation", {"dt": 0.002})
+            result = ts.handle_simulation_tool_call(
+                "tools_modify_config_simulation", {"dt": 0.002}, protocol_change_authorized=True,
+            )
             parsed = json.loads(result)
             assert parsed.get("ok") is False or "error" in parsed
         finally:
@@ -231,7 +385,9 @@ class TestModifyConfigSimulation:
         original_root = ts.ROOT
         ts.ROOT = tmp_project_root
         try:
-            ts.handle_simulation_tool_call("tools_modify_config_simulation", {"dt": 0.002})
+            ts.handle_simulation_tool_call(
+                "tools_modify_config_simulation", {"dt": 0.002}, protocol_change_authorized=True,
+            )
             saved = json.loads((tmp_project_root / "config.json").read_text())
             assert "residues" in saved, "非 MD 字段应保留"
             assert "molecules" in saved, "非 MD 字段应保留"
@@ -240,67 +396,20 @@ class TestModifyConfigSimulation:
 
 
 # ============================================================
-# tools_skip_molecule_simulation
+# Removed simulation skip tool
 # ============================================================
 
-class TestSkipMoleculeSimulation:
-    """tools_skip_molecule_simulation 测试。"""
+def test_removed_skip_handler_does_not_mutate_configuration(tmp_project_root):
+    from willy.toolist_simulation import handle_simulation_tool_call
 
-    def test_adds_molecule_to_skip_list(self, tmp_project_root):
-        """应将分子添加到 config.json 的 skipped_molecules 列表中。"""
-        import willy.toolist_simulation as ts
-        original_root = ts.ROOT
-        ts.ROOT = tmp_project_root
-        try:
-            result = ts.handle_simulation_tool_call("tools_skip_molecule_simulation", {
-                "molecule_name": "LiTFSI",
-                "reason": "原子类型未解析",
-            })
-            parsed = json.loads(result)
-            assert parsed.get("ok") is True
-            assert parsed.get("molecule") == "LiTFSI"
-
-            saved = json.loads((tmp_project_root / "config.json").read_text())
-            assert "LiTFSI" in saved.get("skipped_molecules", [])
-            assert saved.get("skip_reasons", {}).get("LiTFSI") == "原子类型未解析"
-        finally:
-            ts.ROOT = original_root
-
-    def test_duplicate_skip_is_idempotent(self, tmp_project_root):
-        """对同一分子重复跳过不应重复添加。"""
-        import willy.toolist_simulation as ts
-        original_root = ts.ROOT
-        ts.ROOT = tmp_project_root
-        try:
-            ts.handle_simulation_tool_call("tools_skip_molecule_simulation", {
-                "molecule_name": "FEC",
-                "reason": "原因 1",
-            })
-            ts.handle_simulation_tool_call("tools_skip_molecule_simulation", {
-                "molecule_name": "FEC",
-                "reason": "原因 2",
-            })
-            saved = json.loads((tmp_project_root / "config.json").read_text())
-            skipped = saved.get("skipped_molecules", [])
-            assert skipped.count("FEC") == 1, f"重复条目: {skipped}"
-        finally:
-            ts.ROOT = original_root
-
-    def test_missing_config_json_creates_new(self, tmp_path):
-        """config.json 不存在时应创建新文件。"""
-        import willy.toolist_simulation as ts
-        original_root = ts.ROOT
-        ts.ROOT = tmp_path
-        try:
-            result = ts.handle_simulation_tool_call("tools_skip_molecule_simulation", {
-                "molecule_name": "LiTFSI",
-                "reason": "测试",
-            })
-            parsed = json.loads(result)
-            assert parsed.get("ok") is True
-            assert (tmp_path / "config.json").exists()
-        finally:
-            ts.ROOT = original_root
+    before = (tmp_project_root / "config.json").read_text()
+    result = json.loads(handle_simulation_tool_call(
+        "tools_skip_molecule_simulation", {"molecule_name": "LiTFSI"},
+        config_path=str(tmp_project_root / "config.json"),
+    ))
+    assert result["ok"] is False
+    assert "不支持" in result["error"]
+    assert (tmp_project_root / "config.json").read_text() == before
 
 
 # ============================================================
@@ -357,14 +466,13 @@ class TestDiagnoseErrorSimulation:
 
 
 # ============================================================
-# _step_to_dict 辅助函数
+# StepResult 序列化
 # ============================================================
 
-class TestStepToDict:
-    """_step_to_dict 格式转换测试。"""
+class TestStepResultSerialization:
+    """共享 StepResult 序列化格式测试。"""
 
     def test_success_result_format(self):
-        from willy.toolist_simulation import _step_to_dict
         from willy.errors import StepResult
 
         sr = StepResult(
@@ -373,14 +481,13 @@ class TestStepToDict:
             artifacts=["/tmp/em.mdp", "/tmp/eq.mdp", "/tmp/prod.mdp"],
             duration_s=0.1,
         )
-        d = _step_to_dict(sr)
+        d = sr.to_dict()
         assert d["_step_result"] is True
         assert d["success"] is True
         assert d["error_message"] == ""
         assert d["error_kind"] == ""
 
     def test_failure_result_format(self):
-        from willy.toolist_simulation import _step_to_dict
         from willy.errors import StepResult, StepError, ErrorKind
 
         err = StepError(
@@ -390,7 +497,7 @@ class TestStepToDict:
             hint="检查 .mdp",
         )
         sr = StepResult(step_name="md_em", step_index=8, success=False, error=err)
-        d = _step_to_dict(sr)
+        d = sr.to_dict()
         assert d["success"] is False
         assert d["error_kind"] == "grompp_failed"
         assert d["error_message"] == "grompp 失败"

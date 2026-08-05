@@ -1,8 +1,8 @@
-%chk=D:\Work\Gaussian\GaussianField\MY-DMA\Li.chk
+%chk=Li.chk
 # opt freq b3lyp/6-311+g(d,p)
 
 Li
 
 1 1
- Li                 0.00000000    0.00000000    0.00000000
+ Li                -1.89419804    2.21274172    0.00000000
 

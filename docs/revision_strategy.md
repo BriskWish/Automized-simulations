@@ -1,7 +1,7 @@
 # Willy 修订总计划与边界策略
 
-> 版本：1.0  
-> 日期：2026-07-31  
+> 版本：1.1
+> 日期：2026-08-05
 > 适用范围：`src/willy/`、`app.py`、`run_pipeline.py`、`docs/`、`tests/`、`config.json`、运行产物目录与 vendor 依赖。  
 > 目标：给后续修订建立统一路线图，明确每个部分的职责边界，避免重构时跨层漂移、重复实现和文档失真。
 
@@ -15,9 +15,9 @@
 
 当前最大的结构性问题不是单点 bug，而是三类边界不够稳定：
 
-1. **产品承诺边界**：文档声称能完成 GROMACS EM/NVT/NPT/PROD，但主编排器目前只到 Packmol 建盒。
-2. **模块职责边界**：部分执行层、toolist、orchestrator、env checker 之间的命名和契约不同步。
-3. **运行安全边界**：前端、shell、进程控制、API key、运行产物管理还没有形成严格约束。
+1. **产品承诺边界**：主编排器已执行 EM/NPT EQ/PROD；真实外部组合验收仍在执行，文档不得将其误述为目标体系科学收敛。
+2. **模块职责边界**：部分执行层、toolist、orchestrator、运行注册与环境注册之间的命名和契约仍需以唯一事实来源收敛。
+3. **运行安全边界**：前端、参数化子进程、进程控制、API key、运行产物管理还没有形成完整发布约束。
 
 修订策略必须先稳定边界，再扩展能力。
 
@@ -36,9 +36,9 @@
 | 2 号拓扑层工程师 | `topology/` 执行层、力场接口、主拓扑和 itp 修订 |
 | 3 号模拟层工程师 | `simulation/` 执行层、MDP/Packmol/GROMACS 主流程 |
 | 4 号前端交互工程师 | `app.py`、`frontend_api.py`、进度展示、用户交互 |
-| 5 号文档架构师 | 命名规范、设计文档、知识库、索引和矛盾清单 |
+| 5 号文档架构师 | 命名规范、设计文档、知识库、索引和文档台账 |
 
-当两个领域对同一边界有不同判断时，以 0 号总工程师在本文档和 `docs/employees.md` 中定义的边界为准；若边界需要调整，必须先更新文档，再改代码。
+当两个领域对同一边界有不同判断时，以 0 号总工程师在本文档和 `docs/employees.md` 中定义的边界为准；若边界需要调整，必须先更新文档，再改代码。当前架构已经引入 `env_registry.py`（环境事实来源）、`run_registry.py`（公开运行事实来源）和 `pipeline_launch.py`（启动锁与 run 绑定）；它们的接口分别以 `environment_registry_design.md`、`status_api.md` 和 `run_assistant_design.md` 为准。
 
 ---
 
@@ -55,13 +55,13 @@
 - 统一当前实际能力和文档描述。
 - 收紧最基本的安全风险。
 
-必须完成：
+已完成（2026-07-31）：
 
 - 修复 `tools_validate_config` 导入错误。
 - 统一 `PipelineOrchestrator.ensure()` 和 `env_checker._DEPENDENCIES.needed_by` 的模块名。
-- 修复 `top_assembly.build()` 中 `itp_revise` 写死 `TOPO_DIR` 的问题。
-- 决定主流程状态：当前 7 步是否临时作为 setup pipeline，还是立即升级为含 GROMACS 的完整 pipeline。
-- 将 Gradio 默认绑定改为本地地址，或增加远程访问认证。
+- 修复 `top_assembly.build()` 中 ITP 修订回退到共享拓扑目录的问题。
+- 将 Gradio 默认绑定收紧为本地地址，并移除 `frontend_api.py` 中的 `os.system` 调用。
+- 明确阶段输入、必需产物和 run 内回滚边界；GROMACS 执行阶段进入 Phase 2 验收。
 - `pytest -q` 全绿。
 
 验收标准：
@@ -85,41 +85,45 @@ python3 -m tests.llm_eval.run_eval
 - 统一步骤编号、步骤名、状态机字段。
 - 明确外部依赖注册方式。
 
-必须完成：
+已完成（2026-07-31）：
 
 - 给 `StepResult` 增加统一 `to_dict()`，去掉各 `toolist_*.py` 中重复的 `_step_to_dict()`。
-- 用 JSON Schema 或 Pydantic 定义 `config.json`。
-- 建立唯一的 step registry，例如 `STEP_ID`, `step_name`, `layer`, `required_deps`, `outputs`。
+
+已完成（2026-08-05）：
+
+- 建立 `step_registry.py` 作为步骤编号、层级、产物契约、模拟阶段与受控重跑许可的唯一来源；编排器、恢复策略、待确认动作、前端停止判断、执行器和步骤审计均已接入。
+- 在同一注册表中建立执行模块与依赖归属：`EXECUTION_MODULE_REGISTRY` 将稳定模块 ID 映射到主流程 step、外部工具和内置依赖；`env_checker` 的 `needed_by` 由其生成，不再在预检清单中重复维护。
+- 建立 `config_schema.py` 作为完整工作流配置的外层结构校验边界；MD v2 科学协议与显式迁移继续由 `simulation.protocol` 负责，未知扩展字段保持兼容。
+- 建立 `RunStore` run-local 事务锁和跨事件/决策/生命周期记录的单调序列；MD manifest 读改写不再暴露并发丢失更新。
+- 新增 `provenance.json` 与受管 GROMACS 进程组停止升级，保留脱敏、可复现的运行事实而不暴露密钥、路径或原始 prompt。
+- 建立具名 external smoke 注册、required 门禁和证据框架；真实工具 fixture 仍按目标环境验收。
+
+仍需完成：
+
 - 所有执行模块返回 `StepResult`，禁止裸 `raise` 穿出 pipeline 公共接口。
-- `env_checker` 的 `needed_by` 只使用 step registry 中的规范名称。
 
 验收标准：
 
 - 任意一步失败时，orchestrator、状态机、Agent、前端展示看到的是同一个 `step_name` 和 `ErrorKind`。
-- grep 不再出现重复的 `_step_to_dict`。
+- 已验证 `toolist_*.py` 中不再出现重复的 `_step_to_dict`。
 - 新增配置字段必须同时出现在 schema、defaults、文档和测试中。
 
-### Phase 2：端到端 MD 闭环
+### Phase 2：端到端 MD 闭环（主链路与小体系 smoke 已完成；目标体系验收待执行）
 
 目标：让主流程真正完成从结构输入到 GROMACS 生产运行。
 
 范围：
 
-- 接入文件收集。
 - 接入 EM。
-- 明确 NVT/NPT 设计。
 - 接入 EQ 和 PROD。
 - 调整状态机与前端进度。
 
-必须完成：
+已完成：
 
-- 在 `PipelineOrchestrator._build_steps()` 中接入 `simulation.setup.collect_files()`。
-- 接入 `simulation.em.run_em()`。
-- 明确是否拆分 NVT 和 NPT。如果拆分，应新增 `nvt.py` 或将 `eq.py` 明确重命名/重构。
-- 接入 `simulation.eq.run_eq()`。
-- 接入 `simulation.prod.run_prod()`。
-- 修复 `tools_retry_prod` 构造 `extra_mdrun` 但未透传的问题。
-- 更新 `PipelineStatus.total_steps`、前端进度标签、README 和设计文档。
+- `PipelineOrchestrator._build_steps()` 已接入 `simulation.em.run_em()`、`simulation.eq.run_eq()` 和 `simulation.prod.run_prod()`。
+- 当前 run workspace 已在步骤 1-7 原位生成并消费 `topol.top`、`.itp`、`.mdp` 和 `model.pdb`，不再额外复制到旧式 setup 目录。
+- 三个阶段在执行前校验输入，在成功时强制登记 `.tpr/.gro/.xtc/.edr`；可选 `.trr` 由模拟前配置控制。
+- EM 收敛失败和 EQ 宏观真空区会有限次回滚至 Packmol 建盒；EQ 通过前不得进入 PROD。
 
 建议最终主流程：
 
@@ -131,22 +135,19 @@ python3 -m tests.llm_eval.run_eval
 5. topology_assembly
 6. simulation_mdp
 7. simulation_box
-8. simulation_setup
-9. simulation_em
-10. simulation_nvt
-11. simulation_npt
-12. simulation_prod
+8. simulation_em
+9. simulation_eq_npt
+10. simulation_prod
 ```
-
-如果短期不实现 NVT，则文档必须明确当前只支持 NPT EQ，不能继续声称 NVT 已接入。
 
 验收标准：
 
-- 一次 `run_pipeline.py --no-llm` 至少能在小体系 fixture 上跑完整 setup/MD mock 流程。
+- 已在 32 原子中性 LJ 小体系完成 Packmol -> EM -> EQ -> PROD 真实 smoke。
+- 目标体系必须另行完成收敛阈值、GROMACS 警告白名单和科学验收，不能以小体系 smoke 替代。
 - 所有 simulation retry tools 对应的主流程步骤真实存在。
 - 前端进度不再显示和实际步骤不一致的标签。
 
-### Phase 3：Agent 修复能力增强
+### Phase 3：Agent 修复能力增强（核心契约已完成，真实端点验收待执行）
 
 目标：让 Agent 的修复行为可控、可测、可升级。
 
@@ -157,13 +158,17 @@ python3 -m tests.llm_eval.run_eval
 - 升级信息标准化。
 - LLM API 稳定性。
 
-必须完成：
+已完成：
 
-- `TOOL_META` 成为统一规范，覆盖所有 tool，并标明 `mutating`、`risk`、`layer`、`requires_confirmation`。
-- 高风险工具调用前有明确策略：自动执行、用户确认、或只在 CLI 模式允许。
-- DeepSeek/OpenAI client 配置 timeout 和 retry/backoff。
-- `LayerAgent` 捕获 JSON 解析错误、tool 异常和 LLM 异常时写入结构化 action。
-- 扩展 `tests/llm_eval`，加入“不能跨层调用不存在工具”“升级信息完整性”等场景。
+- `action_contract.py` 从五个 toolist 的 JSON Schema 与 `TOOL_META` 构建唯一的 46 项工具目录，声明 `read_only`、`retry_safe`、`requires_confirmation`、`requires_fork`、`destructive` 等效果等级。
+- `recovery_policy.py` 按 layer、错误类型、步骤和工具效果裁决重试上限、确认要求与 fork 限制；模型不能通过参数提升权限。
+- `LayerAgent` 对 JSON、tool 和 LLM 异常均写入受限的结构化决策；`llm_budget.py` 对单个 run 限制调用次数、累计时长、单次超时和连续失败熔断。
+- 确定性回归与 18 个离线 mock LLM 场景覆盖跨层工具隔离、恢复身份、升级和确认边界。
+
+仍需完成：
+
+- 在真实远程 LLM 服务上验证模型兼容性、超时和失败降级；该验证必须显式 opt-in，不能由默认回归代替。
+- 随实际修复策略扩展，持续将高影响动作收敛到可审计的确认或派生 run 流程。
 
 验收标准：
 
@@ -171,7 +176,7 @@ python3 -m tests.llm_eval.run_eval
 - 升级信息必须包含 `layer`、`step_name`、`error_kind`、`attempts_made`、`actions_tried`、`recommendation`、`backup_plan`。
 - 高风险工具不允许绕过 tool handler 直接执行 shell。
 
-### Phase 4：前端与运行管理产品化
+### Phase 4：前端与运行管理产品化（核心控制面已完成）
 
 目标：让 Web UI 成为可安全使用的控制面板，而不是直接暴露脚本入口。
 
@@ -183,14 +188,17 @@ python3 -m tests.llm_eval.run_eval
 - 产物浏览。
 - 离线资源。
 
-必须完成：
+已完成：
 
-- 默认 `server_name="127.0.0.1"`。
-- 远程访问必须启用认证。
-- 移除 `os.system`，用 `subprocess.run([...], shell=False)` 或 PID/PGID API 管理进程。
-- 运行目录作为一等对象：每次 run 有 `run_id`、`run_dir`、`status.json`、日志、配置快照。
-- 前端 3Dmol 使用 vendored `vendor/3Dmol-min.js` 或明确联网要求。
-- 上传文件经过类型、大小和名称校验。
+- Web UI 固定监听 `127.0.0.1` 且 `share=False`；当前没有远程公开控制面，任何未来远程暴露都必须先设计认证和授权。
+- 启动锁、run 预留、run-local 配置快照、状态、公开 manifest、provenance、事务写前日志与受管进程组生命周期均已落地。
+- 前端通过受限 API 读取 run 和可视化文件；停止只走服务端二次确认按钮，EQ 调整只走冻结动作与文本确认。
+- 3Dmol 与结构上传类型白名单已在本地 UI 中接入。
+
+仍需完成：
+
+- 真实目标环境中的停止、续跑与 ETA 长时间行为验收。
+- 若产品开放远程访问，补充认证、并发用户隔离、上传大小限制与部署边界测试。
 
 验收标准：
 
@@ -209,18 +217,21 @@ python3 -m tests.llm_eval.run_eval
 - CI。
 - 文档同步。
 
-必须完成：
+已完成：
 
-- 扩展 `.gitignore`，排除 `status.json`、`.md_counter`、临时 lock/pid、默认运行产物。
-- 将示例数据与真实运行产物分离。
-- 为 vendor 二进制补充来源、版本、license 和校验方式。
-- `pyproject.toml` 补齐 runtime、test、dev dependencies。
-- 加 CI：运行 unit tests、import check、文档链接检查。
+- `.gitignore` 忽略运行产物、启动锁、临时状态与项目本地迁移审计；run 编号从已分配目录推导，不再依赖根目录计数文件。
+- `scripts/prune_runs.py` 默认仅预览，显式 `--apply` 后按保留数量删除历史 run、同步索引，并在启动锁活跃时拒绝执行。
+- `.github/workflows/tests.yml` 已执行 Python 3.10/3.12 的确定性回归、LLM mock eval、编译检查和生成的测试用例台账一致性检查；external smoke 只在 self-hosted 验收机显式启用。
+
+仍需完成：
+
+- 将示例数据与真实运行产物进一步分离，并为 vendor 二进制补齐来源、版本、license 和校验方式。
+- 增加独立的文档链接检查与目标环境 external smoke 成功证据；CI 配置存在不等于真实外部链路已验收。
 
 验收标准：
 
 - 新 clone 后按 README 能安装并运行基础检查。
-- CI 能阻止测试红线、依赖缺失和文档索引遗漏。
+- CI 能阻止确定性测试红线、编译失败和生成台账漂移；外部依赖与文档链接仍需补专门门禁。
 - 文档目录索引和实际文件一致。
 
 ---
@@ -268,6 +279,7 @@ python3 -m tests.llm_eval.run_eval
 
 - `src/willy/agent_config.py`
 - `src/willy/toolist_global.py`
+- `src/willy/workflow_config.py`
 - `src/willy/llm_config.py`
 - `docs/knowledge.md`
 
@@ -282,7 +294,7 @@ python3 -m tests.llm_eval.run_eval
 
 - 读取 `docs/knowledge.md`。
 - 扫描 `struct/*.gjf` 作为可用分子列表。
-- 写入 `config.json`，但必须通过 `llm_config.apply_config()` 或统一配置 API。
+- 写入 `config.json`，但必须通过 `workflow_config.apply_config()` 或统一配置 API。
 
 禁止：
 
@@ -294,7 +306,9 @@ python3 -m tests.llm_eval.run_eval
 
 - 配置 Agent 只产出结构化配置，不负责执行。
 - `toolist_global.py` 是 LLM tool schema 和 handler，不放复杂科学计算逻辑。
-- `llm_config.py` 是配置 schema/default/validation 的唯一来源。
+- `config_schema.py` 是工作流配置外层结构的唯一来源；`workflow_config.py` 负责默认值、
+  跨字段语义与写入入口；`simulation.protocol` 是 MD v2 科学协议和显式迁移的唯一来源。
+- `llm_config.py` 是 OpenAI-compatible endpoint、model、credential 解析和 client 构造的唯一来源。
 
 ### 3. Orchestrator 边界
 
@@ -477,7 +491,7 @@ python3 -m tests.llm_eval.run_eval
 
 - 重新生成量子产物。
 - 执行 GROMACS MD。
-- 在传入 `topo_dir` 时写死根目录 `topo/`。
+- 在传入 `topo_dir` 时回退到项目根目录的共享拓扑目录。
 
 修订原则：
 
@@ -529,7 +543,7 @@ python3 -m tests.llm_eval.run_eval
 
 - `mdp.py` 只生成参数文件，不运行 GROMACS。
 - `box.py` 只负责建盒，不负责 EM/EQ/PROD。
-- `setup.py` 只收集运行输入，不做模拟。
+- 运行目录仅由 `pipeline_launch.py` 分配；量子、拓扑和模拟产物始终在同一 run workspace 内交接，不再维护额外文件收集器。
 - `em.py`、`eq.py`、`prod.py` 只运行对应阶段。
 
 ### 9. Shared Infra 边界
@@ -537,16 +551,20 @@ python3 -m tests.llm_eval.run_eval
 文件：
 
 - `src/willy/errors.py`
+- `src/willy/env_registry.py`
 - `src/willy/env_checker.py`
 - `src/willy/log_parsers.py`
 - `src/willy/_paths.py`
+- `src/willy/run_registry.py`
+- `src/willy/pipeline_launch.py`
 
 职责：
 
 - 共享错误模型。
-- 外部依赖检查。
+- 外部工具发现、子进程环境构造和兼容预检。
 - 日志解析。
 - 项目根路径解析。
+- 公开运行事实、启动锁与 run 绑定。
 
 禁止：
 
@@ -558,7 +576,8 @@ python3 -m tests.llm_eval.run_eval
 
 - shared infra 必须低耦合。
 - 新 `ErrorKind` 必须有测试和文档说明。
-- 新外部依赖必须集中注册在 `env_checker.py`。
+- 新外部依赖必须集中注册在 `env_registry.py`；`env_checker.py` 只保留兼容的模块级预检入口。
+- 运行身份、公开状态和历史索引只能由 `RunRegistry` 管理；阶段许可仍由模拟层的 `md_manifest.json` 管理。
 
 ### 10. Docs 和 Tests 边界
 
@@ -582,8 +601,8 @@ python3 -m tests.llm_eval.run_eval
 
 修订原则：
 
-- 改代码必须同步相关设计文档。
-- 改文件名必须同步 `docs/README.md` 和矛盾清单。
+- 改代码必须同步相关设计文档和 `docs/document_registry.md`。
+- 改文件名必须同步 `docs/README.md`、`docs/document_registry.md` 和全部受影响引用。
 - 新增 bug 复现测试后，下一步必须把它改成修复后的回归测试。
 
 ### 11. Data、Artifacts 和 Vendor 边界
@@ -591,15 +610,13 @@ python3 -m tests.llm_eval.run_eval
 目录：
 
 - `struct/`
-- `topo/`
 - `md_run/`
 - `vendor/`
 
 职责：
 
 - `struct/`：输入结构和必要示例结构。
-- `topo/`：拓扑示例或默认拓扑产物。
-- `md_run/`：运行产物。
+- `md_run/`：每个 run 的拓扑、模拟、状态和审计产物。
 - `vendor/`：第三方二进制和静态资源。
 
 禁止：
@@ -724,7 +741,7 @@ StepResult(
 
 | 影响范围 | 必跑 |
 |------|------|
-| config/toolist | `pytest tests/test_llm_config.py tests/test_toolist_global.py -q` |
+| config/toolist | `pytest tests/test_workflow_config.py tests/test_llm_config.py tests/test_toolist_global.py -q` |
 | quantum | `pytest tests/test_log_parsers.py tests/test_toolist_quantum_topology.py -q` |
 | topology | `pytest tests/test_toolist_quantum_topology.py -q` |
 | simulation | `pytest tests/test_toolist_simulation.py -q` |
@@ -738,11 +755,13 @@ StepResult(
 
 - `docs/README.md` 快速导航
 - `docs/README.md` 文档分类
+- `docs/document_registry.md` 文档台账
 - 相关设计文档
 
 修改文件名必须同步：
 
 - `docs/README.md`
+- `docs/document_registry.md`
 - `docs/naming_convention.md`
 - `docs/reconstruction.md`
 - `README.md`
@@ -801,26 +820,24 @@ StepResult(
 
 ### 第一批：稳定基线
 
-1. 修 `tools_validate_config`。
-2. 修 `env_checker` 命名和 `ensure()` 调用。
-3. 修 `top_assembly` 的 `topo_dir` 传递。
-4. 修脆弱测试，去掉固定行号断言。
-5. 让 `pytest -q` 全绿。
+1. 已完成：修 `tools_validate_config`。
+2. 已完成：修 `env_checker` 命名和 `ensure()` 调用。
+3. 已完成：修 `top_assembly` 的 `topo_dir` 传递。
+4. 已完成：修脆弱测试，改为验证可观察行为。
+5. 已完成：让 `pytest -q` 全绿。
 
 ### 第二批：补完整主流程
 
 1. 建立 step registry。
-2. 接入 `simulation.setup.collect_files()`。
-3. 接入 `run_em()`。
-4. 明确并接入 NVT/NPT。
-5. 接入 `run_prod()`。
-6. 更新状态机、前端进度和 README。
+2. 以真实小体系验收 EM/NPT/PROD 和 PATH 中的 GROMACS 版本。
+3. 固化外部 smoke 与 EQ/PROD 真实验收证据。
+4. 验证 EQ 真空区回滚与 PROD 参数确认。
 
 ### 第三批：安全和运行治理
 
 1. Gradio 默认本地绑定。
 2. 移除 `os.system`。
-3. 替换可替换的 `shell=True`。
+3. 持续审计参数化子进程调用和进程边界。
 4. 引入 run_id/run_dir 运行管理。
 5. 清理 `.gitignore` 和运行产物策略。
 
@@ -828,9 +845,9 @@ StepResult(
 
 1. 标准化 `TOOL_META`。
 2. 扩展 LLM eval。
-3. 更新 `quantum_design.md`、`topology_design.md`。
-4. 新增 `simulation_design.md`。
-5. 清理所有旧文件名引用。
+3. 维护量子、拓扑、模拟、后处理、环境注册与状态接口设计文档。
+4. 维护运行助理、测试策略和文档台账的验收证据。
+5. 清理所有旧文件名和已完成迁移的未来式描述。
 
 ---
 
@@ -846,6 +863,10 @@ StepResult(
 - `reconstruction.md`：重构时的具体检查清单。
 - `quantum_design.md`：量子层设计细节。
 - `topology_design.md`：拓扑层设计细节。
+- `simulation_design.md`：模拟协议、阶段许可和恢复契约。
+- `postprocessing_design.md`：PROD 后独立分析契约。
+- `environment_registry_design.md`：外部软件发现、预检与子进程环境。
 - `status_api.md`：状态文件和前端轮询接口。
+- `run_assistant_design.md`：运行审计、只读查询和后续控制计划。
 
-未来新增 `simulation_design.md` 后，应与本文的 Simulation 边界保持一致。
+各领域设计文档是可执行契约的细节来源；本文只维护跨层边界、优先级和完成定义。

@@ -1,6 +1,6 @@
 # 分子动力学模拟知识库
 
-> 供 AI Agent 在生成 config.json 时参考。以下信息基于当前工作流已验证的配置。
+> 供 AI Agent 在生成 `config.json` 时参考。分子识别、配置默认值和运行可启动性是不同层次的事实：本文件的表格提供识别元数据，实际执行仍以当前 `struct/` 中可复制的量子输入为准。
 
 ---
 
@@ -18,6 +18,8 @@
 - **精确方式**：在下方表格新增一行，填写准确的电荷、自旋、基组等信息后，重启应用或调用 `refresh_structs` 工具
 
 > ⚠️ 自动注册的分子默认 charge=0（中性），若实际为离子，请务必在表格中手动注册，否则 RESP 电荷计算和力场分配可能出错。
+
+**输入就绪性（2026-08-05 核验）**：注册表可识别 `Li`、`TFSI`、`NO3`、`PF6`、`FEC`、`DME`、`DMM`、`EC`、`EMC`、`TTE` 与 `DMAA`，但“可识别”不代表可启动。当前 `struct/` 已有 `.gjf` 的表内组分为 `Li`、`NO3`、`PF6`、`FEC`、`EC`、`EMC`、`DMAA`；`TFSI`、`DME`、`DMM`、`TTE` 在加入配置前仍须提供对应 `.gjf`（或所选后端可复用的 Step 1 中间产物）。`struct/` 中未列入表格的文件会被自动注册为中性默认条目，使用前应补充准确元数据。
 
 ---
 
@@ -76,19 +78,18 @@
 例如: "50 LiTFSI" → residues: {"Li": 50, "TFSI": 50}
 例如: "80个硝酸锂" → residues: {"Li": 80, "NO3": 80}
 
-**添加新分子**：将 `.gjf` + `.mol2` 放入 `struct/`，在上表中添加一行，并添加映射规则。
+**添加新分子**：将 `.gjf` 放入 `struct/`，在上表中添加一行，并添加映射规则。`.mol2` 是 Step 2 的运行产物，不是新任务的必需输入。
 
 ---
 
-## 二、力场
+## 二、力场与当前后端边界
 
-| 力场 | 适用 | Sobtop 选项 | JSON 配置 |
-|------|------|:---:|------|
-| **GAFF** | 有机分子、溶剂 | gaff=True（默认） | — |
-| AMBER | 蛋白、核酸 | gaff=False | — |
-| **UFF** | 金属离子、GAFF 不支持的元素 | Sobtop 自动退选 | — |
+| 后端配置 | force-field family | 当前用途 | 说明 |
+|------|------|------|------|
+| `sobtop` / `gaff_uff` | `gaff_uff` | 默认的小分子参数化 | Sobtop 以 GAFF 为先、UFF 补齐缺失原子类型或参数；这是一套 run 内一致的组合，不是可任意拼接的 AMBER 路径。 |
+| `oplsaa` / `oplsaa` | `oplsaa` | LigParGen/BOSS OPLS-AA 参数化 | 需要外部 LigParGen 与 BOSS；同一 run 不能与 `gaff_uff` 混用。 |
 
-当前策略：**GAFF 优先，无法匹配的退 UFF**。混合力场下 atomtype 命名：小写=GAFF，UFF_前缀=UFF。
+运行时的唯一选择入口是 `config.json.topology`。当前不支持 `backend=amber`，也不存在 `gaff=True/False` 这一配置开关。分子表中的“力场”列仅用于识别和默认建议；最终参数化后端由整个 run 的 `topology` 段决定，详见 `topology_design.md`。
 
 ---
 
@@ -159,26 +160,24 @@
 
 ---
 
-## 六、盒子密度
+## 六、初始建盒密度
 
-| 体系类型 | 密度 (分子/nm³) | 示例 |
-|------|:---:|------|
-| 离子液体 (纯) | 6 | LiTFSI, 100Li+100TFSI → 33Å |
-| 离子 + 溶剂混合 | 5 | 含 DME/DMM/FEC |
-| 溶剂 (中性有机) | 4 | 纯 EC/DMC/DME |
-| 水溶液 | 3 | 蛋白+水 |
+Step 7 的初始盒子使用质量密度，而不是分子数量估算。默认提示为“初始体积将由使用默认1.5g/cm3的密度猜测”。每个组分的分子质量从当前 run 的 `<residue>.itp` 中 `[ atoms ]` 的质量列计算；这使同一分子在不同参数化后仍以实际拓扑质量建盒。
 
-**公式**：`box = ceil(∛(N / density) × 10)` Å
+**公式**：`V_nm3 = M_amu * 1.66053906660e-3 / rho_g_cm3`，`L_A = 10 * cbrt(V_nm3)`。
+
+`model.inp` 以 `pbc L L L` 明确声明周期盒，`model.pdb` 的 `CRYST1` 是运行使用的实际盒矢量来源。目标质量密度只用于初始构型，不等同于 EQ 或 PROD 的平衡密度；真实边长、体积和初始质量密度会写入该 run 的 `md_manifest.json.box_attempts[]`。
 
 ### config.json 中 box 配置字段
 
 | 字段 | 默认值 | 说明 |
 |------|:---:|------|
-| box.density | 6.0 | 分子填充密度 (分子/nm³)，用于自动计算盒子边长 |
-| box.box_size | null | 手动指定盒子边长 (Å)，设为 null 则由密度自动计算 |
+| box.target_mass_density_g_cm3 | 1.5 | 初始目标质量密度 (g/cm3)，未设手动边长时由拓扑质量自动计算 |
+| box.box_size | null | 手动指定立方盒边长 (Å)，优先于密度估算 |
 | box.tolerance | 2.0 | Packmol 分子间最小容忍距离 (Å)，过小可能导致 packing 失败 |
+| box.packing_number_density_nm3 | 仅历史兼容 | 旧运行快照字段；只有不存在目标质量密度时才执行 |
 
-> `box_size` 非 null 时优先于 `density`，适合需要精确盒子尺寸的场景。
+> 优先级：`box_size` > `target_mass_density_g_cm3` > 历史 `packing_number_density_nm3`。用户可显式覆盖初始质量密度；LLM 不得静默依据体系类型改写它。
 
 ---
 
@@ -188,19 +187,22 @@
 config.json ──────────────────────────────────────────────────┐
     │                                                          │
     ▼                                                          │
-[1] struct_maker: .gjf → g16/ORCA → 结构优化 + formchk         │
-[2] mol2_maker:   .fchk/.molden → .mol2                        │
-[3] chg_maker:    RESP 电荷计算 → .chg                          │
-[4] sobtop_interface: .mol2+.chg → Sobtop → .itp+.gro          │
-[5] top_maker:    汇总 atomtype → topol.top + itp_reviser       │
-[6] mdp_maker:    md 参数 → em/eq/prod.mdp                      │
-[7] inp_generator: residues → Packmol 盒子 (model.pdb)         │
+[1] struct_g16/struct_orca: .gjf → 结构优化 → .fchk/.molden     │
+[2] singlepoint_* + fchk_mol2: 单点能 → .mol2                  │
+[3] chg_resp:      RESP 电荷计算 → .chg                         │
+[4] topo_gaff/topo_opls: .mol2+.chg → .itp+.gro                │
+[5] top_assembly + itp_revise: manifest → topol.top            │
+[6] mdp:           md 参数 → em/eq/prod.mdp                    │
+[7] box:           residues → Packmol 盒子 (model.pdb)         │
+[8] em:            model.pdb → em.tpr/em.gro/em.xtc/em.edr     │
+[9] eq:            em.gro → eq.tpr/eq.gro/eq.xtc/eq.edr        │
+[10] prod:         eq.gro/eq.cpt → prod.tpr/prod.gro/prod.xtc/prod.edr │
     │                                                          │
     ▼                                                          │
-   产物统一写入 md_run/md_*/                                   │
+   产物统一写入 md_run/<run_id>/                                │
     │                                                          │
     ▼                                                          │
-   GROMACS: EM → NVT → NPT EQ → PROD (手动或脚本控制)          │
+   GROMACS: EM → 三点式退火 NPT EQ → PROD（由 manifest 严格串联） │
 ```
 
 ---
@@ -212,12 +214,17 @@ config.json ──────────────────────�
 3. **溶剂**：电池电解质用 acetone，水溶液用 water，不确定问用户
 4. **温度**：电池模拟 298-350K，高温测试 400-500K
 5. **dt**：含 Li⁺/Mg²⁺ 等高电荷离子 → 1fs；纯有机 → 2fs
-6. **eq_ns**：离子液体 5-10ns，纯溶剂 1-2ns
-7. **prod_ns**：用户指定；默认 10ns
-8. **盒子密度**：离子液体 6/nm³；离子+溶剂 5/nm³；纯有机 4/nm³
-9. **力场**：有机分子用 GAFF，金属离子自动 UFF
+6. **EQ**：默认 500/400/298 K 六段退火，总时长 10 ns；所有段为正且总长 7-100 ns
+7. **PROD**：用户独立指定 2-200 ns；温度必须等于 EQ 目标温度，默认 10 ns，并只从已验收 EQ checkpoint 启动
+8. **初始建盒**：默认以拓扑质量和 `1.5 g/cm3` 估算；用户指定边长或目标质量密度优先。实际 PBC 盒矢量必须由 Packmol 输出审计后再交给 GROMACS
+9. **力场**：新 run 默认使用 `sobtop/gaff_uff`；需要 OPLS-AA 时显式选择 `oplsaa/oplsaa` 并满足 LigParGen/BOSS 依赖。不得在同一 run 混用两类 family。
 10. **冲突处理**：用户指定 > 知识库推荐 > 默认值
 11. **用户上传分子**：`struct/` 下的自上传 `.gjf` 文件会以默认中性参数（charge=0, spin=1, GAFF 力场, b3lyp/6-311+g(d,p)）自动注册。若分子实际为离子或需特殊基组，用户需在 knowledge.md 表格中手动注册
 
 ---
 
+## 九、运行诊断证据状态
+
+截至 2026-08-05，旧的 `md__202608010003` 工作区已按 run 保留策略清理，仓库中不再保留其原始轨迹、日志和 manifest。因此此前围绕该 run 的 EQ/NVT 数值描述不再作为“已验证运行经验”供 Agent 或人工决策引用。
+
+当前规则是：只有当同一 run 的受控状态、manifest 与分析产物仍可读取，且结论的输入、版本和验收条件可追溯时，才可在本节登记为诊断经验。否则只能作为外部或历史参考，不能放宽 EM/EQ/PROD 阶段许可、改变默认协议或替代目标体系的科学验收。

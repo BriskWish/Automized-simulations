@@ -1,316 +1,341 @@
-"""
-top_assembly.py
-============
-从零生成 GROMACS 主拓扑文件（.top）。
-
-流程:
-  1. 读取 config.json → 获取残基种类与个数
-  2. 扫描 topo/ 下对应 .itp → 提取 [atomtypes] → 去重
-  3. 生成 #include 列表、[system] 名称、[molecules] 列表
-  4. 写出 .top 文件
-  5. 直接调用 itp_revise 清理 itp 中的 [atomtypes] 段
-"""
+"""Manifest-driven GROMACS master topology assembly."""
 
 from __future__ import annotations
+
 from pathlib import Path
-from typing import Dict, OrderedDict
+from typing import Any
 import json
+import shutil
 
 from willy._paths import get_project_root
-from willy.errors import StepResult, StepError, ErrorKind
+from willy.errors import ErrorKind, StepError, StepResult
+from willy.topology.backends import normalize_topology_config
+from willy.topology.manifest import (
+    TopologyManifestComponent,
+    load_manifest,
+    manifest_path,
+    write_manifest,
+)
+from willy.topology.validation import run_output_path, validate_topology_files
 
 
-# ── 路径 ──
 ROOT = get_project_root()
 CONFIG_PATH = ROOT / "config.json"
-TOPO_DIR = ROOT / "topo"
+
+_FORCEFIELD_TEMPLATES = {
+    "gaff_uff": {
+        "defines": ("#define GAFF", "#define UFF"),
+        "defaults": "1 3 yes 0.5 0.5",
+    },
+    "oplsaa": {
+        "defines": ("#define OPLSAA",),
+        "defaults": "1 3 yes 0.5 0.5",
+    },
+}
+_ASSEMBLY_ITP_DIRNAME = ".assembly_itp"
 
 
-# ============================================================
-# 入参层
-# ============================================================
+class AssemblyValidationError(ValueError):
+    def __init__(self, message: str, kind: ErrorKind = ErrorKind.CONFIG_INVALID):
+        super().__init__(message)
+        self.kind = kind
+
 
 class TopConfig:
-    """
-    主拓扑配置。
+    """The assembly-relevant portion of a config snapshot."""
 
-    从 config.json 读取，也可直接构建（方便 AI 填充）。
-    """
-    def __init__(self, residues: dict[str, int] = None):
-        self.residues: dict[str, int] = residues or {}
+    def __init__(self, residues: dict[str, int] | None = None):
+        self.residues = residues or {}
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "TopConfig":
-        with open(path) as f:
-            data = json.load(f)
-        return cls(residues=data.get("residues", {}))
+        return cls(residues=json.loads(Path(path).read_text()).get("residues", {}))
 
 
-# ============================================================
-# 核心：atomtype 提取与去重
-# ============================================================
+def _section_name(line: str) -> str | None:
+    stripped = line.strip()
+    if not (stripped.startswith("[") and "]" in stripped):
+        return None
+    return stripped[1:stripped.index("]")].strip().lower()
+
 
 def _extract_atomtypes(itp_path: Path) -> list[str]:
-    """
-    从单个 .itp 文件提取 [ atomtypes ] 段的数据行（不含注释和空行）。
-
-    Returns:
-        每行一个 atomtype 定义
-    """
-    content = itp_path.read_text()
-    lines = content.split("\n")
-
+    """Extract data rows until the next section, preserving valid parameters."""
     in_section = False
-    entries = []
-
-    for line in lines:
-        stripped = line.strip()
-
-        # 检测段头
-        if stripped.startswith("[") and "atomtypes" in stripped.lower():
-            in_section = True
-            continue
-
+    entries: list[str] = []
+    for line in itp_path.read_text().splitlines():
+        section = _section_name(line)
+        if section is not None:
+            if section == "atomtypes":
+                in_section = True
+                continue
+            if in_section:
+                break
         if not in_section:
             continue
-
-        # 段尾：空行或下一个 [
-        if stripped == "" or stripped.startswith("["):
-            break
-
-        # 跳过注释行
-        if stripped.startswith(";"):
-            continue
-
-        entries.append(stripped)
-
+        data = line.split(";", 1)[0].strip()
+        if data and not data.startswith("#"):
+            entries.append(data)
     return entries
 
 
-def _collect_dedup_atomtypes(residues: list[str], topo_dir: str = "topo") -> list[str]:
-    """
-    收集所有残基的 atomtype 定义，按首次出现顺序去重。
-
-    Args:
-        residues: 残基名列表（如 ["Li", "DME", "DMM", "FEC", "NO3"]）
-        topo_dir: .itp 文件所在目录
-
-    Returns:
-        去重后的 atomtype 行列表
-    """
-    seen: set[str] = set()
-    result: list[str] = []
-
-    for name in residues:
-        itp_path = Path(topo_dir) / f"{name}.itp"
-        if not itp_path.exists():
-            print(f"[top_assembly] ⚠  {itp_path} 不存在，跳过 atomtype 提取")
-            continue
-
+def _collect_dedup_atomtypes(components: list[dict[str, Any]]) -> list[str]:
+    """Deduplicate only identical atom types and reject parameter conflicts."""
+    by_name: dict[str, tuple[str, ...]] = {}
+    lines: list[str] = []
+    referenced_types: set[str] = set()
+    for component in components:
+        itp_path = Path(component["itp"])
         for entry in _extract_atomtypes(itp_path):
-            # atomtype 名 = 第一个空格分隔的字段
-            at_name = entry.split()[0] if entry.split() else entry
-            if at_name not in seen:
-                seen.add(at_name)
-                result.append(entry)
-                print(f"[top_assembly]   + {at_name} (from {name})")
-            else:
-                print(f"[top_assembly]   - {at_name} (重复，跳过)")
-
-    return result
-
-
-# ============================================================
-# 生成 .top 文件
-# ============================================================
-
-def generate_top(config: TopConfig = None,
-                 config_path: str = None,
-                 topo_dir: str = None,
-                 output_path: str = None,
-                 ) -> Path:
-    """
-    生成主拓扑文件。
-
-    Args:
-        config: TopConfig 对象；None 则从 config.json 读取
-        config_path: 配置文件路径；None 则使用 ROOT/config.json
-        topo_dir: .itp 文件所在目录；None 则使用 ROOT/topo
-        output_path: 输出 .top 路径；None 则自动为 topo/topol.top
-
-    Returns:
-        生成的 .top 文件路径
-    """
-    if config_path is None:
-        config_path = str(CONFIG_PATH)
-    if topo_dir is None:
-        topo_dir = str(TOPO_DIR)
-    if config is None:
-        config = TopConfig.from_json(config_path)
-
-    residues = config.residues
-    residue_names = list(residues.keys())
-
-    if not residue_names:
-        raise ValueError("config.json 中 residues 为空")
-
-    # ── 构建各段 ──
-
-    # [ atomtypes ] —— 从各 itp 提取并去重
-    print("[top_assembly] 收集 atomtypes…")
-    atomtype_lines = _collect_dedup_atomtypes(residue_names, topo_dir)
-
-    # #include 行
-    include_lines = [f'#include "{name}.itp"' for name in residue_names]
-
-    # [ system ] 名称
-    system_name = "-".join(residue_names)
-
-    # [ molecules ] 行
-    molecule_lines = [f"{name}   {count}" for name, count in residues.items()]
-
-    # ── 组装 .top 内容 ──
-    lines = []
-
-    # 头
-    lines.append("#define GAFF")
-    lines.append("#define UFF")
-    lines.append("")
-
-    # [ defaults ]
-    lines.append("[ defaults ]")
-    lines.append("1 3 yes 0.5 0.5")
-    lines.append("")
-
-    # [ atomtypes ]
-    lines.append("[ atomtypes ]")
-    lines.append("; name   at.num      mass       charge   ptype     sigma (nm)    epsilon (kJ/mol)")
-    for entry in atomtype_lines:
-        lines.append(entry)
-    lines.append("")
-
-    # #include
-    for inc in include_lines:
-        lines.append(inc)
-    lines.append("")
-
-    # [ system ]
-    lines.append("[ system ]")
-    lines.append(system_name)
-    lines.append("")
-
-    # [ molecules ]
-    lines.append("[ molecules ]")
-    for mol in molecule_lines:
-        lines.append(mol)
-    lines.append("")
-
-    # ── 写出 ──
-    if output_path is None:
-        output_path = str(Path(topo_dir) / "topol.top")
-
-    out = Path(output_path)
-    out.write_text("\n".join(lines))
-    print(f"[top_assembly] ✅ 主拓扑已生成: {out}")
-    print(f"[top_assembly]    包含 {len(atomtype_lines)} 个 atomtype, "
-          f"{len(include_lines)} 个 itp, {len(molecule_lines)} 个分子行")
-
-    return out
-
-
-# ============================================================
-# 主流程：生成 top → 结构检查 → 过滤 itp
-# ============================================================
-
-def build(config_path: str = None,
-          topo_dir: str = None,
-          output_path: str = None,
-          ) -> StepResult:
-    """
-    完整流程:
-      1. 生成 .top 文件
-      2. 结构完整性检查
-      3. 直接调用 itp_revise 清理 itp
-
-    Returns:
-        StepResult (success=True 时 outputs={"topol": path})
-    """
-    import time as _time
-    _start = _time.time()
-
-    if config_path is None:
-        config_path = str(CONFIG_PATH)
-    if topo_dir is None:
-        topo_dir = str(TOPO_DIR)
-    # ── Step 1: 生成 ──
-    try:
-        top_path = generate_top(
-            config_path=config_path,
-            topo_dir=topo_dir,
-            output_path=output_path,
-        )
-    except ValueError as e:
-        return StepResult(
-            step_name="top_assembly", step_index=5, success=False,
-            error=StepError(kind=ErrorKind.CONFIG_INVALID,
-                            message=str(e),
-                            hint="检查 config.json 中 residues 是否配置正确"),
-            duration_s=_time.time() - _start,
-        )
-
-    # ── Step 2: 结构检查 ──
-    content = top_path.read_text()
-    checks = {
-        "[ defaults ]":  "缺失 [ defaults ] 段",
-        "[ atomtypes ]": "缺失 [ atomtypes ] 段",
-        "[ system ]":    "缺失 [ system ] 段",
-        "[ molecules ]": "缺失 [ molecules ] 段",
-    }
-    missing = []
-    for tag, msg in checks.items():
-        if tag not in content:
-            missing.append(f"{msg}")
-
-    mol_idx = content.find("[ molecules ]")
-    after_mol = content[mol_idx:].strip().split("\n")
-    if len(after_mol) < 2:
-        missing.append("[ molecules ] 段无内容")
-
+            params = tuple(entry.split())
+            if len(params) < 2:
+                raise AssemblyValidationError(f"atomtype 定义不完整: {itp_path.name}: {entry}")
+            name = params[0]
+            previous = by_name.get(name)
+            if previous is None:
+                by_name[name] = params
+                lines.append(entry)
+            elif previous != params:
+                raise AssemblyValidationError(
+                    f"atomtype 参数冲突: {name} 在多个 ITP 中定义不同（{itp_path.name}）",
+                    ErrorKind.ATOMTYPE_CONFLICT,
+                )
+        referenced_types.update(_extract_atoms_type_references(itp_path))
+    if not lines:
+        raise AssemblyValidationError("所有启用 ITP 均未定义 [ atomtypes ]")
+    missing = sorted(referenced_types - by_name.keys())
     if missing:
-        print("[top_assembly] ❌ 结构检查失败:")
-        for m in missing:
-            print(f"  {m}")
-        return StepResult(
-            step_name="top_assembly", step_index=5, success=False,
-            error=StepError(kind=ErrorKind.UNKNOWN,
-                            message="topol.top 结构不完整",
-                            raw_output="\n".join(missing),
-                            hint="检查 itp 文件是否完整，重新运行 topo_gaff"),
-            artifacts=[str(top_path)],
-            duration_s=_time.time() - _start,
+        raise AssemblyValidationError(
+            "[ atoms ] 引用了未定义 atomtype: " + ", ".join(missing)
         )
-    else:
-        print("[top_assembly] ✅ 结构检查通过")
+    return lines
 
-    # ── Step 3: 直接调用 itp_revise ──
-    print("[top_assembly] 调用 itp_revise 修订 itp…")
-    from willy.topology.itp_revise import revise_all
-    count = revise_all(topo_dir)
-    print(f"[top_assembly] ✅ itp_revise 完成: {count} 个文件修订")
 
-    duration = _time.time() - _start
-    return StepResult(
-        step_name="top_assembly", step_index=5, success=True,
-        outputs={"topol": str(top_path)},
-        artifacts=[str(top_path)],
-        duration_s=duration,
-        extra={"itp_revised": count},
+def _extract_atoms_type_references(itp_path: Path) -> set[str]:
+    """Return atom type names referenced by legal ``[ atoms ]`` data rows."""
+    in_atoms = False
+    referenced: set[str] = set()
+    for line in itp_path.read_text().splitlines():
+        section = _section_name(line)
+        if section is not None:
+            if section == "atoms":
+                in_atoms = True
+                continue
+            if in_atoms:
+                break
+        if not in_atoms:
+            continue
+        fields = line.split(";", 1)[0].split()
+        if (
+            len(fields) >= 8
+            and fields[0].lstrip("+-").isdigit()
+            and fields[2].lstrip("+-").isdigit()
+        ):
+            referenced.add(fields[1])
+    return referenced
+
+
+def _assembly_itp_dir(topo_dir: Path) -> Path:
+    """Create and validate the private directory for post-processed ITPs."""
+    root = topo_dir.resolve()
+    directory = root / _ASSEMBLY_ITP_DIRNAME
+    directory.mkdir(exist_ok=True)
+    if not directory.is_dir() or directory.resolve().parent != root:
+        raise AssemblyValidationError(".assembly_itp 必须是当前 run_dir 内的普通目录")
+    return directory.resolve()
+
+
+def _assembly_itp_path(component: dict[str, Any], topo_dir: Path) -> Path:
+    """Derive the independent, post-processed ITP path for one component."""
+    try:
+        return run_output_path(_assembly_itp_dir(topo_dir), str(component["residue_name"]), ".itp")
+    except (KeyError, ValueError) as exc:
+        raise AssemblyValidationError(f"非法组装 ITP 输出名: {exc}") from exc
+
+
+def _write_manifest_data(topo_dir: Path, manifest: dict[str, Any]) -> None:
+    components = [TopologyManifestComponent(**component) for component in manifest["components"]]
+    write_manifest(
+        topo_dir,
+        backend=manifest["backend"],
+        forcefield_family=manifest["forcefield_family"],
+        components=components,
+        retry_ledger=manifest.get("retry_ledger", {}),
     )
 
 
-# ============================================================
-# 测试入口
-# ============================================================
+def _prepare_assembly_itps(
+    topo_dir: Path,
+    manifest: dict[str, Any],
+    components: list[dict[str, Any]],
+) -> int:
+    """Copy source ITPs and revise only the copies used by ``topol.top``."""
+    from willy.topology.itp_revise import revise_itp
 
-if __name__ == "__main__":
-    build()
+    revised = 0
+    for component in components:
+        source = Path(component["itp"])
+        assembly_itp = _assembly_itp_path(component, topo_dir)
+        shutil.copy2(source, assembly_itp)
+        revised += revise_itp(str(assembly_itp), residue_name=component["residue_name"])
+        component["assembly_itp"] = str(assembly_itp)
+    _write_manifest_data(topo_dir, manifest)
+    return revised
+
+
+def _validated_manifest_components(
+    manifest: dict[str, Any],
+    config: TopConfig,
+    topo_dir: Path,
+    topology: dict[str, Any],
+) -> list[dict[str, Any]]:
+    backend = manifest.get("backend")
+    family = manifest.get("forcefield_family")
+    if backend not in {"sobtop", "oplsaa"} or family not in _FORCEFIELD_TEMPLATES:
+        raise AssemblyValidationError("topology_manifest.json 的后端或力场族无效")
+    if topology["backend"] != backend or topology["force_field"] != family:
+        raise AssemblyValidationError("配置快照与 topology_manifest.json 的后端/力场族不一致")
+
+    manifest_components = manifest.get("components")
+    if not isinstance(manifest_components, list):
+        raise AssemblyValidationError("topology_manifest.json 缺少 components 列表")
+    by_residue = {component.get("residue_name"): component for component in manifest_components}
+    enabled: list[dict[str, Any]] = []
+    for residue_name, quantity in config.residues.items():
+        if not isinstance(quantity, int) or quantity <= 0:
+            raise AssemblyValidationError(f"residues.{residue_name} 必须是正整数")
+        component = by_residue.get(residue_name)
+        if component is None:
+            raise AssemblyValidationError(f"manifest 缺少启用残基 {residue_name}")
+        if not component.get("success") or not component.get("validated"):
+            raise AssemblyValidationError(f"manifest 中 {residue_name} 尚未成功并通过产物校验")
+        if component.get("backend") != backend or component.get("forcefield_family") != family:
+            raise AssemblyValidationError("检测到跨后端或跨力场族混用，不能组装同一 topol.top")
+        for key in ("itp", "gro"):
+            value = component.get(key)
+            if not value:
+                raise AssemblyValidationError(f"manifest 中 {residue_name} 缺少 {key}")
+            path = Path(value)
+            if not path.is_file():
+                raise AssemblyValidationError(f"manifest 中 {residue_name} 的 {key} 不存在: {path}")
+            if path.resolve().parent != topo_dir.resolve():
+                raise AssemblyValidationError(f"{residue_name} 的 {key} 不在当前 run_dir/topology 目录")
+        artifact_validation = validate_topology_files(
+            component["itp"], component["gro"],
+            step_name="top_assembly", step_index=5, error_kind=ErrorKind.CONFIG_INVALID,
+            expected_moleculetype=residue_name,
+        )
+        if not artifact_validation.success:
+            raise AssemblyValidationError(
+                artifact_validation.error.message if artifact_validation.error else "manifest 产物校验失败",
+                ErrorKind.CONFIG_INVALID,
+            )
+        enabled.append(component)
+
+    if len({component.get("forcefield_family") for component in enabled}) != 1:
+        raise AssemblyValidationError("检测到多个 forcefield_family，禁止混合组装")
+    return enabled
+
+
+def generate_top(
+    config: TopConfig | None = None,
+    config_path: str | None = None,
+    topo_dir: str | None = None,
+    output_path: str | None = None,
+) -> Path:
+    """Generate ``topol.top`` from validated components in the run manifest."""
+    config_file = Path(config_path) if config_path is not None else CONFIG_PATH
+    if topo_dir is None:
+        raise AssemblyValidationError("top_assembly 必须提供当前 run 的 topo_dir")
+    directory = Path(topo_dir)
+    if config is None:
+        config = TopConfig.from_json(str(config_file))
+    if not config.residues:
+        raise AssemblyValidationError("config.json 中 residues 为空")
+
+    raw_config = json.loads(config_file.read_text())
+    topology, issues, _ = normalize_topology_config(raw_config.get("topology", {}))
+    if issues:
+        raise AssemblyValidationError("; ".join(issues))
+    if not manifest_path(directory).is_file():
+        raise AssemblyValidationError(f"缺少 {manifest_path(directory).name}，Step 4 未产生可用拓扑产物")
+    manifest = load_manifest(directory)
+    components = _validated_manifest_components(manifest, config, directory, topology)
+    family = manifest["forcefield_family"]
+    template = _FORCEFIELD_TEMPLATES[family]
+    atomtype_lines = _collect_dedup_atomtypes(components)
+    assembly_itps: list[Path] = []
+    for component in components:
+        expected = _assembly_itp_path(component, directory)
+        if component.get("assembly_itp") != str(expected) or not expected.is_file():
+            raise AssemblyValidationError(
+                f"{component['residue_name']} 缺少当前组装副本；请通过 top_assembly.build() 生成"
+            )
+        assembly_itps.append(expected)
+
+    lines = [*template["defines"], "", "[ defaults ]", template["defaults"], ""]
+    lines.extend(["[ atomtypes ]", "; name   atomtype parameters"])
+    lines.extend(atomtype_lines)
+    lines.append("")
+    lines.extend(
+        f'#include "{itp.relative_to(directory.resolve()).as_posix()}"'
+        for itp in assembly_itps
+    )
+    lines.extend(["", "[ system ]", "-".join(config.residues), "", "[ molecules ]"])
+    lines.extend(f"{name}   {count}" for name, count in config.residues.items())
+    lines.append("")
+
+    output = Path(output_path) if output_path is not None else directory / "topol.top"
+    output.write_text("\n".join(lines))
+    return output
+
+
+def build(
+    config_path: str | None = None,
+    topo_dir: str | None = None,
+    output_path: str | None = None,
+) -> StepResult:
+    """Assemble a master topology from sources and independent revised ITPs."""
+    import time
+
+    start = time.monotonic()
+    config_file = Path(config_path) if config_path is not None else CONFIG_PATH
+    if topo_dir is None:
+        return StepResult(
+            step_name="top_assembly", step_index=5, success=False,
+            error=StepError(
+                ErrorKind.INPUT_CONTRACT,
+                "top_assembly 必须提供当前 run 的 topo_dir",
+            ),
+        )
+    directory = Path(topo_dir)
+    try:
+        config = TopConfig.from_json(str(config_file))
+        raw_config = json.loads(config_file.read_text())
+        topology, issues, _ = normalize_topology_config(raw_config.get("topology", {}))
+        if issues:
+            raise AssemblyValidationError("; ".join(issues))
+        manifest = load_manifest(directory)
+        components = _validated_manifest_components(manifest, config, directory, topology)
+        _collect_dedup_atomtypes(components)
+        revised = _prepare_assembly_itps(directory, manifest, components)
+        top_path = generate_top(config_path=str(config_file), topo_dir=str(directory), output_path=output_path)
+    except AssemblyValidationError as exc:
+        return StepResult(
+            step_name="top_assembly", step_index=5, success=False,
+            error=StepError(exc.kind, str(exc), hint="修复 manifest 记录的拓扑产物后重新执行 Step 4。"),
+            duration_s=time.monotonic() - start,
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        return StepResult(
+            step_name="top_assembly", step_index=5, success=False,
+            error=StepError(ErrorKind.CONFIG_INVALID, f"主拓扑组装失败: {exc}"),
+            duration_s=time.monotonic() - start,
+        )
+
+    return StepResult(
+        step_name="top_assembly", step_index=5, success=True,
+        outputs={"topol": str(top_path)},
+        artifacts=[str(top_path), *(component["assembly_itp"] for component in components)],
+        duration_s=time.monotonic() - start, extra={"itp_revised": revised},
+    )

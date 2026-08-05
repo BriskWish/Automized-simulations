@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from willy.pipeline_state import (
-    State, PipelineStatus, PipelineStateMachine,
+    State, PipelineStatus, PipelineStateMachine, StateTransitionError,
 )
 
 
@@ -22,7 +22,10 @@ class TestStateEnum:
     """State 枚举完整测试。"""
 
     def test_all_states_defined(self):
-        expected = {"idle", "running", "retrying", "escalated", "done", "aborted"}
+        expected = {
+            "idle", "running", "retrying", "awaiting_confirmation",
+            "stopping", "escalated", "done", "aborted",
+        }
         actual = {s.value for s in State}
         assert actual == expected
 
@@ -47,7 +50,7 @@ class TestPipelineStatus:
         ps = PipelineStatus()
         assert ps.state == "idle"  # default is State.IDLE.value = "idle"
         assert ps.step == 0
-        assert ps.total_steps == 7
+        assert ps.total_steps == 10
         assert ps.step_label == ""
         assert ps.layer == ""
         assert ps.error == ""
@@ -126,6 +129,72 @@ class TestPipelineStateMachine:
         sm.transition(State.RUNNING)
         assert sm._status.state == "running"
 
+    def test_awaiting_confirmation_cannot_skip_directly_to_running(self, sm):
+        sm.transition(State.RUNNING)
+        sm.set_awaiting_confirmation({
+            "action_id": "eq-repair-1",
+            "state": "pending",
+            "step_label": "GROMACS 三点式退火平衡",
+            "restart_step": 9,
+            "summary": "等待用户确认后重新验收 EQ。",
+            "adjustments": [],
+        })
+
+        with pytest.raises(StateTransitionError, match="awaiting_confirmation -> running"):
+            sm.transition(State.RUNNING)
+
+    def test_terminal_state_cannot_resume(self, sm):
+        sm.transition(State.RUNNING)
+        sm.transition(State.DONE)
+
+        with pytest.raises(StateTransitionError, match="done -> running"):
+            sm.transition(State.RUNNING)
+
+    def test_state_revision_is_monotonic_and_persisted(self, sm, tmp_path):
+        initial_revision = sm._status.state_revision
+        sm.transition(State.RUNNING)
+        sm.set_step(1, "结构优化", "quantum")
+
+        assert sm._status.state_revision == initial_revision + 2
+        saved = json.loads((tmp_path / "status.json").read_text())
+        assert saved["state_revision"] == sm._status.state_revision
+
+    def test_controlled_resume_preserves_revision_before_next_write(self, sm):
+        snapshot = {
+            "state": "retrying",
+            "state_revision": 12,
+            "step": 9,
+            "done_steps": list(range(1, 9)),
+            "extra": {"run_id": "md__202608050001"},
+        }
+        sm._path.write_text(json.dumps(snapshot))
+        sm.restore_for_controlled_resume(snapshot)
+        sm.start_retry("simulation", 1, 1)
+
+        assert sm._status.state_revision == 13
+
+    def test_external_stop_revision_cannot_be_overwritten_by_old_heartbeat(self, sm, tmp_path):
+        sm.transition(State.RUNNING)
+        before = sm._status.state_revision
+        stopped = json.loads((tmp_path / "status.json").read_text())
+        stopped.update({
+            "state": "stopping",
+            "state_revision": before + 1,
+        })
+        (tmp_path / "status.json").write_text(json.dumps(stopped))
+
+        sm.heartbeat()
+
+        saved = json.loads((tmp_path / "status.json").read_text())
+        assert saved["state"] == "stopping"
+        assert sm._status.state == "stopping"
+        assert sm._status.state_revision == before + 1
+
+        sm.set_aborted(user_requested=True)
+        saved = json.loads((tmp_path / "status.json").read_text())
+        assert saved["state"] == "aborted"
+        assert saved["state_revision"] == before + 2
+
     def test_set_step(self, sm):
         sm.transition(State.RUNNING)
         sm.set_step(3, "RESP 电荷", "quantum")
@@ -139,6 +208,24 @@ class TestPipelineStateMachine:
         sm.mark_done(1)
         assert sm._status.state == "running"  # 仍然运行
         assert 1 in sm._status.done_steps
+
+    def test_rollback_to_invalidates_downstream_steps(self, sm):
+        sm.transition(State.RUNNING)
+        sm._status.done_steps = [1, 2, 7, 8, 9]
+        sm.rollback_to(7, "Packmol 盒子（回滚重建）", "simulation", "EQ 真空区")
+        assert sm._status.done_steps == [1, 2]
+        assert sm._status.step == 7
+        assert sm._status.layer == "simulation"
+        assert "EQ 真空区" in sm._status.actions[-1]
+
+    def test_controlled_restart_withdraws_only_the_restarted_suffix(self, sm):
+        sm._status.done_steps = list(range(1, 9))
+        sm._status.extra["pending_action"] = {"action_id": "act"}
+
+        sm.invalidate_for_controlled_restart(7)
+
+        assert sm._status.done_steps == list(range(1, 7))
+        assert "pending_action" not in sm._status.extra
 
     def test_set_error(self, sm):
         sm.transition(State.RUNNING)
@@ -157,6 +244,21 @@ class TestPipelineStateMachine:
         sm.add_action("尝试: 添加 scf=xqc")
         assert "scf=xqc" in sm._status.actions[0]
 
+    def test_public_repair_snapshot_includes_only_safe_adjustments(self, sm, tmp_path):
+        sm.start_retry("SimulationAgent", 2, 3)
+        sm.add_adjustments([
+            {"name": "恒温耦合时间", "before": "0.5 ps", "after": "2 ps"},
+            {"name": "不应公开", "before": "/tmp/old", "after": "2 ps"},
+        ])
+
+        saved = json.loads((tmp_path / "status.json").read_text())
+        assert saved["repair"] == {
+            "attempt": 2,
+            "max_attempts": 3,
+            "adjustments": [{"name": "恒温耦合时间", "before": "0.5 ps", "after": "2 ps"}],
+        }
+        assert "/tmp/old" not in json.dumps(saved, ensure_ascii=False)
+
     def test_set_escalated(self, sm):
         escalation = {
             "layer": "quantum", "step": "struct_maker",
@@ -173,6 +275,16 @@ class TestPipelineStateMachine:
         sm.set_aborted()
         assert sm._status.state == "aborted"
         assert "依赖缺失" in sm._status.error
+
+    def test_user_requested_abort_clears_stale_failure(self, sm):
+        sm.set_error("GROMACS 引擎执行失败", "engine_failure")
+        sm.start_retry("simulation", 1, 3)
+        sm.set_aborted(user_requested=True)
+
+        assert sm._status.state == "aborted"
+        assert sm._status.error == ""
+        assert sm._status.error_kind == ""
+        assert sm._status.retry_n == 0
 
     def test_full_pipeline_flow(self, sm):
         """完整的流水线状态流转: IDLE → RUNNING → (每个步骤) → DONE。"""
@@ -304,6 +416,7 @@ class TestPipelineStateMachine:
         for _ in range(10):
             sm.transition(State.RUNNING)
             sm.transition(State.RETRYING)
+        sm.transition(State.RUNNING)
         sm.transition(State.DONE)
         assert sm._status.state == "done"
 
@@ -313,3 +426,26 @@ class TestPipelineStateMachine:
         monkeypatch.setattr(pstate, "get_project_root", lambda: tmp_path)
         sm = PipelineStateMachine(total_steps=11)
         assert sm._status.total_steps == 11
+
+    def test_activity_is_strictly_structured_and_persisted_atomically(self, sm, tmp_path):
+        sm.set_activity("G16", "结构优化", "molecule", "NO3", 1, 4)
+
+        assert sm._status.activity == {
+            "tool": "G16", "operation": "结构优化",
+            "target_type": "molecule", "target": "NO3",
+            "current": 1, "total": 4,
+        }
+        saved = json.loads((tmp_path / "status.json").read_text())
+        assert saved["activity"] == sm._status.activity
+        assert "progress_detail" not in saved
+        with pytest.raises(ValueError):
+            sm.set_activity("G16", "结构优化", "file", "NO3.log", 1, 1)
+
+    def test_escalation_public_snapshot_drops_raw_output(self, sm, tmp_path):
+        sm.set_escalated({
+            "layer": "quantum", "step": "struct_g16",
+            "error_kind": "scf_not_converged", "last_raw_output": "/tmp/secret stderr",
+        })
+
+        saved = json.loads((tmp_path / "status.json").read_text())
+        assert "last_raw_output" not in json.dumps(saved, ensure_ascii=False)

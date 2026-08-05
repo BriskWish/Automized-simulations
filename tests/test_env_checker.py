@@ -11,6 +11,7 @@ from willy.env_checker import (
     DepResult, EnvReport, _DEPENDENCIES,
     check_all, check_module, ensure,
 )
+from willy.step_registry import EXECUTION_MODULE_REGISTRY
 
 
 # ============================================================
@@ -119,10 +120,10 @@ class TestEnvReport:
     def test_failed_strs_handles_no_exec(self):
         """failed_strs 应处理 no_exec 状态。"""
         report = EnvReport(results=[
-            DepResult(name="RESP_noopt.sh", kind="file_exec",
-                      path="/tmp/RESP_noopt.sh", status="no_exec",
-                      needed_by=["chg_maker"],
-                      hint="chmod +x RESP_noopt.sh"),
+            DepResult(name="sobtop", kind="file_exec",
+                      path="/tmp/sobtop", status="no_exec",
+                      needed_by=["topo_gaff"],
+                      hint="chmod +x sobtop"),
         ])
         strs = report.failed_strs()
         assert len(strs) >= 1
@@ -166,10 +167,25 @@ class TestDependenciesDefinition:
             "topo_gaff", "topo_opls", "box",
         } <= modules
 
+    def test_dependency_ownership_is_derived_from_execution_registry(self):
+        by_name = {dependency.name: dependency for dependency in _DEPENDENCIES}
+
+        assert by_name["gmx"].needed_by == list(
+            EXECUTION_MODULE_REGISTRY.modules_for_tool("gmx")
+        )
+        assert by_name["packmol"].needed_by == list(
+            EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency("packmol")
+        )
+        assert all(
+            EXECUTION_MODULE_REGISTRY.has_module(module_id)
+            for dependency in _DEPENDENCIES
+            for module_id in dependency.needed_by
+        )
+
     def test_envvar_dependencies_exist(self):
-        """envvar 类型的依赖应存在。"""
+        """BOSSdir 作为过渡期兼容变量保留在依赖报告中。"""
         envvar_deps = [d for d in _DEPENDENCIES if d.kind == "envvar"]
-        assert len(envvar_deps) >= 2  # ORCA_DIR, BOSSdir
+        assert [d.name for d in envvar_deps] == ["BOSSdir"]
 
 
 # ============================================================
@@ -226,6 +242,33 @@ class TestCheckModule:
             report = check_module(mod)
             assert isinstance(report, EnvReport), f"{mod} 检查失败"
 
+    def test_boss_default_does_not_mutate_process_environment(self, tmp_path, monkeypatch):
+        import willy.env_registry as env_registry
+
+        default = tmp_path / "boss"
+        default.mkdir()
+        executable = default / "BOSS"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+        monkeypatch.setattr(env_registry, "DEFAULT_BOSS_HOME", default)
+        monkeypatch.delenv("BOSSdir", raising=False)
+        monkeypatch.delenv("WILLY_BOSS_HOME", raising=False)
+
+        resolved = env_registry.resolve_tool("boss")
+
+        assert resolved.available
+        assert resolved.home == default.resolve()
+        assert "BOSSdir" not in env_registry.os.environ
+
+    @patch("willy.env_checker.check_module")
+    def test_gaussian_helper_uses_registered_step_name(self, mock_check):
+        """兼容 helper 也必须查询 env_checker 中真实注册的步骤名。"""
+        mock_check.return_value.failed_strs.return_value = []
+        from willy.quantum.struct_g16 import check_env_ready
+
+        assert check_env_ready() == []
+        mock_check.assert_called_once_with("struct_g16")
+
 
 # ============================================================
 # ensure
@@ -273,9 +316,9 @@ class TestEnvCheckerEdgeCases:
     """边界情况。"""
 
     def test_envvar_dependency_handling(self):
-        """envvar 类型的依赖应被正确处理（kind='envvar'）。"""
+        """旧 BOSSdir 显示名仍用于兼容既有预检界面。"""
         envvar_deps = [d for d in _DEPENDENCIES if d.kind == "envvar"]
-        assert len(envvar_deps) >= 2
+        assert [d.name for d in envvar_deps] == ["BOSSdir"]
 
     def test_file_exec_dependency_handling(self):
         """file_exec 类型的依赖应存在。"""

@@ -1,0 +1,265 @@
+"""Configuration validation and explicit schema-v2 migration tests."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from willy.workflow_config import (
+    _apply_defaults,
+    apply_config,
+    migrate_and_adopt_md_config,
+    migrate_md_config,
+    validate_config,
+)
+from willy.config_schema import WORKFLOW_CONFIG_SCHEMA_VERSION, validate_config_schema
+from willy.simulation.protocol import default_md_config
+
+
+def _config(md=None, *, charge=0, count=1):
+    return {
+        "residues": {"A": count},
+        "molecules": {"A": {"charge": charge, "spin": 1}},
+        "md": default_md_config() if md is None else md,
+        "box": {"packing_number_density_nm3": 6.0, "box_size": None, "tolerance": 2.0},
+    }
+
+
+def test_valid_v2_config_passes():
+    assert validate_config(_config()) == []
+
+
+def test_outer_schema_keeps_unknown_extensions_but_reports_them_structurally():
+    config = _config()
+    config["future_extension"] = {"keep": True}
+
+    validation = validate_config_schema(config)
+
+    assert validation.valid
+    assert validation.schema_version == WORKFLOW_CONFIG_SCHEMA_VERSION
+    assert validation.unknown_top_level_fields == ("future_extension",)
+    assert validate_config(config) == []
+
+
+def test_outer_schema_rejects_malformed_nested_sections_before_defaults():
+    config = _config()
+    config["defaults"] = []
+    config["molecules"]["A"] = "not-an-object"
+
+    validation = validate_config_schema(config)
+    issues = validate_config(config)
+
+    assert "defaults 必须是对象" in validation.issues
+    assert "molecules.A 必须是对象" in validation.issues
+    assert "defaults 必须是对象" in issues
+    assert "molecules.A 必须是对象" in issues
+
+
+def test_apply_config_rejects_invalid_outer_shape_without_writing(tmp_project_root, monkeypatch):
+    import willy.workflow_config as workflow_config
+
+    path = tmp_project_root / "config.json"
+    original = path.read_text()
+    monkeypatch.setattr(workflow_config, "CONFIG_PATH", path)
+    invalid = _config()
+    invalid["molecules"]["A"] = []
+
+    with pytest.raises(ValueError, match="config.json 结构无效"):
+        apply_config(invalid, backup=False)
+
+    assert path.read_text() == original
+
+
+def test_apply_config_preserves_forward_compatible_extension(tmp_project_root, monkeypatch):
+    import willy.workflow_config as workflow_config
+
+    path = tmp_project_root / "config.json"
+    monkeypatch.setattr(workflow_config, "CONFIG_PATH", path)
+    config = _config()
+    config["future_extension"] = {"mode": "reserved"}
+
+    apply_config(config, backup=False)
+
+    assert json.loads(path.read_text())["future_extension"] == {"mode": "reserved"}
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_issue"),
+    [
+        (None, "config 必须是对象"),
+        ({"residues": ["A"], "molecules": {}}, "residues 必须是对象"),
+        ({"residues": {"A": "many"}, "molecules": {"A": {}}}, "residues.A 必须是数值"),
+        ({"residues": {"A": 1}, "molecules": [], "md": []}, "molecules 必须是对象"),
+    ],
+)
+def test_malformed_config_returns_displayable_issues(config, expected_issue):
+    issues = validate_config(config)
+
+    assert expected_issue in issues
+
+
+def test_legacy_durations_are_rejected_without_migration():
+    issues = validate_config(_config({"eq_ns": 10, "prod_ns": 10}))
+    assert any("旧字段" in issue for issue in issues)
+
+
+def test_non_neutral_system_requires_confirmation():
+    issues = validate_config(_config(charge=1))
+    assert any("总电荷" in issue for issue in issues)
+    config = _config(charge=1)
+    config["non_neutral_confirmed"] = True
+    assert validate_config(config) == []
+
+
+def test_invalid_eq_and_prod_boundaries_are_reported():
+    md = default_md_config()
+    md["eq"]["segments_ns"]["hold_target"] = 0
+    md["prod"]["duration_ns"] = 1
+    issues = validate_config(_config(md))
+    assert any("hold_target" in issue for issue in issues)
+    assert any("prod.duration_ns" in issue for issue in issues)
+
+
+def test_prod_temperature_must_match_eq_target():
+    md = default_md_config()
+    md["prod"]["temperature"] = 300
+    issues = validate_config(_config(md))
+    assert any("PROD 温度" in issue for issue in issues)
+
+
+def test_special_system_rejects_isotropic_pressure_coupling():
+    md = default_md_config()
+    md["system_type"] = "interface"
+    issues = validate_config(_config(md))
+    assert any("各向同性" in issue for issue in issues)
+
+
+def test_defaults_create_schema_v2_without_legacy_fields():
+    result = _apply_defaults({"residues": {"A": 1}, "molecules": {"A": {}}})
+    md = result["md"]
+    assert md["schema_version"] == 2
+    assert md["eq"]["segments_ns"]["hold_target"] == 2.0
+    assert md["prod"]["duration_ns"] == 10.0
+    assert "eq_ns" not in md and "prod_ns" not in md
+    assert result["box"]["target_mass_density_g_cm3"] == 1.5
+    assert "packing_number_density_nm3" not in result["box"]
+
+
+def test_defaults_preserve_existing_number_density_snapshot():
+    result = _apply_defaults({
+        "residues": {"A": 1},
+        "molecules": {"A": {}},
+        "box": {"packing_number_density_nm3": 6.0},
+    })
+
+    assert result["box"]["packing_number_density_nm3"] == 6.0
+    assert "target_mass_density_g_cm3" not in result["box"]
+
+
+def test_defaults_preserve_an_explicit_trr_output_request():
+    result = _apply_defaults({
+        "residues": {"A": 1},
+        "molecules": {"A": {}},
+        "md": {"outputs": {"trr": True}},
+    })
+
+    assert result["md"]["outputs"]["trr"] is True
+
+
+def test_defaults_preserve_an_explicit_oplsaa_force_field_request():
+    result = _apply_defaults({
+        "residues": {"A": 1},
+        "molecules": {"A": {}},
+        "topology": {"backend": "oplsaa", "force_field": "oplsaa"},
+    })
+
+    assert result["topology"]["backend"] == "oplsaa"
+    assert result["topology"]["force_field"] == "oplsaa"
+
+
+def test_config_prompt_describes_explicit_trr_and_oplsaa_requests():
+    from willy.agent_config import get_system_prompt
+
+    prompt = get_system_prompt()
+    assert "md.outputs.trr=true" in prompt
+    assert '"backend":"oplsaa"' in prompt
+
+
+def test_defaults_preserve_legacy_fields_for_visible_rejection():
+    result = _apply_defaults({
+        "residues": {"A": 1},
+        "molecules": {"A": {}},
+        "md": {"eq_ns": 10, "prod_ns": 10},
+    })
+    assert result["md"]["eq_ns"] == 10
+    assert any("旧字段" in issue for issue in validate_config(result))
+
+
+def test_explicit_migration_writes_v2_and_mapping_without_overwriting_source(tmp_path):
+    source = tmp_path / "config.json"
+    legacy = _config({"ref_t": 310, "eq_ns": 10, "prod_ns": 12})
+    legacy["box"] = {"density": 5.5, "box_size": None, "tolerance": 2.0}
+    source.write_text(json.dumps(legacy))
+
+    target, mapping, report = migrate_md_config(source)
+
+    assert source.read_text() == json.dumps(legacy)
+    migrated = json.loads(target.read_text())
+    audit = json.loads(mapping.read_text())
+    assert migrated["md"]["schema_version"] == 2
+    assert migrated["md"]["prod"]["duration_ns"] == 12
+    assert migrated["box"]["packing_number_density_nm3"] == 5.5
+    assert audit["mapping"]["md.eq_ns"]["value"] == 10
+    assert report["status"] == "migrated"
+
+
+def test_confirmed_migration_adoption_replaces_active_config_with_valid_protocol(tmp_path):
+    source = tmp_path / "config.json"
+    legacy = _config({"ref_t": 298, "eq_ns": 5, "prod_ns": 10})
+    legacy["box"] = {"density": 6.0, "box_size": None, "tolerance": 2.0}
+    source.write_text(json.dumps(legacy))
+
+    active, backup, audit, report = migrate_and_adopt_md_config(source)
+
+    adopted = json.loads(active.read_text())
+    assert active == source
+    assert json.loads(backup.read_text()) == legacy
+    assert adopted["md"]["schema_version"] == 2
+    assert sum(adopted["md"]["eq"]["segments_ns"].values()) == 10.0
+    assert "density" not in adopted["box"]
+    assert validate_config(adopted) == []
+    assert report["adoption"]["eq_duration_normalized_to_default"] is True
+    assert json.loads(audit.read_text())["adoption"]["effective_eq_total_ns"] == 10.0
+
+
+def test_annealing_temperatures_must_descend_strictly():
+    md = default_md_config()
+    md["eq"]["transition_temperature"] = md["eq"]["high_temperature"]
+    issues = validate_config(_config(md))
+    assert any("三点退火温度" in issue for issue in issues)
+
+
+def test_apply_config_writes_v2_snapshot(tmp_project_root, monkeypatch):
+    import willy.workflow_config as workflow_config
+
+    path = tmp_project_root / "config.json"
+    monkeypatch.setattr(workflow_config, "CONFIG_PATH", path)
+    result = apply_config(_config(), backup=False)
+    saved = json.loads(result.read_text())
+    assert saved["md"]["schema_version"] == 2
+    assert "eq_ns" not in saved["md"]
+
+
+def test_apply_config_replaces_active_file_only_after_atomic_backup(tmp_project_root, monkeypatch):
+    import willy.workflow_config as workflow_config
+
+    path = tmp_project_root / "config.json"
+    original = {"residues": {"OLD": 1}, "molecules": {"OLD": {"charge": 0}}}
+    path.write_text(json.dumps(original))
+    monkeypatch.setattr(workflow_config, "CONFIG_PATH", path)
+
+    apply_config(_config())
+
+    assert json.loads(path.with_suffix(".json.bak").read_text()) == original
+    assert json.loads(path.read_text())["residues"] == {"A": 1}

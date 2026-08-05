@@ -1,1 +1,1 @@
-"""Simulation: MDP parameter generation, Packmol box construction."""
+"""Simulation: MD setup, execution, and deterministic post-processing."""

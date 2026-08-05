@@ -11,10 +11,10 @@ import time as _time
 from pathlib import Path
 
 from willy.errors import StepResult, StepError, ErrorKind
+from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
+from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import extract_xyz
 
-G16_BIN = "g16"
-FORMCHK_BIN = "formchk"
 SP_BASIS = "b3lyp/def2TZVP"
 
 
@@ -91,13 +91,27 @@ def run(
     gjf_path.write_text(gjf_content)
     print(f"[sp_g16] {name}: *_opt.gjf 已生成  (basis={SP_BASIS})")
 
+    try:
+        g16 = require_tool("g16")
+        formchk = require_tool("formchk")
+        g16_env = build_tool_env("g16")
+        formchk_env = build_tool_env("formchk")
+    except EnvironmentRegistryError as exc:
+        return StepResult(
+            step_name="sp_g16", step_index=2, success=False,
+            error=StepError(ErrorKind.DEPENDENCY_MISSING, str(exc)),
+            duration_s=_time.time() - _start,
+        )
+
     # ── Run G16 SP ──
     try:
-        result = subprocess.run(
-            f"GAUSS_CDEF=0 OMP_NUM_THREADS=1 {G16_BIN}",
-            input=gjf_content,
-            shell=True, capture_output=True, text=True,
-            cwd=workdir, timeout=3600,
+        result = run_managed_command(
+            [str(g16.executable)],
+            input_text=gjf_content,
+            cwd=workdir,
+            timeout=3600,
+            env=g16_env,
+            run_dir=workdir,
         )
     except subprocess.TimeoutExpired:
         return StepResult(
@@ -129,12 +143,21 @@ def run(
             duration_s=_time.time() - _start,
         )
 
-    subprocess.run(
-        f"GAUSS_CDEF=0 OMP_NUM_THREADS=1 {FORMCHK_BIN} "
-        f"{chk_path.resolve()} {opt_fchk.resolve()}",
-        shell=True, capture_output=True, text=True,
-        cwd=workdir, timeout=60,
-    )
+    try:
+        run_managed_command(
+            [str(formchk.executable), str(chk_path.resolve()), str(opt_fchk.resolve())],
+            cwd=workdir,
+            timeout=60,
+            env=formchk_env,
+            run_dir=workdir,
+        )
+    except subprocess.TimeoutExpired:
+        return StepResult(
+            step_name="sp_g16", step_index=2, success=False,
+            error=StepError(kind=ErrorKind.TIMEOUT,
+                            message=f"{name}: formchk 超时 (60s)"),
+            duration_s=_time.time() - _start,
+        )
 
     if not opt_fchk.exists():
         return StepResult(

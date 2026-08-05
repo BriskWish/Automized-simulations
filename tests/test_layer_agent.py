@@ -18,6 +18,8 @@ from dataclasses import asdict
 
 from willy.errors import StepResult, StepError, ErrorKind, RetryContext
 from willy.layer_agent import LayerAgent, Escalation
+from willy.action_contract import build_default_tool_catalog
+from willy.recovery_policy import default_recovery_policy
 
 
 # ============================================================
@@ -152,6 +154,17 @@ class TestBuildContext:
         )
         assert "fchk" in ctx or "LiTFSI" in ctx
 
+    def test_context_includes_failed_step_outputs(self, mock_llm_client, make_step_result):
+        """失败步骤保留的中间产物也必须展示给 Agent。"""
+        agent = LayerAgent("test", "prompt", [], lambda n, a: "{}", mock_llm_client)
+        fchk_path = "/tmp/Li_opt.fchk"
+        sr = make_step_result(success=False, error_kind=ErrorKind.UNKNOWN)
+        sr.outputs = {"fchk": fchk_path}
+
+        ctx = agent._build_context(sr, "{}", "/tmp/run", {})
+
+        assert fchk_path in ctx
+
 
 # ============================================================
 # _escalate
@@ -184,6 +197,8 @@ class TestEscalate:
         assert esc["layer"] == "quantum"
         assert esc["attempts_made"] == 5
         assert len(esc["actions_tried"]) == 2
+        assert "skip_molecule" not in esc["recommendation"]
+        assert "skip_molecule" not in esc["backup_plan"]
 
 
 # ============================================================
@@ -214,6 +229,7 @@ class TestHandleFailure:
             }),
             llm_client=mock_llm_client,
             max_retries=3,
+            model="compatible-repair-model",
         )
 
     def test_handle_failure_returns_step_result(self, agent, make_step_result):
@@ -246,6 +262,47 @@ class TestHandleFailure:
         result = agent.handle_failure(sr, "/tmp/config.json", "/tmp/run", {},
                                       state_machine=MagicMock())
         assert isinstance(result, StepResult)
+        assert all(
+            call.kwargs["model"] == "compatible-repair-model"
+            for call in agent.llm.chat.completions.create.call_args_list
+        )
+
+    def test_successful_tool_result_keeps_its_actual_step_identity(self, mock_llm_client, make_step_result):
+        """Upstream repair success must not be relabelled as the failed EQ step."""
+        agent = LayerAgent(
+            "simulation", "prompt",
+            [{"type": "function", "function": {"name": "tools_retry_mdp", "parameters": {}}}],
+            lambda _name, _args: json.dumps({
+                "_step_result": True,
+                "success": True,
+                "step_name": "mdp",
+                "step_index": 6,
+                "outputs": {"eq_mdp": "/tmp/eq.mdp"},
+                "artifacts": ["/tmp/eq.mdp"],
+                "duration_s": 1.0,
+                "extra": {"invalidated_stages": ["em", "eq", "prod"]},
+                "target_type": "stage",
+                "target": "eq",
+            }),
+            mock_llm_client,
+        )
+        mock_llm_client.chat.completions.create.return_value = _make_mock_llm_response(
+            content=None,
+            tool_calls=[_make_tool_call("tools_retry_mdp", "{}")],
+        )
+        failed_eq = make_step_result(
+            success=False,
+            step_name="eq",
+            step_index=9,
+            error_kind=ErrorKind.EQUILIBRATION_FAILED,
+        )
+
+        result = agent.handle_failure(failed_eq)
+
+        assert result.success is True
+        assert result.step_name == "mdp"
+        assert result.step_index == 6
+        assert result.extra["invalidated_stages"] == ["em", "eq", "prod"]
 
     def test_handle_failure_exhausts_retries(self, agent, make_step_result):
         """当超过 max_retries 时，应升级。"""
@@ -272,6 +329,68 @@ class TestHandleFailure:
                                       state_machine=sm)
         # 重试耗尽后应升级或返回失败
         assert result.success is False
+
+    def test_tool_failures_stop_at_hard_retry_limit(self, mock_llm_client, make_step_result):
+        calls = []
+        agent = LayerAgent(
+            "test", "prompt",
+            [{"type": "function", "function": {"name": "tools_retry", "parameters": {}}}],
+            lambda name, args: calls.append((name, args)) or json.dumps({
+                "_step_result": True, "success": False, "error_message": "still failing",
+                "raw_output": "failure", "outputs": {}, "artifacts": [], "duration_s": 0,
+            }),
+            mock_llm_client,
+            max_retries=2,
+        )
+        mock_llm_client.chat.completions.create.return_value = _make_mock_llm_response(
+            content=None, tool_calls=[_make_tool_call("tools_retry", "{}")],
+        )
+
+        result = agent.handle_failure(make_step_result(success=False, error_kind=ErrorKind.UNKNOWN))
+
+        assert result.escalated is True
+        assert result.extra["escalation"]["attempts_made"] == 2
+        assert len(calls) == 2
+
+    def test_protocol_change_request_escalates_without_a_second_llm_call(self, mock_llm_client, make_step_result):
+        """A tool cannot turn a model-generated flag into user confirmation."""
+        agent = LayerAgent(
+            "simulation", "prompt",
+            [{"type": "function", "function": {"name": "tools_retry_eq", "parameters": {}}}],
+            lambda _name, _args: json.dumps({
+                "_step_result": True,
+                "success": False,
+                "error_kind": "user_confirmation_required",
+                "error_message": "模拟协议变更需要用户确认",
+                "extra": {"requires_user_confirmation": True},
+            }),
+            mock_llm_client,
+        )
+        mock_llm_client.chat.completions.create.return_value = _make_mock_llm_response(
+            content=None,
+            tool_calls=[_make_tool_call("tools_retry_eq", '{"dt": 0.0005, "confirmed": true}')],
+        )
+
+        result = agent.handle_failure(
+            make_step_result(success=False, step_name="eq", step_index=9, error_kind=ErrorKind.ENGINE_FAILURE),
+        )
+
+        assert result.escalated is True
+        assert result.error.kind is ErrorKind.USER_CONFIRMATION_REQUIRED
+        assert result.extra["escalation"]["attempts_made"] == 0
+        assert mock_llm_client.chat.completions.create.call_count == 1
+
+    def test_simulation_agent_blocks_protocol_change_before_tool_dispatch(self, mock_llm_client):
+        from willy.agent_simulation import SimulationAgent
+
+        agent = SimulationAgent(mock_llm_client)
+        with patch("willy.agent_simulation.handle_simulation_tool_call") as dispatch:
+            result = json.loads(agent._handle_tool_call(
+                "tools_retry_eq", {"dt": 0.0005, "confirmed": True},
+            ))
+
+        dispatch.assert_not_called()
+        assert result["error_kind"] == "user_confirmation_required"
 
     def test_handle_failure_detects_escalation_keyword(self, agent, make_step_result):
         """当 LLM 在响应中说 'escalat' 时，应立即升级。"""
@@ -312,6 +431,24 @@ class TestHandleFailure:
                                       state_machine=sm)
         # 应在重试后恢复或升级
         assert isinstance(result, StepResult)
+
+    def test_llm_exceptions_consume_retry_budget_and_update_state(self, agent, make_step_result):
+        agent.max_retries = 2
+        agent.llm.chat.completions.create.side_effect = Exception("API 超时")
+        state_machine = MagicMock()
+
+        result = agent.handle_failure(
+            make_step_result(success=False, error_kind=ErrorKind.UNKNOWN),
+            state_machine=state_machine,
+        )
+
+        assert result.escalated is True
+        assert result.extra["escalation"]["attempts_made"] == 2
+        assert agent.llm.chat.completions.create.call_count == 2
+        assert state_machine.start_retry.call_args_list == [
+            call(agent.name, 1, 2),
+            call(agent.name, 2, 2),
+        ]
 
 
 # ============================================================
@@ -383,6 +520,80 @@ class TestLayerAgentEdgeCases:
         result = agent.handle_failure(sr, "/tmp/c.json", "/tmp/run", {},
                                       state_machine=MagicMock())
         assert isinstance(result, StepResult)
+
+
+class TestRecoveryAuthorization:
+    def test_model_confirmation_flag_cannot_dispatch_a_method_change(self, tmp_path, mock_llm_client, make_step_result):
+        calls = []
+        traces = []
+        catalog = build_default_tool_catalog()
+        agent = LayerAgent(
+            "quantum", "prompt", [],
+            lambda name, args: calls.append((name, args)) or "{}",
+            mock_llm_client,
+            recovery_policy=default_recovery_policy(catalog),
+            tool_catalog=catalog,
+            on_decision=traces.append,
+        )
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+        failed = make_step_result(success=False, step_index=1, error_kind=ErrorKind.SCF_NOT_CONVERGED)
+        ctx = RetryContext("quantum", failed.step_name, ErrorKind.SCF_NOT_CONVERGED, max_attempts=5)
+
+        payload = agent._dispatch_tool(
+            "tools_retry_struct_g16",
+            {
+                "molecule_name": "Li",
+                "basis": "def2-SVP",
+                "confirmation_granted": True,
+            },
+            step_result=failed,
+            ctx=ctx,
+            run_dir=str(tmp_path / "md__202608050001"),
+            config_path=str(config_path),
+        )
+
+        result = json.loads(payload)
+        assert result["error_kind"] == ErrorKind.USER_CONFIRMATION_REQUIRED.value
+        assert calls == []
+        assert traces[-1]["result"] == "policy_denied"
+        assert traces[-1]["tool_effect"] == "requires_confirmation"
+
+    def test_safe_dispatch_records_policy_and_execution_trace(self, tmp_path, mock_llm_client, make_step_result):
+        traces = []
+        catalog = build_default_tool_catalog()
+        agent = LayerAgent(
+            "quantum", "prompt", [],
+            lambda _name, _args: json.dumps({
+                "_step_result": True,
+                "success": True,
+                "outputs": {"fchk": "generated"},
+            }),
+            mock_llm_client,
+            model="trace-test-model",
+            prompt_version="trace-test-prompt",
+            recovery_policy=default_recovery_policy(catalog),
+            tool_catalog=catalog,
+            on_decision=traces.append,
+        )
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+        failed = make_step_result(success=False, step_index=1, error_kind=ErrorKind.SCF_NOT_CONVERGED)
+        ctx = RetryContext("quantum", failed.step_name, ErrorKind.SCF_NOT_CONVERGED, max_attempts=5)
+
+        agent._dispatch_tool(
+            "tools_retry_struct_g16",
+            {"molecule_name": "Li", "scf_options": "scf=xqc"},
+            step_result=failed,
+            ctx=ctx,
+            run_dir=str(tmp_path / "md__202608050001"),
+            config_path=str(config_path),
+        )
+
+        assert traces[-1]["result"] == "executed"
+        assert traces[-1]["success"] is True
+        assert traces[-1]["model_id"] == "trace-test-model"
+        assert traces[-1]["prompt_version"] == "trace-test-prompt"
 
 
 # ============================================================

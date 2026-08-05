@@ -6,10 +6,11 @@ ORCA 共享工具 —— 路径解析、环境设置、坐标格式化。
 struct_orca、mol2_orca、resp_maker 均从此模块导入，消除硬编码重复。
 """
 
-import os
-import shutil
 import subprocess
 from pathlib import Path
+
+from willy.env_registry import build_tool_env, require_tool
+from willy.process_lifecycle import run_managed_command
 
 ORCA_BIN_NAME = "orca"
 ORCA_2MKL_BIN_NAME = "orca_2mkl"
@@ -21,68 +22,24 @@ MULTIWFN_BIN_NAME = "Multiwfn"
 # ============================================================
 
 def find_orca() -> str:
-    """Resolve ORCA binary path.
-
-    Priority: ORCA_DIR env var → shutil.which("orca") → error.
-    """
-    orca_dir = os.environ.get("ORCA_DIR", "")
-    if orca_dir:
-        p = Path(orca_dir) / "orca"
-        if p.exists():
-            return str(p)
-    found = shutil.which(ORCA_BIN_NAME)
-    if found:
-        return found
-    raise RuntimeError(
-        "找不到 ORCA 可执行文件。请设置 ORCA_DIR 环境变量 "
-        "(如 export ORCA_DIR=/path/to/orca) 或将 orca 加入 PATH。"
-    )
+    """Resolve ORCA through the centralized environment registry."""
+    return str(require_tool("orca").executable)
 
 
 def find_orca_2mkl() -> str:
-    """Resolve orca_2mkl binary path (bundled with ORCA)."""
-    orca_dir = os.environ.get("ORCA_DIR", "")
-    if orca_dir:
-        p = Path(orca_dir) / "orca_2mkl"
-        if p.exists():
-            return str(p)
-    orca_path = shutil.which(ORCA_BIN_NAME)
-    if orca_path:
-        candidate = str(Path(orca_path).parent / "orca_2mkl")
-        if Path(candidate).exists():
-            return candidate
-    raise RuntimeError(
-        "找不到 orca_2mkl。请设置 ORCA_DIR 环境变量 "
-        "或确保它与 ORCA 可执行文件在同一目录。"
-    )
+    """Resolve the ORCA companion binary through the centralized registry."""
+    return str(require_tool("orca_2mkl").executable)
 
 
 def get_orca_dir() -> str:
-    """Get ORCA installation directory (for LD_LIBRARY_PATH)."""
-    orca_dir = os.environ.get("ORCA_DIR", "")
-    if orca_dir:
-        return orca_dir
-    orca_path = shutil.which(ORCA_BIN_NAME)
-    if orca_path:
-        return str(Path(orca_path).parent)
-    raise RuntimeError("无法确定 ORCA 安装目录。")
+    """Return the resolved ORCA installation directory."""
+    result = require_tool("orca")
+    return str(result.home or result.executable.parent)
 
 
 def find_multiwfn() -> str:
-    """Resolve Multiwfn binary path.
-
-    Priority: MULTIWFN_BIN env var → shutil.which("Multiwfn") → error.
-    """
-    env_bin = os.environ.get("MULTIWFN_BIN", "")
-    if env_bin and Path(env_bin).exists():
-        return env_bin
-    found = shutil.which(MULTIWFN_BIN_NAME)
-    if found:
-        return found
-    raise RuntimeError(
-        "找不到 Multiwfn。请设置 MULTIWFN_BIN 环境变量 "
-        "或将 Multiwfn 加入 PATH。"
-    )
+    """Resolve Multiwfn through the centralized environment registry."""
+    return str(require_tool("multiwfn").executable)
 
 
 # ============================================================
@@ -90,15 +47,8 @@ def find_multiwfn() -> str:
 # ============================================================
 
 def get_orca_env() -> dict[str, str]:
-    """Build environment dict with ORCA library path.
-
-    Must be called after find_orca() succeeds (uses get_orca_dir() internally).
-    """
-    orca_dir = get_orca_dir()
-    return {
-        **os.environ,
-        "LD_LIBRARY_PATH": f"{orca_dir}:{os.environ.get('LD_LIBRARY_PATH', '')}",
-    }
+    """Build the isolated ORCA child environment."""
+    return build_tool_env("orca")
 
 
 # ============================================================
@@ -122,10 +72,13 @@ def extract_xyz(struct_path: str, workdir: str) -> str:
     commands = f"100\n2\n2\n{tmp_xyz.resolve()}\n0\nq\n"
 
     try:
-        subprocess.run(
+        run_managed_command(
             [multiwfn, str(mp.resolve())],
-            input=commands, capture_output=True, text=True,
-            cwd=workdir, timeout=60,
+            input_text=commands,
+            cwd=workdir,
+            timeout=60,
+            env=build_tool_env("multiwfn"),
+            run_dir=workdir,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{mp.name}: Multiwfn 坐标提取超时 (60s)")

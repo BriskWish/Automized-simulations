@@ -1,165 +1,257 @@
-"""
-eq.py
-========
-NPT 平衡执行器 —— grompp + mdrun + 密度/温度收敛后检查。
-
-检查逻辑: 取最后 20% 轨迹，密度和温度的 (max-min)/|mean| 均 < 0.10。
-
-用法:
-  CLI:  python3 -m willy.simulation.eq [work_dir]
-  API:  from willy.simulation.eq import run_eq, EQResult
-"""
+"""Three-point annealing EQ with manifest permission and final-hold acceptance."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-import subprocess
 
 from willy._paths import get_project_root
-from willy.simulation._gmx_utils import grompp_and_mdrun, check_last_fraction
-from willy.errors import StepResult, StepError, ErrorKind
+from willy.errors import ErrorKind, StepError, StepResult
+from willy.simulation._gmx_utils import (
+    analyze_final_window,
+    extract_energy_xvg,
+    grompp_and_mdrun,
+    prepare_stage_execution,
+    record_stage_execution,
+)
+from willy.simulation.manifest import ManifestError
+from willy.simulation.mdp import load_mdp_config
+from willy.step_registry import EQ_STEP, PACKMOL_STEP
+
 
 ROOT = get_project_root()
 DEFAULT_WORK_DIR = ROOT / "md_run"
-MAX_REL_CHANGE = 0.10
-CHECK_FRACTION = 0.20
 
 
 @dataclass
 class EQResult:
     converged: bool
-    density_ok: bool = False
-    temp_ok: bool = False
-    density_mean: float = 0.0
-    density_rel_change: float = 0.0
-    temp_mean: float = 0.0
-    temp_rel_change: float = 0.0
     tpr: str = ""
     details: dict = field(default_factory=dict)
 
 
-def _extract_energy(edr: Path, prop_num: str, prop_name: str, out: Path) -> bool:
-    """gmx energy 提取指定属性到 .xvg。"""
-    cmd = f"echo '{prop_num} 0' | gmx energy -f {edr} -o {out}"
-    r = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True,
-        cwd=str(edr.parent), timeout=30,
+def detect_vacuum_region(
+    gro_path: Path,
+    *,
+    bins: int = 12,
+    max_empty_fraction: float = 0.25,
+) -> dict:
+    """Detect a macroscopic empty slab in a final GRO structure."""
+    try:
+        lines = gro_path.read_text(errors="replace").splitlines()
+        atom_count = int(lines[1].strip())
+        atom_lines = lines[2:2 + atom_count]
+        box_values = [float(value) for value in lines[2 + atom_count].split()]
+    except (IndexError, ValueError, OSError):
+        return {"detected": False, "reason": "无法解析 eq.gro"}
+    if atom_count < 20 or len(box_values) < 3:
+        return {"detected": False, "reason": "原子数过少或盒子向量无效"}
+    coordinates: list[tuple[float, float, float]] = []
+    for line in atom_lines:
+        try:
+            coordinates.append((
+                float(line[20:28]), float(line[28:36]), float(line[36:44]),
+            ))
+        except ValueError:
+            continue
+    if len(coordinates) < 20:
+        return {"detected": False, "reason": "无法读取足够坐标"}
+    for axis, box_length in enumerate(box_values[:3]):
+        if box_length <= 0:
+            continue
+        occupied = {
+            min(bins - 1, max(0, int((coord[axis] % box_length) / box_length * bins)))
+            for coord in coordinates
+        }
+        empty = [index not in occupied for index in range(bins)]
+        longest = _longest_circular_empty_run(empty)
+        fraction = longest / bins
+        if fraction >= max_empty_fraction:
+            return {
+                "detected": True,
+                "axis": "xyz"[axis],
+                "empty_fraction": round(fraction, 4),
+                "bins": bins,
+            }
+    return {"detected": False, "reason": "未检测到宏观真空区"}
+
+
+def _longest_circular_empty_run(empty: list[bool]) -> int:
+    if not empty or not any(empty):
+        return 0
+    if all(empty):
+        return len(empty)
+    longest = current = 0
+    for value in empty * 2:
+        current = min(current + 1, len(empty)) if value else 0
+        longest = max(longest, current)
+    return longest
+
+
+def _contract_failure(message: str) -> StepResult:
+    return StepResult(
+        step_name="eq", step_index=EQ_STEP, success=False,
+        error=StepError(ErrorKind.INPUT_CONTRACT, message),
     )
-    ok = r.returncode == 0 and out.exists()
-    if not ok:
-        print(f"[eq] ⚠  gmx energy {prop_name} (#{prop_num}) 提取失败")
-    return ok
 
 
-def run_eq(work_dir: str = None,
-           mdp: str = None,
-           conf: str = None,
-           topol: str = "topol.top",
-           ) -> StepResult:
-    """执行 NPT 平衡并检查密度/温度稳定性。返回 StepResult 包装 EQResult。"""
+def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temperature: float) -> tuple[dict, list[str]]:
+    window_ns = float(acceptance["window_ns"])
+    if hold_ns < window_ns:
+        return {
+            "auto_acceptance": False,
+            "reason": "最终目标温度保持段短于验收窗口",
+            "hold_target_ns": hold_ns,
+            "acceptance_window_ns": window_ns,
+        }, ["最终 298 K 保温段短于 EQ 验收窗口，禁止自动判定已平衡"]
+
+    series = {
+        "density": ("Density", cwd / "density.xvg"),
+        "temperature": ("Temperature", cwd / "temp.xvg"),
+        "pressure": ("Pressure", cwd / "pressure.xvg"),
+        "potential": ("Potential", cwd / "potential.xvg"),
+    }
+    details = {
+        "auto_acceptance": True,
+        "hold_target_ns": hold_ns,
+        "acceptance_window_ns": window_ns,
+        "series": {},
+    }
+    issues: list[str] = []
+    for key, (term, output) in series.items():
+        ok, raw = extract_energy_xvg(cwd / "eq.edr", term, output)
+        if not ok:
+            details["series"][key] = {"ok": False, "reason": raw[-500:]}
+            issues.append(f"无法提取 {term} 能量项")
+            continue
+        stats = analyze_final_window(output, window_ns * 1000.0)
+        details["series"][key] = stats
+        if not stats.get("ok"):
+            issues.append(f"{term} 的最终窗口采样不足")
+            continue
+        if stats["trend_zscore"] > float(acceptance["max_trend_zscore"]):
+            issues.append(f"{term} 分块趋势未稳定")
+        if key != "pressure" and stats["relative_drift"] > float(acceptance["max_relative_drift"]):
+            issues.append(f"{term} 相对漂移过大")
+    temperature = details["series"].get("temperature", {})
+    if temperature.get("ok") and abs(float(temperature["mean"]) - target_temperature) > float(acceptance["temperature_abs_tolerance_k"]):
+        issues.append("最终温度均值偏离目标温度")
+    return details, issues
+
+
+def run_eq(
+    work_dir: str | None = None,
+    mdp: str | None = None,
+    conf: str | None = None,
+    topol: str = "topol.top",
+    itps: list[str] | None = None,
+    tpr: str | None = None,
+    vacuum_max_fraction: float = 0.25,
+    on_progress=None,
+    on_heartbeat=None,
+) -> StepResult:
+    """Run EQ only after accepted EM and accept only the final target hold."""
     import time as _time
-    _start = _time.time()
 
+    started_at = _time.time()
     cwd = Path(work_dir) if work_dir else DEFAULT_WORK_DIR
     if not cwd.is_absolute():
-        cwd = ROOT / work_dir
+        cwd = ROOT / cwd
     if not cwd.exists():
-        return StepResult(
-            step_name="eq", step_index=9, success=False,
-            error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
-                            message=f"工作目录不存在: {cwd}"),
+        return StepResult("eq", EQ_STEP, False, error=StepError(ErrorKind.FILE_NOT_FOUND, f"工作目录不存在: {cwd}"))
+    try:
+        configuration = load_mdp_config(str(cwd / "config.json"))
+        preparation = prepare_stage_execution(
+            "eq", cwd, mdp=mdp, conf=conf, topol=topol, itps=itps, tpr=tpr,
         )
+    except (ManifestError, OSError, ValueError) as exc:
+        return _contract_failure(f"EQ 输入契约不满足: {exc}")
 
     gmx_result = grompp_and_mdrun(
-        stage="eq", cwd=cwd,
-        mdp=mdp, conf=conf, topol=topol,
+        "eq", cwd,
+        mdp=preparation.inputs.mdp,
+        conf=preparation.inputs.coordinates,
+        topol=preparation.inputs.topol,
+        itps=preparation.inputs.itps,
+        tpr=preparation.inputs.tpr,
+        continuation_checkpoint=preparation.continuation_checkpoint,
+        append=preparation.append,
+        on_progress=on_progress,
+        on_heartbeat=on_heartbeat,
     )
     if not gmx_result.success:
         gmx_result.step_name = "eq"
-        gmx_result.step_index = 9
-        return gmx_result
-
-    tpr = gmx_result.outputs.get("tpr", "")
-
-    # ── 提取密度 (#22) 和温度 (#15) ──
-    edr = cwd / "eq.edr"
-    if not edr.exists():
-        return StepResult(
-            step_name="eq", step_index=9, success=False,
-            error=StepError(kind=ErrorKind.MDRUN_FAILED,
-                            message=f"{edr} 不存在，EQ 运行可能失败",
-                            hint="检查 mdrun 是否正常完成"),
-            outputs={"tpr": tpr},
-            artifacts=gmx_result.artifacts,
-            duration_s=_time.time() - _start,
+        gmx_result.step_index = EQ_STEP
+        record_stage_execution(
+            preparation, success=False, details=gmx_result.extra, error=gmx_result.error,
         )
+        return gmx_result
+    checkpoint = cwd / "eq.cpt"
+    if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
+        result = StepResult(
+            "eq", EQ_STEP, False,
+            error=StepError(ErrorKind.MDRUN_FAILED, "EQ 未生成非空 eq.cpt，不能安全连续进入 PROD"),
+            outputs=dict(gmx_result.outputs), artifacts=gmx_result.artifacts,
+            duration_s=_time.time() - started_at,
+        )
+        record_stage_execution(preparation, success=False, outputs=result.outputs, error=result.error)
+        return result
 
-    density_xvg = cwd / "density.xvg"
-    temp_xvg = cwd / "temp.xvg"
-    _extract_energy(edr, "22", "Density", density_xvg)
-    _extract_energy(edr, "15", "Temperature", temp_xvg)
-
-    # ── 检查后 20% 收敛 ──
-    d_check = check_last_fraction(density_xvg, CHECK_FRACTION, MAX_REL_CHANGE)
-    t_check = check_last_fraction(temp_xvg, CHECK_FRACTION, MAX_REL_CHANGE)
-
-    d_info = d_check.get("Density", {})
-    t_info = t_check.get("Temperature", {})
-    d_ok = d_info.get("ok", False)
-    t_ok = t_info.get("ok", False)
-    converged = d_ok and t_ok
-
-    eq_result = EQResult(
-        converged=converged,
-        density_ok=d_ok, temp_ok=t_ok,
-        density_mean=d_info.get("mean", 0.0),
-        density_rel_change=d_info.get("rel_change", 0.0),
-        temp_mean=t_info.get("mean", 0.0),
-        temp_rel_change=t_info.get("rel_change", 0.0),
-        tpr=str(tpr),
-        details={"density": d_info, "temperature": t_info},
+    eq = configuration.values["eq"]
+    hold_ns = float(preparation.metadata.get("segments", {}).get("hold_target", {}).get("actual_ns", eq["segments_ns"]["hold_target"]))
+    details, issues = _acceptance_details(
+        cwd,
+        hold_ns,
+        eq["acceptance"],
+        float(eq["target_temperature"]),
     )
-
-    duration = _time.time() - _start
-    if converged:
-        return StepResult(
-            step_name="eq", step_index=9, success=True,
-            outputs={"tpr": tpr, "gro": str(cwd / "eq.gro"), "edr": str(edr)},
-            artifacts=gmx_result.artifacts + [str(density_xvg), str(temp_xvg)],
-            duration_s=duration,
+    outputs = dict(gmx_result.outputs)
+    artifacts = list(gmx_result.artifacts)
+    for name in ("density", "temperature", "pressure", "potential"):
+        path = cwd / f"{'temp' if name == 'temperature' else name}.xvg"
+        if path.is_file() and path.stat().st_size > 0:
+            outputs[f"{name}_xvg"] = str(path)
+            artifacts.append(str(path))
+    vacuum = detect_vacuum_region(cwd / "eq.gro", max_empty_fraction=vacuum_max_fraction)
+    details["vacuum"] = vacuum
+    if vacuum["detected"]:
+        issues.append(f"检测到 {vacuum['axis']} 方向宏观真空区")
+    eq_result = EQResult(converged=not issues, tpr=gmx_result.outputs.get("tpr", ""), details=details)
+    if not issues:
+        result = StepResult(
+            "eq", EQ_STEP, True,
+            outputs=outputs, artifacts=artifacts,
+            duration_s=_time.time() - started_at,
             extra={"eq_result": eq_result},
         )
+        record_stage_execution(preparation, success=True, outputs=outputs, details=result.extra)
+        return result
 
-    # 未收敛 — 构建诊断信息
-    issues = []
-    if not d_ok:
-        issues.append(f"密度不稳定 (mean={d_info.get('mean',0):.4f}, rel_change={d_info.get('rel_change',0):.4f})")
-    if not t_ok:
-        issues.append(f"温度不稳定 (mean={t_info.get('mean',0):.4f}, rel_change={t_info.get('rel_change',0):.4f})")
-    hint = "调整 tau_p/tau_t、延长 eq_ns、或重建盒子（调整密度）"
-
-    return StepResult(
-        step_name="eq", step_index=9, success=False,
-        error=StepError(kind=ErrorKind.EQ_NOT_CONVERGED,
-                        message="NPT 平衡未达标: " + "; ".join(issues),
-                        hint=hint),
-        outputs={"tpr": tpr},
-        artifacts=gmx_result.artifacts,
-        duration_s=duration,
-        extra={"eq_result": eq_result},
+    result = StepResult(
+        "eq", EQ_STEP, False,
+        error=StepError(
+            ErrorKind.EQUILIBRATION_FAILED,
+            "EQ 验收未通过: " + "; ".join(issues),
+            hint="检查最终目标温度保持段的分块统计；真空区需重新建盒",
+        ),
+        outputs=outputs,
+        artifacts=artifacts,
+        duration_s=_time.time() - started_at,
+        extra={
+            "eq_result": eq_result,
+            **({
+                "rollback_to_step": PACKMOL_STEP,
+                "rollback_reason": "EQ 最终结构存在宏观真空区，需要重新建盒",
+                "box_density_multiplier": 1.10,
+            } if vacuum["detected"] else {}),
+        },
     )
+    record_stage_execution(preparation, success=False, outputs=outputs, details=result.extra, error=result.error)
+    return result
 
 
 if __name__ == "__main__":
     import sys
-    wd = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_WORK_DIR)
-    sr = run_eq(work_dir=wd)
-    if sr.success:
-        eq = sr.extra.get("eq_result")
-        if eq:
-            print(f"  密度: mean={eq.density_mean:.4f}  rel_change={eq.density_rel_change:.4f}  ✅")
-            print(f"  温度: mean={eq.temp_mean:.4f}  rel_change={eq.temp_rel_change:.4f}  ✅")
-        print("✅ EQ 平衡 (密度+温度稳定)")
-    else:
-        print(f"❌ EQ 未达标: {sr.error.message if sr.error else 'unknown'}")
-        exit(1)
+
+    result = run_eq(work_dir=sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_WORK_DIR))
+    raise SystemExit(0 if result.success else 1)
