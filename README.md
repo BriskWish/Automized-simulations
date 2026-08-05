@@ -210,6 +210,20 @@ GitHub 的 Contributors 图由默认分支上的提交作者自动统计。项�
 
 Codex 没有独立 GitHub 账号，因此该致谢不伪造为 GitHub 用户贡献。新增真人贡献者时，请使用其已关联 GitHub 账号的提交邮箱提交到默认分支，或在仓库的 Settings -> Collaborators / Manage access 中邀请其作为协作者。
 
+### 第三方组件引用与著作权
+
+Willy 集成并编排第三方科学软件，但 Willy 作者不拥有其原始项目的著作权。研究工作如使用了 Willy 集成的 Sobtop 参数化路径及其中涉及的 Multiwfn 工作，请至少引用以下文献：
+
+- Tian Lu, Feiwu Chen, *Multiwfn: A Multifunctional Wavefunction Analyzer*, *Journal of Computational Chemistry* **33**, 580-592 (2012). DOI: [10.1002/jcc.22885](https://doi.org/10.1002/jcc.22885)
+- Tian Lu, *A comprehensive electron wavefunction analysis toolbox for chemists, Multiwfn*, *Journal of Chemical Physics* **161**, 082503 (2024). DOI: [10.1063/5.0216272](https://doi.org/10.1063/5.0216272)
+
+研究工作如使用了 Willy 集成的 Packmol 建盒组件，请至少引用以下文献：
+
+- L. Martinez, R. Andrade, E. G. Birgin, J. M. Martinez, *Packmol: A package for building initial configurations for molecular dynamics simulations*, *Journal of Computational Chemistry* **30**, 2157-2164 (2009). DOI: [10.1002/jcc.21224](https://doi.org/10.1002/jcc.21224)
+- J. M. Martinez, L. Martinez, *Packing optimization for the automated generation of complex system's initial configurations for molecular dynamics and docking*, *Journal of Computational Chemistry* **24**, 819-825 (2003). DOI: [10.1002/jcc.10216](https://doi.org/10.1002/jcc.10216)
+
+使用 Sobtop、Packmol 或其他第三方组件时，使用者还应遵守其各自的许可、分发和引用要求。Willy 对这些组件仅提供集成与工作流编排，不主张其原始软件、文档或学术成果的著作权。
+
 ## 许可
 
 待定
