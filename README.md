@@ -202,6 +202,14 @@ AutomizedSimulations/
 
 → **[docs/README.md](docs/README.md)** — 文档导航与分类；**[文档台账](docs/document_registry.md)** — 用途、状态、责任人与维护规范。
 
+## 贡献与协作
+
+GitHub 的 Contributors 图由默认分支上的提交作者自动统计。项目同时记录以下协作角色：
+
+- **Codex（OpenAI AI 协作工程助手）**：参与架构设计、代码实现、测试、文档与发布质量检查。
+
+Codex 没有独立 GitHub 账号，因此该致谢不伪造为 GitHub 用户贡献。新增真人贡献者时，请使用其已关联 GitHub 账号的提交邮箱提交到默认分支，或在仓库的 Settings -> Collaborators / Manage access 中邀请其作为协作者。
+
 ## 许可
 
 待定
