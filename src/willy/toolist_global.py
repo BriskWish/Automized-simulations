@@ -1,18 +1,20 @@
 """
 toolist_global.py
 =================
-Layer 0 — Config Agent 的 10 个工具定义与处理函数 + TF-IDF 向量检索。
+Layer 0 — Config Agent 的 11 个工具定义与处理函数 + TF-IDF 向量检索。
 
 工具:
   tools_lookup_molecule, tools_resolve_compound, tools_lookup_md_defaults,
   tools_get_box_density, tools_lookup_basis_set, tools_refresh_structs,
   tools_diagnose_error_config, tools_validate_config,
-  tools_set_backend_quantum, tools_skip_molecule_global
+  tools_set_backend_quantum, tools_skip_molecule_global,
+  tools_inspect_quantum_inputs
 """
 
 from willy.workflow_config import _available_residues
 from willy._paths import get_project_root
 from willy.config_store import write_json
+from willy.quantum.input_audit import QuantumInputAuditError, audit_quantum_inputs
 
 
 
@@ -152,17 +154,50 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_set_backend_quantum",
-            "description": "设置量子化学计算后端。用户说'用 ORCA'、'换高斯'、'用 G16' 时调用。",
+            "description": "设置量子化学计算后端。用户说'用 ORCA'、'用 G16'、'用 G09' 或'换高斯'时调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "backend": {
                         "type": "string",
-                        "enum": ["g16", "orca"],
-                        "description": "量子化学后端: g16=Gaussian 16, orca=ORCA",
+                        "enum": ["g16", "g09", "orca"],
+                        "description": "量子化学后端: g16=Gaussian 16, g09=Gaussian 09, orca=ORCA",
                     }
                 },
                 "required": ["backend"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tools_inspect_quantum_inputs",
+            "description": "按量子后端审计用户上传的原始输入。g16/g09 必须检查 .gjf；orca 必须检查 .inp。返回文件内 charge/spin、坐标完整性和按数目计算的净电荷；不返回文件原文。生成可确认方案前必须调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "backend": {
+                        "type": "string",
+                        "enum": ["g16", "g09", "orca"],
+                        "description": "当前方案的量子后端",
+                    },
+                    "components": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 128,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "struct/ 下的精确分子文件名，不含后缀"},
+                                "count": {"type": "integer", "minimum": 1, "description": "该组分的分子数"},
+                            },
+                            "required": ["name", "count"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["backend", "components"],
+                "additionalProperties": False,
             },
         },
     },
@@ -204,6 +239,7 @@ TOOL_META = {
     "tools_validate_config":       {"category": "validation", "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_set_backend_quantum":   {"category": "config",     "mutating": True,  "risk": "medium", "effect": "requires_confirmation"},
     "tools_skip_molecule_global":  {"category": "config",     "mutating": True,  "risk": "medium", "effect": "requires_confirmation"},
+    "tools_inspect_quantum_inputs": {"category": "validation", "mutating": False, "risk": "low", "effect": "read_only"},
 }
 
 # ============================================================
@@ -232,6 +268,11 @@ class _MoleculeRegistry:
         self._load()
 
     def _load(self):
+        # Refresh must rebuild from the two authoritative sources instead of
+        # appending a second copy of every table row and struct entry.
+        self._names = []
+        self._data = {}
+        self._matrix = None
         path = get_project_root() / "docs" / "knowledge.md"
         if not path.exists():
             self._data = dict(_FALLBACK_MOLECULES)
@@ -254,15 +295,16 @@ class _MoleculeRegistry:
             }
             self._names.append(name)
 
-        # 补充 struct/ 下的 .gjf 文件（未在 knowledge.md 中注册的，默认中性分子）
+        # 补充 struct/ 下的原始输入。未登记分子不能默认中性；最终电荷和
+        # 多重度只能由 tools_inspect_quantum_inputs 的后端特异审计提供。
         struct_dir = get_project_root() / "struct"
         if struct_dir.exists():
-            for gjf in struct_dir.glob("*.gjf"):
-                name = gjf.stem
+            for input_path in sorted([*struct_dir.glob("*.gjf"), *struct_dir.glob("*.inp")]):
+                name = input_path.stem
                 if name.endswith("_run") or name in self._data:
                     continue
                 self._data[name] = {
-                    "charge": 0, "spin": 1, "atom_count": 0,
+                    "charge": None, "spin": None, "atom_count": 0,
                     "basis": "b3lyp/6-311+g(d,p)", "forcefield": "GAFF",
                     "aliases": [name],
                 }
@@ -336,7 +378,7 @@ _ERRORS = {
     "sobtop_rc24": "非致命 Fortran 清理错误，输出文件正常即可忽略",
     "scf_not_converged": "改 6-31g(d) 或加 scf=xqc",
     "em_not_converged": "初始原子重叠 → 增大 packmol tolerance 或盒子",
-    "resp_failed": "检查 Multiwfn/Gaussian 是否在 PATH，检查 .gjf 格式",
+    "resp_failed": "检查量子输入与 *_opt.fchk；Multiwfn 已由项目内置，无需 PATH 配置",
 }
 
 
@@ -363,7 +405,9 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
         if result:
             # 判断分子类型 (cation/anion/solvent)
             chg = result["charge"]
-            mol_type = "cation" if chg > 0 else ("anion" if chg < 0 else "solvent")
+            mol_type = "unknown" if not isinstance(chg, int) else (
+                "cation" if chg > 0 else ("anion" if chg < 0 else "solvent")
+            )
             return _json.dumps({
                 "name": result["name"], "charge": chg, "spin": result["spin"],
                 "atom_count": result["atom_count"], "basis": result["basis"],
@@ -387,7 +431,7 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
         if result:
             ions = [{"name": name, "count": n} for name, n in result]
             total_charge = sum(
-                (_registry.lookup(name) or {}).get("charge", 0) * n
+                ((_registry.lookup(name) or {}).get("charge") or 0) * n
                 for name, n in result)
             return _json.dumps({"compound": compound, "ions": ions,
                                 "total_charge": total_charge,
@@ -413,19 +457,19 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
                              "note": "含 Li 体系 dt=1fs"},
             "solvent_mix":  {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.001,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale"},
-            "aqueous":      {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.002,
+            "aqueous":      {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.001,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale"},
-            "organic":      {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.002,
+            "organic":      {"schema_version": 2, "eq": eq, "prod": {"duration_ns": 10, "temperature": 298}, "dt": 0.001,
                              "tcoupl": "V-rescale", "tau_t": 0.5, "pcoupl": "C-rescale"},
         }
         return _json.dumps(defaults.get(st, defaults["solvent_mix"]))
 
     elif tool_name == "tools_get_box_density":
         return _json.dumps({
-            "target_mass_density_g_cm3": 1.5,
+            "target_mass_density_g_cm3": 0.7,
             "unit": "g/cm3",
             "method": "由每个组分 .itp 的 [ atoms ] 质量计算总质量和立方盒边长",
-            "note": "初始体积将由使用默认1.5g/cm3的密度猜测",
+            "note": "初始体积将由使用默认0.7g/cm3的密度猜测",
         })
 
     elif tool_name == "tools_lookup_basis_set":
@@ -435,6 +479,24 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
         elif n < 20: rec = "b3lyp/6-311+g(d,p)"
         else: rec = "b3lyp/6-31g(d)"
         return _json.dumps({"recommended": rec, "default": "b3lyp/6-311+g(d,p)"})
+
+    elif tool_name == "tools_inspect_quantum_inputs":
+        raw_components = args.get("components")
+        components: dict[str, int] = {}
+        if not isinstance(raw_components, list):
+            return _json.dumps({"ok": False, "issues": ["components 必须是数组"]}, ensure_ascii=False)
+        for item in raw_components[:128]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                return _json.dumps({"ok": False, "issues": ["每个组分必须包含 name 和 count"]}, ensure_ascii=False)
+            name = item["name"].strip()
+            if name in components:
+                return _json.dumps({"ok": False, "issues": [f"组分 {name} 重复"]}, ensure_ascii=False)
+            components[name] = item.get("count")
+        try:
+            result = audit_quantum_inputs(args.get("backend"), components)
+        except QuantumInputAuditError as exc:
+            result = {"ok": False, "issues": [str(exc)]}
+        return _json.dumps(result, ensure_ascii=False)
 
     elif tool_name == "tools_refresh_structs":
         _registry._load()
@@ -478,7 +540,9 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
 
     elif tool_name == "tools_set_backend_quantum":
         from willy._paths import get_project_root as _get_root
-        backend = args["backend"]
+        backend = str(args.get("backend", "")).strip().lower()
+        if backend not in {"g16", "g09", "orca"}:
+            return _json.dumps({"ok": False, "error": "量子后端必须为 g16、g09 或 orca"}, ensure_ascii=False)
         cfg_path = _get_root() / "config.json"
         try:
             if cfg_path.exists():

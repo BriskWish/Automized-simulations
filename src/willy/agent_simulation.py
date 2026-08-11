@@ -9,13 +9,16 @@ from willy.layer_agent import LayerAgent
 from willy.llm_config import DEFAULT_LLM_MODEL
 from willy.errors import ErrorKind, StepError, StepResult
 from willy.toolist_simulation import (
+    MDRUN_KNOWLEDGE_TOOL,
     SIMULATION_TOOLS,
     handle_simulation_tool_call,
     protocol_change_request,
 )
+from willy.simulation.mdrun_knowledge import lookup_mdrun_knowledge, public_entry_index
 from willy.action_contract import ActionToolCatalog
 from willy.recovery_policy import RecoveryPolicy
 from willy.llm_budget import LLMBudget
+from willy.step_registry import PACKMOL_STEP
 import json
 from typing import Any, Callable, Mapping
 
@@ -30,7 +33,7 @@ SIMULATION_AGENT_PROMPT = """你是 Willy Simulation Agent。你编排 GROMACS M
 
 ## 可用工具
 1. tools_run_em_simulation —— 执行 EM，校验 topol.top/.itp/em.mdp/model.pdb，返回 em.tpr/em.gro/em.xtc/em.edr
-2. tools_run_eq_simulation —— 仅消费 manifest 中已验收的 EM，检查最终 298 K 保温段的温度、压力、密度、势能和真空区
+2. tools_run_eq_simulation —— 仅消费 manifest 中已验收的 EM；以最终 298 K 保温段的温度均值和势能线性斜率验收，压力、密度和真空区仅记录为诊断证据
 3. tools_run_prod_simulation —— 仅消费已验收 EQ，并通过 eq.cpt 连续启动；仅指纹匹配时才 append
 4. tools_retry_mdp —— 用修改后的参数重新生成 MDP 文件
 5. tools_retry_box —— 用目标质量密度/box_size/tolerance 重新构建 Packmol 周期盒子，并返回实际盒矢量审计
@@ -42,6 +45,7 @@ SIMULATION_AGENT_PROMPT = """你是 Willy Simulation Agent。你编排 GROMACS M
 11. tools_diagnose_error_simulation —— 分析 GROMACS 日志/输出以识别具体失败模式
 12. tools_modify_config_simulation —— 在 config.json 中更新 MD 参数
 13. tools_migrate_md_config_simulation —— 显式迁移旧 eq_ns/prod_ns；只有在用户确认工作流授予服务端授权后才可采用 v2
+14. tools_lookup_mdrun_knowledge —— 只读读取 GROMACS mdrun 知识条目；必须用索引中的 number + name，单次最多 3 条
 
 ## 决策规则
 
@@ -50,14 +54,25 @@ SIMULATION_AGENT_PROMPT = """你是 Willy Simulation Agent。你编排 GROMACS M
 2. grompp 在 EM 前失败：检查 atomtype 不匹配、缺失 itp 文件或 .mdp 语法错误。修正配置并重试。
 
 ### 平衡（EQ）
-1. EQUILIBRATION_FAILED：读取最终目标温度保持段的分块统计；不得把整段 EQ 平均当作验收。
+1. EQUILIBRATION_FAILED：读取最终目标温度保持段的温度均值与势能线性斜率；不得把整段 EQ 平均当作验收。
 2. EQ_NOT_CONVERGED（温度不稳定）：检查恒温器设置；若需调整 tau_t，提出变更并升级到用户确认。
 3. 温度爆炸（>1000K）：检查初始盒子中是否有重叠原子；若需降低 dt 或增大 tau_t，提出变更并升级到用户确认。
 4. 密度降到接近零：先读取本次建盒记录中的实际盒矢量、体积和初始质量密度；盒子过大时用更高目标质量密度重建盒子。
 5. 密度爆炸：先读取本次建盒记录；盒子过小时用更低目标质量密度或更大 box_size 重建盒子。
 
+### Packmol 建盒
+1. 先读取失败步骤提供的“私有执行证据”。`failure_stage=preflight` 表示
+   Packmol 尚未启动，必须按 `preflight_issues` 指出具体缺失或不一致项，不能把
+   它描述为 Packmol 进程崩溃，也不能仅凭“input_contract”泛化重建盒子。
+2. `failure_stage=process_start|process_exit|timeout|output_missing` 表示执行层
+   或输出层问题：先报告实际阶段和返回码/输出存在性，只有用户明确要求改变盒子
+   参数时才提出 `tools_retry_box`；不得把它改写成拓扑或 GROMACS 错误。
+3. 仅当证据明确为 `atom_count|periodic_cell_parse|periodic_cell_mismatch`，或
+   用户明确要求重建盒子时，才可选择 `tools_retry_box`。重试参数必须说明依据，
+   不得凭空改变密度、box_size 或 tolerance。
+
 ### 生产（PROD）
-1. RECOVERY_CONFLICT：不得人工注入 -cpi/-append；只能由 manifest 指纹一致性决定恢复。若 EQ 未验收或真空区存在，不要进入 PROD。
+1. RECOVERY_CONFLICT：不得人工注入 -cpi/-append；只能由 manifest 指纹一致性决定恢复。若 EQ 未验收，不要进入 PROD。
 2. PROD 中崩溃：检查能量中的 NaN/inf 和约束；若需减小 dt，提出变更并升级到用户确认。
 
 ### 通用
@@ -118,7 +133,7 @@ class SimulationAgent(LayerAgent):
             max_retries=max_retries,
             on_action=on_action,
             on_decision=on_decision,
-            prompt_version="simulation-agent-v1",
+            prompt_version="simulation-agent-v2",
             recovery_policy=recovery_policy,
             tool_catalog=tool_catalog,
             llm_budget=llm_budget,
@@ -127,6 +142,31 @@ class SimulationAgent(LayerAgent):
     def set_workspace(self, work_dir: str, config_path: str) -> None:
         self._work_dir = work_dir
         self._config_path = config_path
+
+    def _tool_request_rejection(
+        self,
+        tool_name: str,
+        args: Mapping[str, object],
+        step_result: StepResult,
+    ) -> str | None:
+        """Require geometry evidence before automatic retries of failed Step 7."""
+        if tool_name != "tools_retry_box" or step_result.step_index != PACKMOL_STEP:
+            return None
+        execution = step_result.extra.get("box_execution")
+        failure_stage = execution.get("failure_stage") if isinstance(execution, Mapping) else None
+        allowed_stages = {
+            "atom_count",
+            "periodic_cell_parse",
+            "periodic_cell_mismatch",
+        }
+        if failure_stage in allowed_stages:
+            return None
+        observed = str(failure_stage or "missing")
+        return (
+            "自动 Packmol 重试缺少明确几何证据："
+            f"failure_stage={observed}；仅 atom_count、periodic_cell_parse 或 "
+            "periodic_cell_mismatch 可自动提出重建盒子"
+        )
 
     def propose_eq_recovery(
         self,
@@ -141,12 +181,15 @@ class SimulationAgent(LayerAgent):
         """
         error = step_result.error
         evidence = self._eq_public_evidence(step_result.extra)
-        return self._request_eq_recovery_proposal(
+        proposal = self._request_eq_recovery_proposal(
             config_path=config_path,
             error_kind=error.kind.value if error else "unknown",
             error_message=error.message if error else "EQ 执行失败",
             evidence=evidence,
         )
+        if "_knowledge_lookup_status" not in proposal:
+            proposal["_knowledge_lookup_status"] = "unavailable"
+        return proposal
 
     def propose_revised_eq_recovery(
         self,
@@ -170,7 +213,7 @@ class SimulationAgent(LayerAgent):
             for key in ("summary", "restart_step", "adjustments", "editable_parameters")
             if key in current_action
         }
-        return self._request_eq_recovery_proposal(
+        proposal = self._request_eq_recovery_proposal(
             config_path=config_path,
             error_kind=error_kind,
             error_message=error_message,
@@ -178,6 +221,9 @@ class SimulationAgent(LayerAgent):
             user_request=request,
             current_action=current,
         )
+        if "_knowledge_lookup_status" not in proposal:
+            proposal["_knowledge_lookup_status"] = "unavailable"
+        return proposal
 
     def _request_eq_recovery_proposal(
         self,
@@ -189,7 +235,7 @@ class SimulationAgent(LayerAgent):
         user_request: str = "",
         current_action: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Ask for one bounded EQ proposal or complete replacement proposal."""
+        """Ask for bounded EQ proposal(s) or a complete replacement bundle."""
         config_text = "{}"
         try:
             with open(config_path, encoding="utf-8") as handle:
@@ -204,42 +250,129 @@ class SimulationAgent(LayerAgent):
                 f"当前方案：{json.dumps(current_action or {}, ensure_ascii=False)}\n"
                 f"用户要求：{user_request}\n"
             )
+        try:
+            knowledge_index = public_entry_index()
+        except Exception:
+            knowledge_index = []
+        hypotheses = self._eq_agent_hypotheses(error_kind, evidence)
         prompt = (
-            "EQ 阶段已经失败。请阅读错误、受限的验收证据和运行配置，给出一个等待用户确认的"
-            "修复方案。禁止调用工具、禁止声称已修改配置、禁止开始重跑。只返回 JSON 对象，不要 Markdown。\n"
+            "EQ 阶段已经失败。请阅读错误、受限的验收证据和运行配置。若证据支持多个可能原因，"
+            "请给出 2 至 3 个相互独立、互斥的候选方案；每个方案必须包含可能原因、证据摘要和对应修改。"
+            "若只有一个原因则只给一个方案。所有方案都必须等待用户选择和明确确认，不能默认选择。"
+            "你可以调用下方唯一的只读知识工具，但不能调用任何执行、配置或诊断工具。"
+            "知识工具每次最多读取 3 条，本次实际失败诊断最多调用 2 次；超过预算后必须继续生成方案，"
+            "并将未验证推断明确标出。只返回 JSON 对象，不要 Markdown。\n"
             "允许的 field 仅为 dt、tau_t、eq_tau_p、lincs_iter、lincs_order、box_density，以及"
             "eq_segment.heat、eq_segment.hold_high、eq_segment.cool_transition、"
             "eq_segment.hold_transition、eq_segment.cool_target、eq_segment.hold_target。\n"
+            "用户所说的 tau_p 在此只能表示 EQ 压浴，输出时必须写为 eq_tau_p；"
+            "用户所说的 hold/最终保温段，输出时必须写为 eq_segment.hold_target。"
             "同时返回 editable_fields，列出用户可要求重新评估的字段；每项格式为"
             "{\"field\":\"tau_t\",\"purpose\":\"简短原因\"}。"
-            "格式：{\"summary\":\"简短中文摘要\",\"adjustments\":[{\"field\":\"dt\","
+            "单方案格式：{\"summary\":\"简短中文摘要\",\"adjustments\":[{\"field\":\"dt\","
             "\"after\":0.0005,\"purpose\":\"简短目的\"}],"
             "\"editable_fields\":[{\"field\":\"tau_t\",\"purpose\":\"简短原因\"}]}。"
+            "多方案格式：{\"problem_summary\":\"多因素问题摘要\",\"options\":["
+            "{\"title\":\"方案一：...\",\"cause\":\"可能原因\",\"evidence\":\"证据摘要\","
+            "\"summary\":\"该方案摘要\",\"adjustments\":[...],\"editable_fields\":[...],"
+            "\"knowledge_entries\":[{\"number\":10,\"name\":\"索引中的完整名称\"}],"
+            "\"knowledge_status\":\"retrieved|not_matched|unavailable\","
+            "\"advice_source\":\"knowledge_base|llm_unverified\","
+            "\"compatibility_notice\":\"版本兼容提醒\"}]}。"
+            "最多 3 个方案；每个方案的 adjustments 必须自洽，不能把不同方案的参数混在一起。"
+            "knowledge_entries 只能引用工具实际返回的条目；不得把未读取的条目写成已命中。"
+            "若工具未命中或不可用，knowledge_status 必须不是 retrieved，advice_source 必须为 llm_unverified。"
             "只提出确有必要的改动，并只列允许的 field。\n\n"
             f"{revision_context}"
             f"错误类型：{error_kind}\n"
+            f"阶段：eq\n"
             f"错误摘要：{error_message}\n"
             f"验收证据：{json.dumps(evidence, ensure_ascii=False)}\n"
+            f"Agent 未验证假设（仅供你判断，不是知识库结论）：{json.dumps(hypotheses, ensure_ascii=False)}\n"
+            f"可检索条目索引（只能按 number + name 请求）：{json.dumps(knowledge_index, ensure_ascii=False)}\n"
             f"运行配置：{config_text}"
         )
-        try:
-            response = self.llm.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "你是 MD 协议诊断顾问，只能生成可审阅的 JSON 方案。"},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0,
-                max_tokens=500,
-            )
-            content = response.choices[0].message.content or ""
-        except Exception:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": "你是 MD 协议诊断顾问，只能生成可审阅的 JSON 方案。"},
+            {"role": "user", "content": prompt},
+        ]
+        retrieved: dict[int, dict[str, Any]] = {}
+        lookup_attempted = False
+        lookup_calls = 0
+        content = ""
+        # A model may need one response after its final tool result to emit JSON.
+        for _round in range(4):
+            try:
+                if self.llm_budget is not None:
+                    self.llm_budget.before_call()
+                kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": [MDRUN_KNOWLEDGE_TOOL],
+                    "tool_choice": "auto",
+                    "temperature": 0,
+                    "max_tokens": 900,
+                }
+                if self.llm_budget is not None:
+                    kwargs["timeout"] = self.llm_budget.call_timeout_s
+                response = self.llm.chat.completions.create(**kwargs)
+                if self.llm_budget is not None:
+                    self.llm_budget.record_success()
+            except Exception:
+                return {}
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                content = getattr(message, "content", None) or ""
+                break
+            assistant_calls: list[dict[str, Any]] = []
+            for tool_call in tool_calls:
+                function = getattr(tool_call, "function", None)
+                if function is None and isinstance(tool_call, Mapping):
+                    function = tool_call.get("function", {})
+                name = getattr(function, "name", None) or (function.get("name") if isinstance(function, Mapping) else "")
+                arguments = getattr(function, "arguments", None) or (function.get("arguments", "{}") if isinstance(function, Mapping) else "{}")
+                call_id = getattr(tool_call, "id", None) or (tool_call.get("id", "kb-call") if isinstance(tool_call, Mapping) else "kb-call")
+                assistant_calls.append({
+                    "id": str(call_id),
+                    "type": "function",
+                    "function": {"name": str(name), "arguments": str(arguments)},
+                })
+            messages.append({"role": "assistant", "content": getattr(message, "content", None) or "", "tool_calls": assistant_calls})
+            for tool_call in tool_calls:
+                function = getattr(tool_call, "function", None)
+                if function is None and isinstance(tool_call, Mapping):
+                    function = tool_call.get("function", {})
+                name = getattr(function, "name", None) or (function.get("name") if isinstance(function, Mapping) else "")
+                arguments = getattr(function, "arguments", None) or (function.get("arguments", "{}") if isinstance(function, Mapping) else "{}")
+                call_id = getattr(tool_call, "id", None) or (tool_call.get("id", "kb-call") if isinstance(tool_call, Mapping) else "kb-call")
+                if name != "tools_lookup_mdrun_knowledge":
+                    result = {"ok": False, "lookup_status": "unavailable", "entries": [], "errors": ["proposal 阶段只允许知识库只读工具"]}
+                elif lookup_calls >= 2:
+                    result = {"ok": False, "lookup_status": "budget_exhausted", "entries": [], "errors": ["本次失败诊断最多读取 2 次知识库"]}
+                else:
+                    lookup_calls += 1
+                    lookup_attempted = True
+                    try:
+                        parsed_args = json.loads(str(arguments))
+                    except json.JSONDecodeError:
+                        parsed_args = {}
+                    result = lookup_mdrun_knowledge(parsed_args.get("entries") if isinstance(parsed_args, Mapping) else None)
+                    for entry in result.get("entries", []) if isinstance(result, Mapping) else []:
+                        if isinstance(entry, Mapping) and isinstance(entry.get("number"), int):
+                            retrieved[int(entry["number"])] = dict(entry)
+                messages.append({"role": "tool", "tool_call_id": str(call_id), "content": json.dumps(result, ensure_ascii=False)})
+        proposal = self._parse_eq_proposal(content)
+        if not proposal:
             return {}
-        return self._parse_eq_proposal(content)
+        proposal["_knowledge_lookup_attempted"] = lookup_attempted
+        proposal["_knowledge_lookup_status"] = "retrieved" if retrieved else ("not_matched" if lookup_attempted else "unavailable")
+        proposal["_retrieved_entries"] = list(retrieved.values())[:6]
+        return proposal
 
     @staticmethod
     def _parse_eq_proposal(content: object) -> dict[str, Any]:
-        """Accept only the small JSON vocabulary required by the action gate."""
+        """Accept one legacy proposal or up to three bounded diagnostic options."""
         text = str(content or "").strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else ""
@@ -251,44 +384,68 @@ class SimulationAgent(LayerAgent):
             return {}
         if not isinstance(payload, Mapping):
             return {}
-        summary = str(payload.get("summary") or "").replace("\n", " ").strip()[:240]
-        adjustments = payload.get("adjustments")
-        if not isinstance(adjustments, list):
+        def parse_option(raw: object) -> dict[str, Any]:
+            if not isinstance(raw, Mapping):
+                return {}
             adjustments = []
-        safe_adjustments = []
-        for adjustment in adjustments[:8]:
-            if not isinstance(adjustment, Mapping):
-                continue
-            field = adjustment.get("field")
-            if not isinstance(field, str) or len(field) > 64:
-                continue
-            purpose = str(adjustment.get("purpose") or "").replace("\n", " ").strip()[:120]
-            safe_adjustments.append({
-                "field": field,
-                "after": adjustment.get("after"),
-                "purpose": purpose,
-            })
-        editable = payload.get("editable_fields", payload.get("modifiable_fields", []))
-        if not isinstance(editable, list):
-            editable = []
-        safe_editable = []
-        for item in editable[:8]:
-            if isinstance(item, Mapping):
-                field = item.get("field")
-                purpose = item.get("purpose") or item.get("reason")
-            else:
-                field, purpose = item, ""
-            if not isinstance(field, str) or len(field) > 64:
-                continue
-            safe_editable.append({
-                "field": field,
-                "purpose": str(purpose or "").replace("\n", " ").strip()[:120],
-            })
-        return {
-            "summary": summary,
-            "adjustments": safe_adjustments,
-            "editable_fields": safe_editable,
-        }
+            raw_adjustments = raw.get("adjustments")
+            for adjustment in raw_adjustments[:8] if isinstance(raw_adjustments, list) else []:
+                if not isinstance(adjustment, Mapping):
+                    continue
+                field = adjustment.get("field")
+                if not isinstance(field, str) or len(field) > 64:
+                    continue
+                adjustments.append({
+                    "field": field,
+                    "after": adjustment.get("after"),
+                    "purpose": str(adjustment.get("purpose") or "").replace("\n", " ").strip()[:120],
+                })
+            editable = raw.get("editable_fields", raw.get("modifiable_fields", []))
+            safe_editable = []
+            for item in editable[:8] if isinstance(editable, list) else []:
+                if isinstance(item, Mapping):
+                    field = item.get("field")
+                    purpose = item.get("purpose") or item.get("reason")
+                else:
+                    field, purpose = item, ""
+                if isinstance(field, str) and len(field) <= 64:
+                    safe_editable.append({
+                        "field": field,
+                        "purpose": str(purpose or "").replace("\n", " ").strip()[:120],
+                    })
+            return {
+                "title": str(raw.get("title") or "").replace("\n", " ").strip()[:120],
+                "cause": str(raw.get("cause") or "").replace("\n", " ").strip()[:240],
+                "evidence": str(raw.get("evidence") or "").replace("\n", " ").strip()[:300],
+                "summary": str(raw.get("summary") or "").replace("\n", " ").strip()[:240],
+                "adjustments": adjustments,
+                "editable_fields": safe_editable,
+                "knowledge_entries": raw.get("knowledge_entries", []) if isinstance(raw.get("knowledge_entries"), list) else [],
+                "knowledge_status": str(raw.get("knowledge_status") or "").strip()[:32],
+                "advice_source": str(raw.get("advice_source") or "").strip()[:32],
+                "compatibility_notice": str(raw.get("compatibility_notice") or "").replace("\n", " ").strip()[:300],
+            }
+
+        raw_options = payload.get("options")
+        if isinstance(raw_options, list):
+            options = [parse_option(item) for item in raw_options[:3]]
+            options = [item for item in options if item]
+            return {
+                "problem_summary": str(payload.get("problem_summary") or payload.get("summary") or "").replace("\n", " ").strip()[:240],
+                "options": options,
+            }
+        return parse_option(payload)
+
+    @staticmethod
+    def _eq_agent_hypotheses(error_kind: str, evidence: Mapping[str, Any]) -> list[dict[str, str]]:
+        """Return deliberately unverified hypotheses for model comparison."""
+        hypotheses: list[dict[str, str]] = []
+        if evidence.get("vacuum_detected") is True:
+            hypotheses.append({"hypothesis": "初始建盒密度或盒体积可能与体系不匹配", "status": "unverified"})
+        if error_kind in {"eq_not_converged", "equilibration_failed", "mdrun_failed", "numerical_instability"}:
+            hypotheses.append({"hypothesis": "积分步长、约束或温度耦合可能导致数值不稳定", "status": "unverified"})
+            hypotheses.append({"hypothesis": "压力耦合响应或初始体积可能导致密度/体积漂移", "status": "unverified"})
+        return hypotheses[:3]
 
     @staticmethod
     def _eq_public_evidence(extra: Mapping[str, Any] | object) -> dict[str, Any]:
@@ -309,7 +466,12 @@ class SimulationAgent(LayerAgent):
                 continue
             entry = {
                 key: values[key]
-                for key in ("mean", "relative_drift", "trend_zscore", "ok")
+                for key in (
+                    "mean",
+                    "linear_slope_per_ps",
+                    "relative_slope_per_ns",
+                    "ok",
+                )
                 if key in values and isinstance(values[key], (int, float, bool))
             }
             if entry:

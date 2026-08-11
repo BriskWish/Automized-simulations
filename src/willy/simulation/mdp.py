@@ -8,6 +8,12 @@ from typing import Any, Collection
 import json
 
 from willy.errors import ErrorKind, StepError, StepResult
+from willy.simulation.manifest import (
+    ManifestError,
+    load_mdp_metadata,
+    manifest_exists,
+    record_mdp_metadata,
+)
 from willy.simulation.protocol import (
     EQ_SEGMENT_NAMES,
     MDConfigError,
@@ -175,6 +181,15 @@ def _build_eq(cfg: MdpConfig) -> tuple[str, dict[str, Any]]:
             }
             for name in EQ_SEGMENT_NAMES
         },
+        "acceptance": {
+            "window_ns": float(eq["acceptance"]["window_ns"]),
+            "temperature_abs_tolerance_k": float(
+                eq["acceptance"]["temperature_abs_tolerance_k"]
+            ),
+            "max_potential_relative_slope_per_ns": float(
+                eq["acceptance"]["max_potential_relative_slope_per_ns"]
+            ),
+        },
         "acceptance_window_ns": float(eq["acceptance"]["window_ns"]),
     }
 
@@ -259,7 +274,11 @@ def build_all(
     stages: Collection[str] | None = None,
     on_progress=None,
 ) -> StepResult:
-    """Build MDPs and record rounded physical durations in mdp_metadata.json."""
+    """Build MDPs and record rounded physical durations in the MD manifest.
+
+    Direct standalone invocations without initialized run metadata retain the
+    legacy ``mdp_metadata.json`` sidecar for compatibility.
+    """
     import time as _time
 
     started_at = _time.time()
@@ -324,21 +343,42 @@ def build_all(
         artifacts.append(str(path))
         metadata["stages"][stage] = stage_metadata
 
-    metadata_path = out / "mdp_metadata.json"
+    has_run_manifest = manifest_exists(out)
     previous: dict[str, Any] = {}
-    if metadata_path.exists():
+    if has_run_manifest:
         try:
-            previous = json.loads(metadata_path.read_text())
-        except json.JSONDecodeError:
-            previous = {}
+            previous = load_mdp_metadata(out)
+        except ManifestError as exc:
+            return StepResult(
+                step_name="mdp", step_index=MDP_STEP, success=False,
+                error=StepError(ErrorKind.INPUT_CONTRACT, f"MD manifest 无效: {exc}"),
+                duration_s=_time.time() - started_at,
+            )
+    else:
+        metadata_path = out / "mdp_metadata.json"
+        if metadata_path.exists():
+            try:
+                previous = json.loads(metadata_path.read_text())
+            except json.JSONDecodeError:
+                previous = {}
     prior_stages = previous.get("stages", {})
     if isinstance(prior_stages, dict):
         prior_stages.update(metadata["stages"])
         metadata["stages"] = prior_stages
     previous.update(metadata)
-    metadata_path.write_text(json.dumps(previous, ensure_ascii=False, indent=2) + chr(10))
-    outputs["metadata"] = str(metadata_path)
-    artifacts.append(str(metadata_path))
+    if has_run_manifest:
+        try:
+            record_mdp_metadata(out, previous)
+        except ManifestError as exc:
+            return StepResult(
+                step_name="mdp", step_index=MDP_STEP, success=False,
+                error=StepError(ErrorKind.INPUT_CONTRACT, f"无法记录 MDP 协议元数据: {exc}"),
+                duration_s=_time.time() - started_at,
+            )
+    else:
+        metadata_path.write_text(json.dumps(previous, ensure_ascii=False, indent=2) + chr(10))
+        outputs["metadata"] = str(metadata_path)
+        artifacts.append(str(metadata_path))
     return StepResult(
         step_name="mdp", step_index=MDP_STEP, success=True,
         outputs=outputs,

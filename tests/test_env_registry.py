@@ -7,11 +7,14 @@ from pathlib import Path
 from willy.env_registry import (
     AVAILABLE,
     MISCONFIGURED,
+    RUNTIME_UNAVAILABLE,
     build_tool_env,
     public_capabilities,
     resolve_tool,
 )
 from willy.run_registry import RunRegistry
+from willy.run_provenance import create_or_refresh_provenance
+from willy.run_metadata import load_run_manifest
 
 
 def _executable(path: Path) -> Path:
@@ -101,6 +104,24 @@ def test_orca_home_resolves_companions_and_child_library_path(tmp_path, monkeypa
     assert child_env["LD_LIBRARY_PATH"] == f"{tmp_path.resolve()}:/base"
 
 
+def test_g09_uses_its_own_configured_executables_and_gaussian_environment(tmp_path, monkeypatch):
+    g09 = _executable(tmp_path / "g09")
+    g09_formchk = _executable(tmp_path / "g09-formchk")
+    monkeypatch.setenv("WILLY_G09_BIN", str(g09))
+    monkeypatch.setenv("WILLY_G09_FORMCHK_BIN", str(g09_formchk))
+
+    executable = resolve_tool("g09")
+    formchk = resolve_tool("g09_formchk")
+    child_env = build_tool_env("g09_formchk", base_env={"PATH": "/usr/bin"})
+
+    assert executable.status == AVAILABLE
+    assert executable.executable == g09.resolve()
+    assert formchk.status == AVAILABLE
+    assert formchk.executable == g09_formchk.resolve()
+    assert child_env["GAUSS_CDEF"] == "0"
+    assert child_env["OMP_NUM_THREADS"] == "1"
+
+
 def test_ligpargen_child_gets_bossdir_without_global_mutation(tmp_path, monkeypatch):
     ligpargen = _executable(tmp_path / "LigParGen")
     boss_home = tmp_path / "boss"
@@ -116,6 +137,68 @@ def test_ligpargen_child_gets_bossdir_without_global_mutation(tmp_path, monkeypa
     assert "BOSSdir" not in __import__("os").environ
 
 
+def test_openbabel_uses_standard_binary_override(tmp_path, monkeypatch):
+    obabel = _executable(tmp_path / "obabel")
+    monkeypatch.setenv("WILLY_OBABEL_BIN", str(obabel))
+
+    result = resolve_tool("obabel")
+
+    assert result.status == AVAILABLE
+    assert result.executable == obabel.resolve()
+    assert result.source == "willy_env"
+
+
+def test_multiwfn_uses_bundled_binary_and_ignores_external_configuration(tmp_path, monkeypatch):
+    bundled = (
+        tmp_path / "vendor" / "multiwfn" / "linux-x86_64"
+        / "3.8-dev-2025-02-14" / "Multiwfn"
+    )
+    bundled.parent.mkdir(parents=True)
+    _executable(bundled)
+    monkeypatch.setenv("WILLY_MULTIWFN_BIN", "/outside/Multiwfn")
+    monkeypatch.setenv("MULTIWFN_BIN", "/outside/Multiwfn")
+    monkeypatch.setenv("PATH", "")
+
+    result = resolve_tool("multiwfn", project_root=tmp_path)
+
+    assert result.status == AVAILABLE
+    assert result.source == "bundled"
+    assert result.executable == bundled.resolve()
+
+
+def test_boss_loader_failure_is_runtime_unavailable(tmp_path, monkeypatch):
+    boss_home = tmp_path / "boss"
+    boss_home.mkdir()
+    _executable(boss_home / "BOSS")
+    monkeypatch.setenv("WILLY_BOSS_HOME", str(boss_home))
+
+    def unavailable(*args, **kwargs):
+        raise OSError("loader missing")
+
+    monkeypatch.setattr("willy.env_registry.subprocess.run", unavailable)
+
+    result = resolve_tool("boss")
+
+    assert result.status == RUNTIME_UNAVAILABLE
+
+
+def test_boss_signal_termination_is_runtime_unavailable(tmp_path, monkeypatch):
+    boss_home = tmp_path / "boss"
+    boss_home.mkdir()
+    _executable(boss_home / "BOSS")
+    monkeypatch.setenv("WILLY_BOSS_HOME", str(boss_home))
+
+    monkeypatch.setattr(
+        "willy.env_registry.subprocess.run",
+        lambda *args, **kwargs: type("Probe", (), {"returncode": -31})(),
+    )
+
+    result = resolve_tool("boss")
+
+    assert result.status == RUNTIME_UNAVAILABLE
+    assert "系统信号" in result.public_reason
+
+
 def test_capability_report_is_redacted_and_run_local(tmp_path, monkeypatch):
     gmx = _executable(tmp_path / "gmx")
     monkeypatch.setenv("WILLY_GMX_BIN", str(gmx))
@@ -125,8 +208,22 @@ def test_capability_report_is_redacted_and_run_local(tmp_path, monkeypatch):
     assert str(gmx) not in str(payload)
 
     run_dir = tmp_path / "md_run" / "md__202608020999"
+    run_dir.mkdir(parents=True)
+    config = run_dir / "config.json"
+    config.write_text('{"md":{"run_seed":1}}')
     registry = RunRegistry(tmp_path)
     registry.register_run(run_dir, backend="g16", total_steps=10)
-    registry.record_environment_report(run_dir, payload)
-    stored = (run_dir / "environment_report.json").read_text()
+    create_or_refresh_provenance(
+        run_dir,
+        project_root=tmp_path,
+        backend="g16",
+        config_path=config,
+        random_seed=1,
+        capabilities=payload,
+        llm_model=None,
+        prompt_versions={},
+    )
+    stored = str(load_run_manifest(run_dir)["sections"]["provenance"]["data"])
     assert str(gmx) not in stored
+    assert not (run_dir / "environment_report.json").exists()
+    assert registry.get_environment_report(run_dir.name)["capabilities"]["gmx"]["status"] == "available"

@@ -1,12 +1,12 @@
 # Willy 命名规范
 
-> 版本 1.3 · 最后核验 2026-08-05 · 适用于所有 `src/willy/` 下的模块、文件、LLM tool 名称
+> 版本 1.4 · 最后核验 2026-08-08 · 适用于所有 `src/willy/` 下的模块、文件、LLM tool 名称
 
 ## 实施状态
 
 | 规范 | 状态 |
 |------|:---:|
-| LLM tool 名称: `tools_{操作}_{目标}_{scope/backend}` | ✅ 已完成 — 全部 46 个 tool 已命名 |
+| LLM tool 名称: `tools_{操作}_{目标}_{scope/backend}` | ✅ 已完成 — 全部 50 个 tool 已命名 |
 | Tool 模块文件: `toolist_{scope}.py` | ✅ 已完成 — 5 个文件 |
 | Agent 文件: `agent_{scope}.py` | ✅ 已完成 — 5 个文件（含只读运行助理） |
 | prompts 拆分到各 agent 文件 | ✅ 已完成 — `prompts.py` 已删除，每个 `agent_{scope}.py` 持有自己的 prompt |
@@ -17,7 +17,7 @@
 | Agent | Toolist | 执行模块 |
 |------|------|------|
 | `agent_config.py` | `toolist_global.py` | (不直接调用执行模块) |
-| `agent_quantum.py` | `toolist_quantum.py` | `quantum/struct_{g16,orca}.py` `quantum/singlepoint_{g16,orca}.py` `quantum/fchk_mol2.py` `quantum/chg_resp.py` |
+| `agent_quantum.py` | `toolist_quantum.py` | `quantum/struct_{g16,g09,orca}.py` `quantum/singlepoint_{g16,g09,orca}.py` `quantum/fchk_mol2.py` `quantum/chg_resp.py` |
 | `agent_topology.py` | `toolist_topology.py` | `topology/topo_{gaff,opls}.py` `topology/top_assembly.py` `topology/itp_revise.py` |
 | `agent_simulation.py` | `toolist_simulation.py` | `simulation/protocol.py` `simulation/manifest.py` `simulation/mdp.py` `simulation/box.py` `simulation/{em,eq,prod}.py` `simulation/_gmx_utils.py` |
 | `agent_run.py` | `toolist_run.py` | `run_registry.py`（只读运行事实查询） |
@@ -37,18 +37,18 @@ tools_{操作}_{目标}_{scope/backend}
 | `tools` | 固定前缀 | `tools` |
 | `{操作}` | 动词，描述动作 | `lookup` `retry` `diagnose` `modify` `skip` `validate` `resolve` `refresh` `get` `set` |
 | `{目标}` | 名词，被操作的对象 | `molecule` `compound` `error` `struct` `chg` `config` `box` `mdp` `topology` `backend` |
-| `{scope/backend}` | 适用范围或计算后端。全局工具省略。 | `g16` `orca` `quantum` `topology` `simulation` `global` |
+| `{scope/backend}` | 适用范围或计算后端。全局工具省略。 | `g16` `g09` `orca` `quantum` `topology` `simulation` `global` |
 
 ### 规则
 
 1. **全局工具（Layer 0 Config）省略第三段**，如 `tools_lookup_molecule`
 2. **同层共享工具用层名作第三段**，如 `tools_skip_molecule_quantum` / `tools_skip_molecule_topology`；模拟层不暴露跳过分子工具，避免拓扑与建盒组分不同步。
-3. **后端特定工具用后端名作第三段**，如 `tools_retry_struct_g16` / `tools_retry_struct_orca`
+3. **后端特定工具用后端名作第三段**，如 `tools_retry_struct_g16` / `tools_retry_struct_g09` / `tools_retry_struct_orca`
 4. **后端无关的层专属工具用层名作第三段**，如 `tools_diagnose_error_quantum`
 
 ### 完整映射表
 
-#### Layer 0 — toolist_global（10 tools）
+#### Layer 0 — toolist_global（11 tools）
 
 | 当前名称 | 新名称 | 操作 | 目标 | scope |
 |------|------|------|------|------|
@@ -62,6 +62,7 @@ tools_{操作}_{目标}_{scope/backend}
 | `validate_config` | `tools_validate_config` | validate | config | — |
 | `set_quantum_backend` | `tools_set_backend_quantum` | set | backend | quantum |
 | `skip_molecule` | `tools_skip_molecule_global` | skip | molecule | global |
+| `inspect_quantum_inputs` | `tools_inspect_quantum_inputs` | inspect | quantum_inputs | — |
 
 #### Layer 1 — toolist_quantum（8 tools）
 
@@ -87,7 +88,7 @@ tools_{操作}_{目标}_{scope/backend}
 | `modify_topology_config` | `tools_modify_config_topology` | modify | config | topology |
 | `skip_molecule` | `tools_skip_molecule_topology` | skip | molecule | topology |
 
-#### Layer 3 — toolist_simulation（13 tools）
+#### Layer 3 — toolist_simulation（14 tools）
 
 | 当前名称 | 新名称 | 操作 | 目标 | scope/backend |
 |------|------|------|------|------|
@@ -104,6 +105,7 @@ tools_{操作}_{目标}_{scope/backend}
 | `diagnose_md_error` | `tools_diagnose_error_simulation` | diagnose | error | simulation |
 | `modify_md_config` | `tools_modify_config_simulation` | modify | config | simulation |
 | `migrate_md_config` | `tools_migrate_md_config_simulation` | migrate | config | simulation |
+| `lookup_mdrun_knowledge` | `tools_lookup_mdrun_knowledge` | lookup | mdrun_knowledge | simulation |
 
 #### Run Assistant — toolist_run（9 tools，全部只读）
 
@@ -138,10 +140,10 @@ toolist_{scope}.py
 
 | 当前文件名 | 新文件名 | scope |
 |------|------|------|
-| `knowledge_tools.py` | `toolist_global.py` | Config Agent 使用的全局工具（10 tools） |
+| `knowledge_tools.py` | `toolist_global.py` | Config Agent 使用的全局工具（11 tools） |
 | `quantum_tools.py` | `toolist_quantum.py` | Quantum Agent 专属工具（8 tools） |
 | `topology_tools.py` | `toolist_topology.py` | Topology Agent 专属工具（6 tools） |
-| `simulation_tools.py` | `toolist_simulation.py` | Simulation Agent 专属工具（13 tools） |
+| `simulation_tools.py` | `toolist_simulation.py` | Simulation Agent 专属工具（14 tools） |
 | *(不存在)* | `toolist_run.py` | Run Assistant 专属只读工具（9 tools） |
 
 ### 规则

@@ -136,7 +136,7 @@ def handle_run_tool_call(
         if not selected_run_id:
             raise RunRegistryError("请先在界面中选择一个运行")
         if tool_name == "tools_get_status_run":
-            return _response(True, {"status": registry.get_run_status(selected_run_id)})
+            return _response(True, {"status": registry.get_run_status(selected_run_id, reconcile=False)})
         if tool_name == "tools_get_report_step":
             return _response(True, {"report": registry.get_step_report(selected_run_id, int(args["step_id"]))})
         if tool_name == "tools_list_artifacts_run":

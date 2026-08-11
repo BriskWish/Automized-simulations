@@ -25,18 +25,20 @@ class TestQuantumToolDefinitions:
         from willy.toolist_quantum import QUANTUM_TOOLS
         return QUANTUM_TOOLS
 
-    def test_eight_tools_defined(self, quantum_tools):
-        """应有 8 个量子工具。"""
+    def test_quantum_tools_defined(self, quantum_tools):
+        """G16/G09/ORCA 镜像链路应完整暴露量子工具。"""
         names = {t["function"]["name"] for t in quantum_tools}
-        assert len(names) == 8, f"期望 8 个工具, 实际 {len(names)}"
+        assert len(names) == 10, f"期望 10 个工具, 实际 {len(names)}"
 
     def test_all_tool_names(self, quantum_tools):
         names = {t["function"]["name"] for t in quantum_tools}
         required = {
             "tools_retry_struct_g16",
+            "tools_retry_struct_g09",
             "tools_retry_struct_orca",
             "tools_retry_mol2_conversion",
             "tools_retry_chg_g16",
+            "tools_retry_chg_g09",
             "tools_retry_chg_orca",
             "tools_diagnose_error_quantum",
             "tools_modify_config_molecule",
@@ -57,9 +59,12 @@ class TestQuantumToolDefinitions:
         """mol2 和 RESP 重试都必须消费 Step 2 的 *_opt.fchk。"""
         definitions = {tool["function"]["name"]: tool["function"]
                        for tool in quantum_tools}
+        mol2_parameters = definitions["tools_retry_mol2_conversion"]["parameters"]
+        assert {"required": ["fchk_path"]} in mol2_parameters["anyOf"]
+        assert {"required": ["molden_path"]} in mol2_parameters["anyOf"]
         for name in {
-            "tools_retry_mol2_conversion",
             "tools_retry_chg_g16",
+            "tools_retry_chg_g09",
             "tools_retry_chg_orca",
         }:
             parameters = definitions[name]["parameters"]
@@ -230,6 +235,7 @@ class TestQuantumToolHandler:
 
     @pytest.mark.parametrize("tool_name", [
         "tools_retry_chg_g16",
+        "tools_retry_chg_g09",
         "tools_retry_chg_orca",
     ])
     def test_chg_retry_reports_missing_explicit_fchk(self, tool_name, tmp_path):
@@ -419,3 +425,38 @@ class TestCrossToolistConsistency:
             {"step": "em", "work_dir": "."},
         ))
         assert sim_result.get("_diagnosis") is True
+
+
+def test_quantum_tool_catalog_exposes_g09_structure_and_charge_actions():
+    from willy.toolist_quantum import QUANTUM_TOOLS, TOOL_META
+
+    names = {tool["function"]["name"] for tool in QUANTUM_TOOLS}
+    assert {"tools_retry_struct_g09", "tools_retry_chg_g09"} <= names
+    assert TOOL_META["tools_retry_struct_g09"]["effect"] == "retry_safe"
+    assert TOOL_META["tools_retry_chg_g09"]["parameter_effects"]["charge"] == "requires_fork"
+
+
+def test_g09_structure_retry_dispatches_to_g09_module(tmp_path, monkeypatch):
+    from willy.quantum import struct_g09
+    from willy.toolist_quantum import handle_quantum_tool_call
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "molecules": {"Li": {}}, "defaults": {"mem": "1GB", "nproc": 1},
+    }), encoding="utf-8")
+    calls = []
+
+    def fake_run_one(**kwargs):
+        calls.append(kwargs)
+        return StepResult("struct_g09", 1, True)
+
+    monkeypatch.setattr(struct_g09, "run_one", fake_run_one)
+    result = json.loads(handle_quantum_tool_call(
+        "tools_retry_struct_g09",
+        {"molecule_name": "Li", "basis": "b3lyp/6-31g(d)"},
+        work_dir=str(tmp_path), config_path=str(config_path),
+    ))
+
+    assert result["success"] is True
+    assert calls[0]["name"] == "Li"
+    assert calls[0]["cfg_overrides"] == {"basis": "b3lyp/6-31g(d)"}

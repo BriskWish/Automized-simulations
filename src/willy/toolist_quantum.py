@@ -4,8 +4,8 @@ toolist_quantum.py
 Layer 1 — Quantum Agent 的 8 个工具定义与处理函数。
 
 工具:
-  tools_retry_struct_g16, tools_retry_struct_orca, tools_retry_mol2_conversion,
-  tools_retry_chg_g16, tools_retry_chg_orca, tools_diagnose_error_quantum,
+  tools_retry_struct_g16, tools_retry_struct_g09, tools_retry_struct_orca, tools_retry_mol2_conversion,
+  tools_retry_chg_g16, tools_retry_chg_g09, tools_retry_chg_orca, tools_diagnose_error_quantum,
   tools_modify_config_molecule, tools_skip_molecule_quantum
 """
 
@@ -64,14 +64,37 @@ QUANTUM_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "tools_retry_struct_g09",
+            "description": "用修改后的参数为指定分子重试 Gaussian 09 结构优化。重新构建 .gjf 文件并运行 g09 + G09 formchk。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "molecule_name": {"type": "string", "description": "分子名（如 'Li', 'TFSI'）"},
+                    "basis": {"type": "string", "description": "基组覆盖（如 'b3lyp/6-31g(d)'）。空则使用 config.json 中的值。"},
+                    "mem": {"type": "string", "description": "内存覆盖（如 '2GB', '8GB'）"},
+                    "nproc": {"type": "integer", "description": "CPU 核数覆盖"},
+                    "scf_options": {"type": "string", "description": "SCF 关键字（如 'scf=xqc', 'scf=maxcycle=256'）"},
+                    "opt_options": {"type": "string", "description": "优化关键字（如 'opt=calcfc', 'opt=gdiis'）"},
+                },
+                "required": ["molecule_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "tools_retry_mol2_conversion",
-            "description": "重新解析 Step 2 生成的 *_opt.fchk 并生成 .mol2。转换器是纯 Python 实现。",
+            "description": "重试 Step 2 的 mol2 转换。ORCA 优先使用对应 *_opt.molden 保留连通性；G16/G09 使用 *_opt.fchk。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "fchk_path": {"type": "string", "description": "Step 2 生成的 *_opt.fchk 绝对路径"},
+                    "molden_path": {"type": "string", "description": "ORCA Step 2 生成的 *_opt.molden 绝对路径；存在时优先使用"},
                 },
-                "required": ["fchk_path"],
+                "anyOf": [
+                    {"required": ["fchk_path"]},
+                    {"required": ["molden_path"]},
+                ],
             },
         },
     },
@@ -96,6 +119,22 @@ QUANTUM_TOOLS = [
         "function": {
             "name": "tools_retry_chg_orca",
             "description": "从 Step 2 生成的 *_opt.fchk 重试 RESP 电荷计算。G16 与 ORCA 使用同一 RESP 实现。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fchk_path": {"type": "string", "description": "Step 2 生成的 *_opt.fchk 绝对路径"},
+                    "charge": {"type": "integer", "description": "覆盖分子电荷"},
+                    "spin": {"type": "integer", "description": "覆盖自旋多重度"},
+                },
+                "required": ["fchk_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tools_retry_chg_g09",
+            "description": "从 Step 2 生成的 *_opt.fchk 重试 Gaussian 09 RESP 电荷计算。使用与 G16/ORCA 相同的 RESP 实现。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -138,7 +177,7 @@ QUANTUM_TOOLS = [
                     "mem": {"type": "string"},
                     "nproc": {"type": "integer"},
                     "solvent": {"type": "string", "enum": ["acetone", "water", "ethanol", "gas"]},
-                    "backend": {"type": "string", "enum": ["g16", "orca"], "description": "为此分子切换量子化学后端"},
+                    "backend": {"type": "string", "enum": ["g16", "g09", "orca"], "description": "为此分子切换量子化学后端"},
                 },
                 "required": ["molecule_name"],
             },
@@ -173,9 +212,11 @@ QUANTUM_TOOLS = [
 
 TOOL_META = {
     "tools_retry_struct_g16":        {"category": "action",     "mutating": True,  "risk": "high", "effect": "retry_safe", "parameter_effects": {"basis": "requires_confirmation"}},
+    "tools_retry_struct_g09":        {"category": "action",     "mutating": True,  "risk": "high", "effect": "retry_safe", "parameter_effects": {"basis": "requires_confirmation"}},
     "tools_retry_struct_orca":       {"category": "action",     "mutating": True,  "risk": "high", "effect": "retry_safe", "parameter_effects": {"basis": "requires_confirmation"}},
     "tools_retry_mol2_conversion":  {"category": "action",     "mutating": True,  "risk": "medium", "effect": "retry_safe"},
     "tools_retry_chg_g16":          {"category": "action",     "mutating": True,  "risk": "high", "effect": "retry_safe", "parameter_effects": {"charge": "requires_fork", "spin": "requires_fork"}},
+    "tools_retry_chg_g09":          {"category": "action",     "mutating": True,  "risk": "high", "effect": "retry_safe", "parameter_effects": {"charge": "requires_fork", "spin": "requires_fork"}},
     "tools_retry_chg_orca":         {"category": "action",     "mutating": True,  "risk": "high", "effect": "retry_safe", "parameter_effects": {"charge": "requires_fork", "spin": "requires_fork"}},
     "tools_diagnose_error_quantum": {"category": "diagnostic", "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_modify_config_molecule": {"category": "config",     "mutating": True,  "risk": "medium", "effect": "requires_confirmation"},
@@ -203,6 +244,33 @@ def handle_quantum_tool_call(
     if tool_name == "tools_retry_struct_g16":
         name = args["molecule_name"]
         from willy.quantum.struct_g16 import run_one as _run_one
+        import json
+        try:
+            with active_config.open() as f:
+                config = json.load(f)
+        except Exception:
+            config = {}
+        molecules = config.get("molecules", {})
+        defaults = config.get("defaults", {})
+        cfg = molecules.get(name, {})
+        sr = _run_one(
+            name=name, cfg=cfg, defaults=defaults,
+            cfg_overrides={
+                k: v for k, v in {
+                    "basis": args.get("basis"),
+                    "mem": args.get("mem"),
+                    "nproc": args.get("nproc"),
+                }.items() if v is not None
+            },
+            scf_options=args.get("scf_options", ""),
+            opt_options=args.get("opt_options", ""),
+            struct_dir=str(workspace),
+        )
+        return _json.dumps(sr.to_dict(), ensure_ascii=False)
+
+    elif tool_name == "tools_retry_struct_g09":
+        name = args["molecule_name"]
+        from willy.quantum.struct_g09 import run_one as _run_one
         import json
         try:
             with active_config.open() as f:
@@ -258,12 +326,27 @@ def handle_quantum_tool_call(
         return _json.dumps(sr.to_dict(), ensure_ascii=False)
 
     elif tool_name == "tools_retry_mol2_conversion":
-        fchk_path = args["fchk_path"]
-        from willy.quantum.fchk_mol2 import convert as fchk_to_mol2
-        sr = fchk_to_mol2(fchk_path)
+        fchk_path = args.get("fchk_path")
+        molden_path = args.get("molden_path")
+        if not molden_path and fchk_path:
+            candidate = Path(fchk_path).with_suffix(".molden")
+            if candidate.is_file():
+                molden_path = str(candidate)
+        if molden_path:
+            from willy.quantum.molden_mol2 import convert as molden_to_mol2
+            sr = molden_to_mol2(molden_path)
+        elif fchk_path:
+            from willy.quantum.fchk_mol2 import convert as fchk_to_mol2
+            sr = fchk_to_mol2(fchk_path)
+        else:
+            sr = StepResult(
+                step_name="mol2_conversion", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message="缺少 fchk_path 或 molden_path"),
+            )
         return _json.dumps(sr.to_dict(), ensure_ascii=False)
 
-    elif tool_name in {"tools_retry_chg_g16", "tools_retry_chg_orca"}:
+    elif tool_name in {"tools_retry_chg_g16", "tools_retry_chg_g09", "tools_retry_chg_orca"}:
         fchk_path = Path(args["fchk_path"])
         name = fchk_path.stem.removesuffix("_opt")
         if not fchk_path.exists():
@@ -329,8 +412,8 @@ def handle_quantum_tool_call(
         for field in ["basis", "mem", "nproc", "solvent"]:
             if args.get(field) is not None:
                 mol[field] = args[field]
-        if args.get("backend") and args["backend"] == "orca":
-            mol["_backend"] = "orca"
+        if args.get("backend") in {"g09", "orca"}:
+            mol["_backend"] = args["backend"]
 
         write_json(active_config, config)
         return _json.dumps({

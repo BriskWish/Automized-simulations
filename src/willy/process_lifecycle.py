@@ -12,6 +12,7 @@ import subprocess
 import time
 
 from willy.run_store import run_transaction
+from willy.structured_log import append_structured_event
 
 
 PROCESS_LIFECYCLE_FILENAME = "process_lifecycle.jsonl"
@@ -19,6 +20,7 @@ PROCESS_LIFECYCLE_SCHEMA_VERSION = 1
 DEFAULT_INTERRUPT_GRACE_S = 30.0
 DEFAULT_TERMINATE_GRACE_S = 10.0
 DEFAULT_POLL_INTERVAL_S = 1.0
+STRUCTURED_HEARTBEAT_INTERVAL_S = 15.0
 
 
 def _now() -> str:
@@ -173,6 +175,15 @@ def run_managed_command(
         env=dict(env) if env is not None else None,
     )
     started_at = time.monotonic()
+    last_heartbeat_at = started_at
+    if audit_dir is not None:
+        append_structured_event(
+            audit_dir,
+            "process_started",
+            source="process_lifecycle",
+            outcome="started",
+            message_code="process.started",
+        )
     pending_input = input_text
     termination: ProcessTerminationController | None = None
     timed_out = False
@@ -206,8 +217,19 @@ def run_managed_command(
             )
         except subprocess.TimeoutExpired:
             pending_input = None
+            now = time.monotonic()
+            if audit_dir is not None and now - last_heartbeat_at >= STRUCTURED_HEARTBEAT_INTERVAL_S:
+                append_structured_event(
+                    audit_dir,
+                    "process_heartbeat",
+                    source="process_lifecycle",
+                    outcome="running",
+                    duration_ms=max(0.0, (now - started_at) * 1000.0),
+                    message_code="process.heartbeat",
+                )
+                last_heartbeat_at = now
             if termination is not None:
-                termination.tick(now=time.monotonic())
+                termination.tick(now=now)
             continue
 
         result = subprocess.CompletedProcess(
@@ -225,6 +247,20 @@ def run_managed_command(
                     command=normalized_command,
                     returncode=result.returncode,
                 )
+        if audit_dir is not None:
+            append_structured_event(
+                audit_dir,
+                "process_finished",
+                source="process_lifecycle",
+                outcome=(
+                    "timed_out" if timed_out
+                    else "succeeded" if result.returncode == 0
+                    else "failed"
+                ),
+                error_kind=termination.reason if termination is not None else None,
+                duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+                message_code="process.finished",
+            )
         if timed_out:
             raise subprocess.TimeoutExpired(
                 normalized_command,

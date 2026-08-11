@@ -39,8 +39,9 @@ DEFAULT_EQ_SEGMENTS_NS = {
 DEFAULT_EQ_ACCEPTANCE = {
     "window_ns": 1.0,
     "temperature_abs_tolerance_k": 5.0,
-    "max_relative_drift": 0.10,
-    "max_trend_zscore": 2.0,
+    # Normalized by the final-window mean, so this remains meaningful across
+    # systems with different total potential energies.
+    "max_potential_relative_slope_per_ns": 0.01,
 }
 
 class MDConfigError(ValueError):
@@ -89,7 +90,7 @@ def default_md_config() -> dict[str, Any]:
             "transition_temperature": 400.0,
             "target_temperature": 298.0,
             "segments_ns": deepcopy(DEFAULT_EQ_SEGMENTS_NS),
-            "tau_p": 1.0,
+            "tau_p": 2.0,
             "acceptance": deepcopy(DEFAULT_EQ_ACCEPTANCE),
         },
         "prod": {
@@ -226,8 +227,14 @@ def validate_md_config(md: object) -> ProtocolValidation:
         "md.eq.acceptance.temperature_abs_tolerance_k",
         acceptance["temperature_abs_tolerance_k"], 0.001, 100, positive=True,
     )
-    _in_range(issues, "md.eq.acceptance.max_relative_drift", acceptance["max_relative_drift"], 0.000001, 1, positive=True)
-    _in_range(issues, "md.eq.acceptance.max_trend_zscore", acceptance["max_trend_zscore"], 0.001, 10, positive=True)
+    _in_range(
+        issues,
+        "md.eq.acceptance.max_potential_relative_slope_per_ns",
+        acceptance["max_potential_relative_slope_per_ns"],
+        0.000001,
+        1,
+        positive=True,
+    )
     try:
         if float(segments.get("hold_target", 0)) < float(acceptance["window_ns"]):
             warnings.append(

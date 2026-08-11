@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from willy.errors import ErrorKind
+from willy.run_metadata import create_run_manifest, load_run_manifest
 from willy.simulation.box import (
     Component, InpConfig, InpGenerator, estimate_box_size,
     estimate_box_size_from_mass,
@@ -19,6 +20,8 @@ from willy.simulation.manifest import (
     manifest_path,
     prepare_stage_attempt,
     record_stage_result,
+    record_box_attempt,
+    record_box_execution,
     stage_can_resume,
     stage_contract,
 )
@@ -53,6 +56,62 @@ def test_default_eq_mdp_has_six_segment_cumulative_points_and_actual_time(tmp_pa
     assert metadata["stages"]["eq"]["nsteps"] == 10_000_000
     assert metadata["stages"]["eq"]["actual_ns"] == pytest.approx(10.0)
     assert metadata["stages"]["eq"]["segments"]["hold_target"]["actual_ns"] == pytest.approx(2.0)
+    assert 'tau_p = 2.0' in eq_mdp
+    assert metadata["stages"]["eq"]["acceptance"]["max_potential_relative_slope_per_ns"] == pytest.approx(0.01)
+
+
+def test_run_mdp_metadata_is_embedded_in_md_manifest(tmp_path):
+    config = _write_v2_config(tmp_path)
+    initialize_manifest(
+        tmp_path,
+        config,
+        random_seed=12345,
+        versions={"gromacs": "test", "packmol": "test"},
+    )
+
+    result = build_all(str(config), str(tmp_path))
+
+    assert result.success is True
+    assert "metadata" not in result.outputs
+    assert not (tmp_path / "mdp_metadata.json").exists()
+    metadata = load_manifest(tmp_path)["protocol"]["mdp"]
+    assert metadata["stages"]["eq"]["actual_ns"] == pytest.approx(10.0)
+    assert metadata["protocol_controls"]["pcoupl"] == "C-rescale"
+
+
+def test_unified_run_manifest_keeps_md_evidence_and_protocol_in_private_sections(tmp_path):
+    config = _write_v2_config(tmp_path)
+    create_run_manifest(tmp_path)
+
+    initialize_manifest(
+        tmp_path,
+        config,
+        random_seed=12345,
+        versions={"gromacs": "test", "packmol": "test"},
+    )
+    assert build_all(str(config), str(tmp_path), stages=("eq",)).success
+    record_box_attempt(tmp_path, {"target_mass_density_g_cm3": 0.7})
+    record_box_execution(tmp_path, {
+        "output_name": "model.pdb",
+        "failure_stage": "preflight",
+        "output_before": {"exists": True, "kind": "file", "size_bytes": 12},
+        "output_removed_before_run": False,
+        "requested_box_vectors_angstrom": [],
+        "returncode": None,
+    })
+    record_stage_result(tmp_path, "eq", success=False, contract={}, error_kind="fixture")
+
+    root = load_run_manifest(tmp_path)
+    simulation = root["sections"]["simulation"]["data"]
+    protocol = root["sections"]["protocol"]["data"]
+    assert not (tmp_path / "md_manifest.json").exists()
+    assert simulation["stages"]["eq"]["status"] == "failed"
+    assert simulation["box_attempts"][-1]["target_mass_density_g_cm3"] == pytest.approx(0.7)
+    assert simulation["box_executions"][-1]["failure_stage"] == "preflight"
+    assert simulation["box_executions"][-1]["output_before"]["exists"] is True
+    assert "protocol" not in simulation
+    assert protocol["mdp"]["stages"]["eq"]["actual_ns"] == pytest.approx(10.0)
+    assert load_manifest(tmp_path)["protocol"]["mdp"] == protocol["mdp"]
 
 
 def test_partial_mdp_regeneration_preserves_other_stage_metadata(tmp_path):
@@ -114,6 +173,18 @@ def test_short_final_hold_warns_and_disables_auto_acceptance(tmp_path):
     result = build_all(str(config), str(tmp_path), stages=("eq",))
     assert result.success is True
     assert any("禁止自动" in warning for warning in result.extra["warnings"])
+
+
+def test_potential_slope_acceptance_threshold_is_validated():
+    md = default_md_config()
+    md["eq"]["acceptance"]["max_potential_relative_slope_per_ns"] = 0.02
+    assert validate_md_config(md).valid
+
+    md["eq"]["acceptance"]["max_potential_relative_slope_per_ns"] = 0.0
+    assert any(
+        "max_potential_relative_slope_per_ns" in issue
+        for issue in validate_md_config(md).issues
+    )
 
 
 def test_eq_cannot_run_without_accepted_em(tmp_path):
@@ -327,7 +398,7 @@ def test_packing_number_density_changes_packmol_box_size_and_input():
 
 def test_mass_density_box_uses_topology_mass_and_explicit_pbc():
     components = [Component(pdb="one.pdb", count=2, residue_name="ONE", molecular_mass_amu=50.0)]
-    expected_side = estimate_box_size_from_mass(100.0, 1.5)
+    expected_side = estimate_box_size_from_mass(100.0, 0.7)
 
     generator = InpGenerator(InpConfig(components=components, output_dir="."))
     plan = generator.box_plan()
@@ -391,6 +462,61 @@ def test_packmol_uses_seekable_input_file(tmp_path, monkeypatch):
     assert calls[0][0] == ["packmol-test", "-i", str(tmp_path / "model.inp")]
     assert "input" not in calls[0][1]
     assert result.extra["box_parameters"]["actual_box_vectors_angstrom"] == [10.0, 10.0, 10.0]
+
+
+def test_packmol_failure_removes_stale_output_and_classifies_process_exit(tmp_path, monkeypatch):
+    import willy.simulation.box as box_module
+
+    component = tmp_path / "AR.pdb"
+    component.write_text("ATOM      1  AR  AR  A   1       0.000   0.000   0.000\nEND\n")
+    stale = tmp_path / "model.pdb"
+    stale.write_text(
+        "CRYST1   10.000   10.000   10.000  90.00  90.00  90.00 P 1           1\n"
+        + component.read_text()
+    )
+    config = InpConfig(
+        components=[Component(pdb=str(component), count=1)],
+        output_dir=str(tmp_path),
+        box_size=10.0,
+        packmol_bin="packmol-test",
+    )
+
+    def fake_run(args, **kwargs):
+        assert not stale.exists(), "a stale output must not satisfy this invocation"
+        return subprocess.CompletedProcess(args, 17, "", "packing failed")
+
+    monkeypatch.setattr(box_module.subprocess, "run", fake_run)
+    result = InpGenerator(config).run()
+
+    assert not result.success
+    assert result.error.kind is ErrorKind.PACKMOL_FAILED
+    evidence = result.extra["box_execution"]
+    assert evidence["failure_stage"] == "process_exit"
+    assert evidence["returncode"] == 17
+    assert evidence["output_before"]["exists"] is True
+    assert evidence["output_removed_before_run"] is True
+    assert evidence["output_after"]["exists"] is False
+
+
+def test_box_preflight_reports_missing_inputs_as_structured_evidence(tmp_path):
+    from willy.simulation.box import validate_box_preflight
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "residues": {"AR": 1},
+        "molecules": {},
+        "box": {"target_mass_density_g_cm3": 0.7},
+    }))
+    (tmp_path / "topol.top").write_text("[ molecules ]\nAR 1\n")
+
+    result = validate_box_preflight(config, tmp_path)
+
+    assert not result.success
+    assert result.error.kind is ErrorKind.INPUT_CONTRACT
+    evidence = result.extra["box_execution"]
+    assert evidence["failure_stage"] == "preflight"
+    assert "molecules.AR" in evidence["preflight_issues"]
+    assert "AR.pdb/.gro" in evidence["preflight_issues"]
 
 
 def test_grompp_default_does_not_force_warning_bypass(tmp_path, monkeypatch):

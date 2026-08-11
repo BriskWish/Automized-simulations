@@ -41,6 +41,7 @@ class ErrorKind(Enum):
 
     # GROMACS
     INPUT_CONTRACT = "input_contract"
+    PACKMOL_FAILED = "packmol_failed"
     ENGINE_FAILURE = "engine_failure"
     NUMERICAL_INSTABILITY = "numerical_instability"
     EQUILIBRATION_FAILED = "equilibration_failed"
@@ -88,6 +89,7 @@ _PUBLIC_ERROR_REASONS = {
     ErrorKind.LIGPARGEN_FAILED: "LigParGen 拓扑参数化失败",
     ErrorKind.ATOMTYPE_CONFLICT: "拓扑参数冲突",
     ErrorKind.INPUT_CONTRACT: "模拟输入契约不满足",
+    ErrorKind.PACKMOL_FAILED: "Packmol 建盒执行失败",
     ErrorKind.ENGINE_FAILURE: "GROMACS 引擎执行失败",
     ErrorKind.NUMERICAL_INSTABILITY: "模拟数值不稳定",
     ErrorKind.EQUILIBRATION_FAILED: "平衡验收未通过",
@@ -141,6 +143,7 @@ _RETRYABLE = {
     ErrorKind.FORMCHK_FAILED,
     ErrorKind.GROMPP_FAILED,
     ErrorKind.MDRUN_FAILED,
+    ErrorKind.PACKMOL_FAILED,
     ErrorKind.ENGINE_FAILURE,
     ErrorKind.NUMERICAL_INSTABILITY,
     ErrorKind.EQUILIBRATION_FAILED,

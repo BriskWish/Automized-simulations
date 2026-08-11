@@ -28,12 +28,19 @@ from willy.layer_agent import LayerAgent
 from willy.llm_config import LLMConfigError, configured_llm_client
 from willy.pipeline_state import PipelineStateMachine, State
 from willy.run_registry import RunRegistry, RunRegistryError
+from willy.structured_log import append_structured_event
 from willy.action_contract import build_default_tool_catalog
 from willy.recovery_policy import default_recovery_policy
 from willy.llm_budget import LLMBudget
 from willy.step_registry import EM_STEP, EQ_STEP, MDP_STEP, PACKMOL_STEP, PROD_STEP, STEP_REGISTRY
+from willy.quantum.input_audit import (
+    apply_audited_quantum_properties,
+    audit_config_quantum_inputs,
+    quantum_input_contract_issues,
+)
 
 ROOT = get_project_root()
+_SUPPORTED_QUANTUM_BACKENDS = frozenset({"g16", "g09", "orca"})
 
 class PipelineOrchestrator:
     """流水线编排器 —— 执行 10 步流水线，失败时调用 LLM Agent。支持断点续跑。"""
@@ -41,7 +48,9 @@ class PipelineOrchestrator:
     def __init__(self, backend: str = "g16", use_llm: bool = True,
                  resume_from: int = 0, resume_run_dir: str = "",
                  confirmed_action_id: str = ""):
-        self.backend = backend
+        self.backend = str(backend).strip().lower()
+        if self.backend not in _SUPPORTED_QUANTUM_BACKENDS:
+            raise ValueError("量子后端必须为 g16、g09 或 orca")
         self.use_llm = use_llm
         self.llm_client = None
         self.llm_model: str | None = None
@@ -54,6 +63,7 @@ class PipelineOrchestrator:
         self._rollback_attempts: dict[int, int] = {}
         self._rollback_to_step: int | None = None
         self._rerun_step: int | None = None
+        self._stop_after_step: int | None = None
         self._repair_rerun_attempts: dict[tuple[int, str], int] = {}
         self._confirmed_action_id = confirmed_action_id.strip()
         self._tool_catalog = build_default_tool_catalog()
@@ -134,6 +144,7 @@ class PipelineOrchestrator:
 
     def _build_steps(self, run_dir: Path) -> list[tuple]:
         from willy.quantum.struct_g16 import run_all as g16_struct
+        from willy.quantum.struct_g09 import run_all as g09_struct
         from willy.quantum.struct_orca import run_all as orca_struct
         from willy.quantum.chg_resp import batch_make_chg as chg_resp
         from willy.topology.backends import dispatch_topology
@@ -149,6 +160,22 @@ class PipelineOrchestrator:
             from willy.simulation.box import validate_box_preflight
             preflight = validate_box_preflight(config_path, rd)
             if not preflight.success:
+                # Preflight may stop before Packmol starts; persist the same
+                # bounded evidence so missing inputs are not confused with a
+                # Packmol process failure and stale output cannot look valid.
+                from willy.simulation.manifest import manifest_exists, record_box_execution
+                evidence = preflight.extra.get("box_execution")
+                if isinstance(evidence, dict) and manifest_exists(rd):
+                    try:
+                        record_box_execution(rd, evidence)
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        return StepResult(
+                            step_name="box", step_index=PACKMOL_STEP, success=False,
+                            error=StepError(
+                                ErrorKind.INPUT_CONTRACT,
+                                f"无法记录建盒前置证据: {exc}",
+                            ),
+                        )
                 return preflight
             try:
                 config = auto_from_config(
@@ -157,6 +184,12 @@ class PipelineOrchestrator:
                 gen = InpGenerator(config)
                 result = gen.run()
                 result.extra.setdefault("preflight", preflight.extra.get("preflight", {}))
+                from willy.simulation.manifest import ManifestError, manifest_exists, record_box_execution
+                evidence = result.extra.get("box_execution")
+                if not isinstance(evidence, dict) and manifest_exists(rd):
+                    raise ManifestError("Packmol 未返回执行证据")
+                if isinstance(evidence, dict) and manifest_exists(rd):
+                    record_box_execution(rd, evidence)
                 return result
             except (OSError, ValueError, RuntimeError) as exc:
                 return StepResult(
@@ -218,6 +251,29 @@ class PipelineOrchestrator:
                 ("Packmol 盒子",      lambda: _run_box(str(run_dir), cfg),
                  "box", False, 3),
             ] + gromacs_steps
+        if self.backend == "g09":
+            return [
+                ("g09 优化 + formchk", lambda: g09_struct(
+                    config_path=cfg, struct_dir=str(run_dir), on_progress=on_prog),
+                 "struct_g09", True, 1),
+                ("SP + mol2",           lambda: _g09_sp_and_mol2(
+                    cfg, on_prog, work_dir=run_dir),
+                 "sp_g09", True, 1),
+                ("RESP 电荷",           lambda: chg_resp(
+                    struct_dir=str(run_dir), config_path=cfg, on_progress=on_prog),
+                 "chg_resp", True, 1),
+                ("分子拓扑参数化",       lambda: dispatch_topology(
+                    config_path=cfg, workspace=run_dir, on_progress=on_prog),
+                 None, True, 2),
+                ("主拓扑 + 修订 itp",    lambda: build_top(
+                    config_path=cfg, topo_dir=str(run_dir)),
+                 None, False, 2),
+                ("生成 mdp",             lambda: build_mdp(
+                    config_path=cfg, output_dir=str(run_dir), on_progress=on_prog),
+                 None, False, 3),
+                ("Packmol 盒子",         lambda: _run_box(str(run_dir), cfg),
+                 "box", False, 3),
+            ] + gromacs_steps
         return [
             ("g16 优化 + formchk", lambda: g16_struct(
                 config_path=cfg, struct_dir=str(run_dir), on_progress=on_prog),
@@ -244,10 +300,10 @@ class PipelineOrchestrator:
     def _prepare_run_directory(self, run_dir: Path) -> Path:
         """Create an isolated run workspace from the immutable project inputs.
 
-        A precomputed Step 1 result is optional.  For the selected backend it
-        is copied into the run workspace when available; otherwise the source
-        ``.gjf`` is copied and Step 1 will create the intermediate normally.
-        A molecule is invalid only when neither form of quantum input exists.
+        The raw source is mandatory and backend-specific: G16 consumes
+        ``.gjf`` and ORCA consumes ``.inp``.  A precomputed Step 1 result is
+        optional and may be copied for reuse, but can never replace the raw
+        input audit or raw-source snapshot.
         """
         run_dir.mkdir(parents=True, exist_ok=True)
         config_source = ROOT / "config.json"
@@ -269,7 +325,6 @@ class PipelineOrchestrator:
         )
         from willy.env_registry import public_capabilities
         capabilities = public_capabilities()
-        self._run_registry.record_environment_report(run_dir, capabilities)
         self._sm.bind_status_path(run_dir / "status.json")
         self._sm.bind_observer(self._record_run_status)
         self._sm.set_extra(run_id=run_dir.name)
@@ -277,42 +332,71 @@ class PipelineOrchestrator:
         with config_snapshot.open() as f:
             config = json.load(f)
         from willy.workflow_config import validate_config
+        configured_backend = str(config.get("backend", "g16")).strip().lower()
+        if configured_backend != self.backend:
+            raise ValueError(
+                f"配置量子后端 {configured_backend!r} 与启动后端 {self.backend!r} 不一致"
+            )
+        audit = audit_config_quantum_inputs(config, struct_dir=ROOT / "struct")
+        if not audit.get("ok"):
+            raise ValueError("量子输入审计未通过: " + "; ".join(audit.get("issues", [])))
+        proposed_input_issues = quantum_input_contract_issues(config, audit)
+        if proposed_input_issues:
+            raise ValueError("量子输入与已确认方案不一致: " + "; ".join(proposed_input_issues))
+        config = apply_audited_quantum_properties(config, audit)
+        input_issues = quantum_input_contract_issues(config, audit)
+        if input_issues:
+            raise ValueError("量子输入契约无效: " + "; ".join(input_issues))
+        from willy.remote_registry import merge_execution_md_defaults
+        self._stop_after_step = None
+        execution = config.get("execution")
+        if isinstance(execution, dict):
+            execution["md"] = merge_execution_md_defaults(execution.get("md"))
+        elif execution is None:
+            config["execution"] = {"md": merge_execution_md_defaults(None)}
         issues = validate_config(config)
         if issues:
             raise ValueError("配置契约无效: " + "; ".join(issues))
+        if config.get("execution", {}).get("stop_after_stage") == "eq":
+            self._stop_after_step = EQ_STEP
         md = config.setdefault("md", {})
         run_seed = md.get("run_seed")
         if run_seed is None:
             run_seed = secrets.randbelow(2_147_483_646) + 1
             md["run_seed"] = run_seed
-            write_json(config_snapshot, config)
         else:
             run_seed = int(run_seed)
-        reusable_suffix = ".fchk" if self.backend == "g16" else ".molden"
+        # Persist source-authoritative charge/spin even when the seed existed.
+        write_json(config_snapshot, config)
+        # Registration precedes this final snapshot write; refresh the registry
+        # hash after all audited fields and the run seed are persisted.
+        self._run_registry.refresh_config_fingerprint(run_dir)
+        reusable_suffix = ".fchk" if self.backend in {"g16", "g09"} else ".molden"
+        raw_suffix = ".gjf" if self.backend in {"g16", "g09"} else ".inp"
         missing_quantum_inputs: list[str] = []
         for name in config.get("molecules", {}):
-            source_gjf = ROOT / "struct" / f"{name}.gjf"
+            source_input = ROOT / "struct" / f"{name}{raw_suffix}"
             source_intermediate = ROOT / "struct" / f"{name}{reusable_suffix}"
-            target_gjf = run_dir / source_gjf.name
+            target_input = run_dir / source_input.name
             target_intermediate = run_dir / source_intermediate.name
 
+            if not source_input.is_file():
+                missing_quantum_inputs.append(name)
+                continue
+            if not target_input.exists():
+                shutil.copy2(source_input, target_input)
             if source_intermediate.is_file():
                 if not target_intermediate.exists():
                     shutil.copy2(source_intermediate, target_intermediate)
-                continue
-            if source_gjf.is_file():
-                # Missing .fchk/.molden is an expected new-run condition.  It
-                # must reach the Step 1 optimizer without becoming a UI error.
-                if not target_gjf.exists():
-                    shutil.copy2(source_gjf, target_gjf)
-                continue
-            missing_quantum_inputs.append(name)
 
         if missing_quantum_inputs:
-            expected = f"{reusable_suffix} 或 .gjf"
             raise ValueError(
-                f"缺少量子输入（{expected}）: {', '.join(missing_quantum_inputs)}"
+                f"缺少 {raw_suffix} 原始量子输入: {', '.join(missing_quantum_inputs)}"
             )
+        # The RunRegistry was created before copying inputs so early status
+        # writes have an owner.  Refresh only its frozen input fingerprints
+        # now that this run's backend-specific sources are present.
+        self._run_registry.refresh_input_files(run_dir)
 
         for agent in self._agents.values():
             if agent is not None and hasattr(agent, "set_workspace"):
@@ -365,6 +449,14 @@ class PipelineOrchestrator:
             self._sm.transition(State.ABORTED)
             return False
 
+        append_structured_event(
+            run_dir,
+            "run_started",
+            source="orchestrator",
+            layer="pipeline",
+            outcome="started",
+            message_code="run.started",
+        )
         print(f"[orchestrator] 运行目录: {run_dir}")
         print(f"[orchestrator] 后端: {self.backend}")
         print(f"[orchestrator] LLM Agent: {'启用' if self.use_llm else '禁用'}")
@@ -387,12 +479,32 @@ class PipelineOrchestrator:
             label, func, dep_module, is_batch, layer_index = steps[i - 1]
             # ── 断点续跑：跳过已完成步骤 ──
             if i <= self._resume_from:
+                append_structured_event(
+                    run_dir,
+                    "step_skipped",
+                    step=i,
+                    step_name=label,
+                    layer=STEP_REGISTRY.layer_for(i),
+                    source="orchestrator",
+                    outcome="skipped",
+                    message_code="step.resume_skip",
+                )
                 print(f"\n  {i}/{len(steps)} {label}  ⏭ 已完成，跳过")
                 step_position += 1
                 continue
 
             self._sm.set_step(i, label, STEP_REGISTRY.layer_for(i))
             self._sm.set_activity(**self._initial_activity(i))
+            append_structured_event(
+                run_dir,
+                "step_started",
+                step=i,
+                step_name=label,
+                layer=STEP_REGISTRY.layer_for(i),
+                source="orchestrator",
+                outcome="started",
+                message_code="step.started",
+            )
 
             if dep_module:
                 try:
@@ -433,7 +545,42 @@ class PipelineOrchestrator:
                     self._sm.transition(State.ABORTED)
                     print(f"[{label}] ❌ 阶段完成契约未满足，禁止进入下一步")
                     return False
+                visualization_failure = self._prod_visualization_contract_failure(i, run_dir)
+                if visualization_failure is not None:
+                    self._record_step_result(visualization_failure, label)
+                    self._set_public_error(visualization_failure.error, visualization_failure.target)
+                    self._sm.transition(State.ABORTED)
+                    print(f"[{label}] ❌ PROD 可视化产物契约未满足，禁止结束流程")
+                    return False
+                cleanup_failure = self._prod_intermediate_cleanup_contract_failure(i, run_dir)
+                if cleanup_failure is not None:
+                    self._record_step_result(cleanup_failure, label)
+                    self._set_public_error(cleanup_failure.error, cleanup_failure.target)
+                    self._sm.transition(State.ABORTED)
+                    print(f"[{label}] ❌ PROD 收尾清理未完成，禁止结束流程")
+                    return False
                 self._sm.mark_done(i)
+                if STEP_REGISTRY.stage_for(i) != "prod":
+                    self._schedule_stage_visualization(run_dir, i)
+                if self._stop_after_step == i:
+                    self._sm.set_extra(completion_scope={
+                        "mode": "through_eq",
+                        "step": i,
+                        "stage": "eq",
+                    })
+                    self._sm.transition(
+                        State.DONE,
+                        step=i,
+                        step_label=label,
+                        layer=STEP_REGISTRY.layer_for(i),
+                    )
+                    print(
+                        f"\n{'='*60}\n"
+                        f"  ✅ 已按测试范围完成至 EQ\n"
+                        f"  产物: {run_dir}/\n"
+                        f"{'='*60}"
+                    )
+                    return True
                 step_position += 1
             else:
                 return False
@@ -516,7 +663,7 @@ class PipelineOrchestrator:
                     output_keys=("eq", "prod") if success else (),
                     error_kind=error_kind,
                 )
-                self._run_registry.append_decision_trace(run_dir, {
+                self._record_agent_decision({
                     "decision_id": executed.decision_id,
                     "action_id": executed.decision_id,
                     "layer": executed.action.proposal.layer,
@@ -572,6 +719,16 @@ class PipelineOrchestrator:
             label, func, dep_module, _is_batch, layer_index = steps[step_i - 1]
             self._sm.set_step(step_i, label, STEP_REGISTRY.layer_for(step_i))
             self._sm.set_activity(**self._initial_activity(step_i))
+            append_structured_event(
+                run_dir,
+                "step_started",
+                step=step_i,
+                step_name=label,
+                layer=STEP_REGISTRY.layer_for(step_i),
+                source="controlled_retry",
+                outcome="started",
+                message_code="step.started",
+            )
             if dep_module:
                 try:
                     ensure(dep_module)
@@ -597,7 +754,25 @@ class PipelineOrchestrator:
                 kind = completion_failure.error.kind.value if completion_failure.error else ErrorKind.UNKNOWN.value
                 record_execution(False, "确认后的重跑未满足阶段产物契约", kind)
                 return False
+            visualization_failure = self._prod_visualization_contract_failure(step_i, run_dir)
+            if visualization_failure is not None:
+                self._record_step_result(visualization_failure, label)
+                self._set_public_error(visualization_failure.error, visualization_failure.target)
+                self._sm.transition(State.ABORTED)
+                kind = visualization_failure.error.kind.value if visualization_failure.error else ErrorKind.UNKNOWN.value
+                record_execution(False, "确认后的重跑未生成 PROD 可视化产物", kind)
+                return False
+            cleanup_failure = self._prod_intermediate_cleanup_contract_failure(step_i, run_dir)
+            if cleanup_failure is not None:
+                self._record_step_result(cleanup_failure, label)
+                self._set_public_error(cleanup_failure.error, cleanup_failure.target)
+                self._sm.transition(State.ABORTED)
+                kind = cleanup_failure.error.kind.value if cleanup_failure.error else ErrorKind.UNKNOWN.value
+                record_execution(False, "确认后的重跑未完成 PROD 收尾清理", kind)
+                return False
             self._sm.mark_done(step_i)
+            if STEP_REGISTRY.stage_for(step_i) != "prod":
+                self._schedule_stage_visualization(run_dir, step_i)
 
         self._sm.transition(State.DONE)
         record_execution(True, "确认后的 EQ 重跑及 PROD 已完成")
@@ -632,6 +807,24 @@ class PipelineOrchestrator:
         """Mirror state into the active run; failures are handled by the observer."""
         if self._run_registry is not None and self._run_dir is not None:
             self._run_registry.record_status(self._run_dir, status.__dict__, event_type)
+            # Heartbeats remain in their dedicated ETA stream; all other
+            # state/activity updates are compact run-local structured facts.
+            if event_type != "runtime_heartbeat":
+                extra = status.extra if isinstance(status.extra, dict) else {}
+                pending = extra.get("pending_action", {})
+                action_id = pending.get("action_id") if isinstance(pending, dict) else None
+                append_structured_event(
+                    self._run_dir,
+                    "state_changed",
+                    step=status.step,
+                    step_name=status.step_label,
+                    layer=status.layer,
+                    source="state_machine",
+                    outcome=status.state,
+                    error_kind=status.error_kind or None,
+                    action_id=action_id,
+                    message_code=event_type,
+                )
 
     def _record_agent_decision(self, trace: dict[str, object]) -> None:
         """Persist one bounded Agent decision only after a run is bound."""
@@ -641,10 +834,58 @@ class PipelineOrchestrator:
             self._run_registry.append_decision_trace(self._run_dir, trace)
         except OSError:
             pass
+        append_structured_event(
+            self._run_dir,
+            "decision_recorded",
+            step=trace.get("step"),
+            layer=trace.get("layer"),
+            source="agent",
+            outcome=trace.get("result") or ("accepted" if trace.get("success") else "proposed"),
+            error_kind=trace.get("error_kind"),
+            action_id=trace.get("action_id") or trace.get("decision_id"),
+            policy_id=trace.get("policy_id"),
+            model_id=trace.get("model_id"),
+            prompt_version=trace.get("prompt_version"),
+            parameter_fields=trace.get("parameter_changes"),
+            message_code="decision.trace",
+        )
 
     def _record_step_result(self, result: StepResult, label: str, source: str = "pipeline") -> None:
         """Add a read-only audit record without changing pipeline success semantics."""
-        if self._run_registry is None or self._run_dir is None:
+        if self._run_dir is None:
+            return
+        # Constructing an observational record must never reject an otherwise
+        # valid StepResult (for example, a legacy fixture with an unknown index).
+        try:
+            layer = STEP_REGISTRY.layer_for(result.step_index)
+        except (AttributeError, TypeError, ValueError):
+            layer = None
+        try:
+            duration_ms = max(0.0, float(result.duration_s) * 1000.0)
+        except (AttributeError, TypeError, ValueError):
+            duration_ms = None
+        try:
+            artifact_refs = list(result.outputs.keys()) if isinstance(result.outputs, dict) else None
+        except (AttributeError, TypeError):
+            artifact_refs = None
+        try:
+            error_kind = result.error.kind.value if result.error else None
+            append_structured_event(
+                self._run_dir,
+                "step_result",
+                step=result.step_index,
+                step_name=label or result.step_name,
+                layer=layer,
+                source=source,
+                outcome="succeeded" if result.success else "failed",
+                error_kind=error_kind,
+                duration_ms=duration_ms,
+                artifact_refs=artifact_refs,
+                message_code="step.result",
+            )
+        except Exception:
+            pass
+        if self._run_registry is None:
             return
         try:
             self._run_registry.record_step_result(
@@ -659,7 +900,7 @@ class PipelineOrchestrator:
 
     def _initial_activity(self, step: int) -> dict:
         """Return a public, Chinese activity placeholder before a callback fires."""
-        backend_tool = "ORCA" if self.backend == "orca" else "G16"
+        backend_tool = {"g16": "G16", "g09": "G09", "orca": "ORCA"}[self.backend]
         activities = {
             STEP_REGISTRY.by_id("quantum_optimize").index: (backend_tool, "结构优化", "molecule", "待处理分子", 0, 0),
             STEP_REGISTRY.by_id("quantum_singlepoint_mol2").index: (backend_tool, "单点计算与 mol2 转换", "molecule", "待处理分子", 0, 0),
@@ -892,23 +1133,18 @@ class PipelineOrchestrator:
                 create_eq_pending_action,
                 public_pending_action,
             )
-            eq_result = result.extra.get("eq_result")
-            details = getattr(eq_result, "details", {})
-            vacuum = details.get("vacuum", {}) if isinstance(details, dict) else {}
             requires_box_rebuild = result.extra.get("rollback_to_step") == PACKMOL_STEP
             action = create_eq_pending_action(
                 run_dir,
                 proposal=proposal,
-                requires_box_rebuild=requires_box_rebuild or bool(
-                    isinstance(vacuum, dict) and vacuum.get("detected")
-                ),
+                requires_box_rebuild=requires_box_rebuild,
             )
             self._sm.set_awaiting_confirmation(public_pending_action(action))
             if self._run_registry is not None:
                 try:
                     from willy.simulation.pending_action import pending_action_validated
                     validated = pending_action_validated(action)
-                    self._run_registry.append_decision_trace(run_dir, {
+                    self._record_agent_decision({
                         "decision_id": validated.decision_id,
                         "action_id": validated.decision_id,
                         "layer": validated.proposal.layer,
@@ -974,7 +1210,7 @@ class PipelineOrchestrator:
             return 1
 
     def _adjust_box_density(self, multiplier: float) -> str:
-        """Persist a bounded EQ-vacuum repair in the isolated run snapshot only."""
+        """Persist a bounded simulation recovery adjustment in one run snapshot."""
         config_path = self._run_config_path
         if config_path is None:
             return ""
@@ -993,7 +1229,7 @@ class PipelineOrchestrator:
             label = "初始质量密度" if uses_mass_density else "填充数密度"
             return f"已将{label}调整为原来的 {multiplier:.2f} 倍"
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            self._sm.add_action(f"无法持久化 EQ 真空区的密度修复: {exc}")
+            self._sm.add_action(f"无法持久化模拟建盒密度修复: {exc}")
             return ""
 
     @staticmethod
@@ -1009,6 +1245,120 @@ class PipelineOrchestrator:
             path = run_dir / name
             if path.is_file():
                 path.unlink()
+        from willy.simulation.visualization import clear_stage_visualization_artifact
+        for stage in ("em", "eq", "prod"):
+            clear_stage_visualization_artifact(run_dir, stage)
+
+    @staticmethod
+    def _schedule_stage_visualization(run_dir: Path, step_index: int) -> None:
+        """Create a display-only PDB after an MD stage is fully accepted."""
+        stage = STEP_REGISTRY.stage_for(step_index)
+        if stage not in {"em", "eq", "prod"}:
+            return
+        try:
+            from willy.simulation.visualization import schedule_accepted_stage_visualization
+            schedule_accepted_stage_visualization(run_dir, stage)
+        except (OSError, ValueError):
+            # The viewer is an optional consumer, never a pipeline dependency.
+            return
+
+    @staticmethod
+    def _prod_visualization_contract_failure(
+        step_index: int,
+        run_dir: Path,
+    ) -> StepResult | None:
+        """Synchronously publish PROD PDB before granting pipeline completion.
+
+        EM/EQ viewer files remain best-effort background artifacts.  PROD is
+        different because it is the final stage: returning from the runner
+        would terminate daemon conversion workers and could leave only a
+        temporary PDB.  A successful conversion is therefore a finalization
+        contract, while its failure aborts the run without marking PROD done.
+        """
+        if STEP_REGISTRY.stage_for(step_index) != "prod":
+            return None
+        try:
+            from willy.simulation.visualization import convert_stage_gro_to_pdb
+            result = convert_stage_gro_to_pdb(run_dir, "prod")
+        except (OSError, ValueError) as exc:
+            reason = str(exc) or "转换器调用失败"
+            return StepResult(
+                step_name="prod",
+                step_index=step_index,
+                success=False,
+                error=StepError(
+                    ErrorKind.INPUT_CONTRACT,
+                    f"PROD 可视化产物验收失败: {reason}",
+                ),
+                target_type="stage",
+                target="prod",
+            )
+        if result.success:
+            return None
+        return StepResult(
+            step_name="prod",
+            step_index=step_index,
+            success=False,
+            error=StepError(
+                ErrorKind.INPUT_CONTRACT,
+                f"PROD 可视化产物验收失败: {result.reason or '未知原因'}",
+            ),
+            target_type="stage",
+            target="prod",
+        )
+
+    @staticmethod
+    def _prod_intermediate_cleanup_contract_failure(
+        step_index: int,
+        run_dir: Path,
+    ) -> StepResult | None:
+        """Remove only named, regenerateable artifacts before accepting PROD.
+
+        The cleanup is intentionally limited to direct children of the current
+        run directory.  Names come from its frozen configuration so stage
+        outputs (``em/eq/prod.gro``), ``.fchk`` files, topology, trajectories,
+        and MD logs cannot be selected by a wildcard.
+        """
+        if STEP_REGISTRY.stage_for(step_index) != "prod":
+            return None
+        try:
+            config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+            molecules = config.get("molecules", {})
+            if not isinstance(molecules, dict):
+                raise ValueError("运行配置中的 molecules 无效")
+            molecule_names = list(molecules)
+            if any(
+                not isinstance(name, str)
+                or not name
+                or name in {".", ".."}
+                or Path(name).name != name
+                or "\\" in name
+                for name in molecule_names
+            ):
+                raise ValueError("运行配置包含无效分子名")
+
+            paths = [
+                run_dir / f"{name}{suffix}"
+                for name in molecule_names
+                for suffix in (".chg", ".chk", ".gro", ".log", "_opt.chk", "_opt.log")
+            ]
+            paths.extend(run_dir.glob("*_out.mdp"))
+            for path in paths:
+                if path.is_file():
+                    path.unlink()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return StepResult(
+                step_name="prod",
+                step_index=step_index,
+                success=False,
+                error=StepError(
+                    ErrorKind.INPUT_CONTRACT,
+                    f"PROD 收尾清理失败: {str(exc) or '未知原因'}",
+                ),
+                target_type="stage",
+                target="prod",
+            )
+        return None
 
     def _invoke_agent(self, step_result: StepResult, label: str,
                        run_dir: Path, artifacts: dict, layer_index: int) -> bool:
@@ -1321,11 +1671,14 @@ def _g16_sp_and_mol2(config_path: str, on_progress=None,
                      work_dir: str | Path | None = None) -> list:
     """Step 2 (G16): *_opt.fchk → *_opt.fchk + .mol2."""
     import json
+    from willy.execution_resources import resolve_nproc
     from willy.quantum.singlepoint_g16 import run as sp_run
     from willy.quantum.fchk_mol2 import convert as mol2_convert
 
     with open(config_path) as f:
-        molecules = json.load(f).get("molecules", {})
+        config = json.load(f)
+    molecules = config.get("molecules", {})
+    defaults = config.get("defaults", {})
 
     workspace = Path(work_dir) if work_dir is not None else ROOT / "struct"
     results = []
@@ -1347,7 +1700,66 @@ def _g16_sp_and_mol2(config_path: str, on_progress=None,
             continue
         charge = cfg.get("charge", 0)
         spin = cfg.get("spin", 1)
-        sr = sp_run(fchk_path, charge=charge, spin=spin, workdir=str(workspace))
+        mem = cfg.get("mem") or defaults.get("mem", "5GB")
+        nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
+        sr = sp_run(
+            fchk_path, charge=charge, spin=spin, workdir=str(workspace),
+            mem=mem, nproc=nproc,
+        )
+        if sr.success:
+            opt_fchk = sr.outputs["fchk"]
+            sr2 = mol2_convert(opt_fchk)
+            if sr2.success:
+                sr.outputs["mol2"] = sr2.outputs["mol2"]
+                sr.artifacts.extend(sr2.artifacts)
+            else:
+                sr.success = False
+                sr.error = sr2.error
+        sr.target_type = "molecule"
+        sr.target = name
+        results.append(sr)
+    return results
+
+
+def _g09_sp_and_mol2(config_path: str, on_progress=None,
+                     work_dir: str | Path | None = None) -> list:
+    """Step 2 (G09): *_opt.fchk → *_opt.fchk + .mol2."""
+    import json
+    from willy.execution_resources import resolve_nproc
+    from willy.quantum.singlepoint_g09 import run as sp_run
+    from willy.quantum.fchk_mol2 import convert as mol2_convert
+
+    with open(config_path) as f:
+        config = json.load(f)
+    molecules = config.get("molecules", {})
+    defaults = config.get("defaults", {})
+
+    workspace = Path(work_dir) if work_dir is not None else ROOT / "struct"
+    results = []
+    total = len(molecules)
+    for i, (name, cfg) in enumerate(molecules.items(), 1):
+        if on_progress:
+            on_progress({
+                "tool": "G09", "operation": "单点计算与 mol2 转换",
+                "target_type": "molecule", "target": name,
+                "current": i, "total": total,
+            })
+        fchk_path = str(workspace / f"{name}.fchk")
+        if not Path(fchk_path).exists():
+            results.append(StepResult(
+                step_name="sp_mol2_g09", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{name}.fchk 不存在，需先运行 Step 1 结构优化"),
+                target_type="molecule", target=name))
+            continue
+        charge = cfg.get("charge", 0)
+        spin = cfg.get("spin", 1)
+        mem = cfg.get("mem") or defaults.get("mem", "5GB")
+        nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
+        sr = sp_run(
+            fchk_path, charge=charge, spin=spin, workdir=str(workspace),
+            mem=mem, nproc=nproc,
+        )
         if sr.success:
             opt_fchk = sr.outputs["fchk"]
             sr2 = mol2_convert(opt_fchk)
@@ -1365,13 +1777,16 @@ def _g16_sp_and_mol2(config_path: str, on_progress=None,
 
 def _orca_sp_and_mol2(config_path: str, on_progress=None,
                       work_dir: str | Path | None = None) -> list:
-    """Step 2 (ORCA): *_opt.molden → *_opt.fchk → .mol2."""
+    """Step 2 (ORCA): *_opt.molden → .mol2; retain *_opt.fchk for RESP."""
     import json
+    from willy.execution_resources import memory_to_mb, resolve_nproc
     from willy.quantum.singlepoint_orca import run as sp_run
-    from willy.quantum.fchk_mol2 import convert as mol2_convert
+    from willy.quantum.molden_mol2 import convert as molden_to_mol2
 
     with open(config_path) as f:
-        molecules = json.load(f).get("molecules", {})
+        config = json.load(f)
+    molecules = config.get("molecules", {})
+    defaults = config.get("defaults", {})
 
     workspace = Path(work_dir) if work_dir is not None else ROOT / "struct"
     results = []
@@ -1393,10 +1808,15 @@ def _orca_sp_and_mol2(config_path: str, on_progress=None,
             continue
         charge = cfg.get("charge", 0)
         spin = cfg.get("spin", 1)
-        sr = sp_run(molden_path, charge=charge, spin=spin, workdir=str(workspace))
+        nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
+        mem_mb = memory_to_mb(cfg.get("mem") or defaults.get("mem", "5GB"))
+        sr = sp_run(
+            molden_path, charge=charge, spin=spin, workdir=str(workspace),
+            nproc=nproc, mem_mb=mem_mb,
+        )
         if sr.success:
-            opt_fchk = sr.outputs["fchk"]
-            sr2 = mol2_convert(opt_fchk)
+            opt_molden = sr.outputs.get("molden") or str(workspace / f"{name}_opt.molden")
+            sr2 = molden_to_mol2(opt_molden)
             if sr2.success:
                 sr.outputs["mol2"] = sr2.outputs["mol2"]
                 sr.artifacts.extend(sr2.artifacts)

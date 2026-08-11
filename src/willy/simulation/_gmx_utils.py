@@ -19,6 +19,7 @@ import subprocess
 import time
 
 from willy.errors import ErrorKind, StepError, StepResult
+from willy.execution_resources import nproc_from_config, resolve_nproc
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.simulation.manifest import (
     RunLock,
@@ -27,7 +28,9 @@ from willy.simulation.manifest import (
     estimate_output_bytes,
     has_disk_capacity,
     initialize_manifest,
+    load_mdp_metadata,
     load_manifest,
+    manifest_exists,
     prepare_stage_attempt,
     record_stage_result,
     require_prior_stage,
@@ -43,6 +46,7 @@ from willy.simulation.mdrun_eta import (
     heartbeat_mdrun_eta,
 )
 from willy.process_lifecycle import ProcessTerminationController, record_process_lifecycle
+from willy.structured_log import append_structured_event
 from willy.step_registry import EM_STEP, STEP_REGISTRY
 
 
@@ -51,6 +55,17 @@ _STAGE_STEP_INDEX = {
     for stage in ("em", "eq", "prod")
 }
 _DEFAULT_COORDINATE = {"em": "model.pdb", "eq": "em.gro", "prod": "eq.gro"}
+GROMPP_NET_CHARGE_TOLERANCE_E = 0.15
+_NET_CHARGE_RE = re.compile(
+    r"System\s+has\s+non-zero\s+total\s+charge:\s*"
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
+    re.IGNORECASE,
+)
+_GROMPP_WARNING_HEADER_RE = re.compile(r"^\s*WARNING\s+\d+\s+\[", re.MULTILINE)
+_EWALD_NET_CHARGE_RE = re.compile(
+    r"using\s+Ewald\s+electrostatics\s+in\s+a\s+system\s+with\s+net\s+charge",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -171,7 +186,7 @@ def prepare_stage_execution(
     config_path = inputs.work_dir / "config.json"
     if not config_path.is_file():
         raise ManifestError("每个 GROMACS 阶段必须使用 run 内固化的 config.json")
-    if not (inputs.work_dir / "md_manifest.json").is_file():
+    if not manifest_exists(inputs.work_dir):
         try:
             config = json.loads(config_path.read_text())
             seed = int(config.get("md", {}).get("run_seed", 1))
@@ -263,6 +278,13 @@ def _load_output_trr(config_path: Path) -> bool:
 
 
 def _stage_mdp_metadata(work_dir: Path, stage: str) -> dict:
+    try:
+        metadata = load_mdp_metadata(work_dir)
+        value = metadata.get("stages", {}).get(stage, {})
+        if isinstance(value, dict):
+            return value
+    except ManifestError:
+        pass
     path = work_dir / "mdp_metadata.json"
     if path.is_file():
         try:
@@ -320,6 +342,17 @@ def run_gmx(
             env=gmx_env,
         )
         started_at = time.monotonic()
+        last_structured_heartbeat_at = started_at
+        append_structured_event(
+            cwd,
+            "process_started",
+            step=_STAGE_STEP_INDEX.get(args[0]) if args else None,
+            step_name=args[0] if args else None,
+            layer="simulation",
+            source="gromacs",
+            outcome="started",
+            message_code="process.started",
+        )
         pending_input = input_text
         termination: ProcessTerminationController | None = None
         timed_out = False
@@ -345,11 +378,41 @@ def run_gmx(
                 if termination is not None:
                     termination.finish()
                     record_process_lifecycle(cwd, termination, command=command, returncode=result.returncode)
+                append_structured_event(
+                    cwd,
+                    "process_finished",
+                    step=_STAGE_STEP_INDEX.get(args[0]) if args else None,
+                    step_name=args[0] if args else None,
+                    layer="simulation",
+                    source="gromacs",
+                    outcome=(
+                        "timed_out" if timed_out
+                        else "succeeded" if result.returncode == 0
+                        else "failed"
+                    ),
+                    error_kind=termination.reason if termination is not None else None,
+                    duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+                    message_code="process.finished",
+                )
                 if timed_out:
                     raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
                 return result
             except subprocess.TimeoutExpired:
                 pending_input = None
+                now = time.monotonic()
+                if now - last_structured_heartbeat_at >= MDRUN_HEARTBEAT_INTERVAL_S:
+                    append_structured_event(
+                        cwd,
+                        "process_heartbeat",
+                        step=_STAGE_STEP_INDEX.get(args[0]) if args else None,
+                        step_name=args[0] if args else None,
+                        layer="simulation",
+                        source="gromacs",
+                        outcome="running",
+                        duration_ms=max(0.0, (now - started_at) * 1000.0),
+                        message_code="process.heartbeat",
+                    )
+                    last_structured_heartbeat_at = now
                 if termination is None and stop_requested(cwd):
                     termination = ProcessTerminationController(process)
                     termination.request("stop_requested")
@@ -378,6 +441,16 @@ def _run_mdrun_with_live_eta(
         start_new_session=True,
         env=build_tool_env("gmx"),
     )
+    append_structured_event(
+        cwd,
+        "process_started",
+        step=_STAGE_STEP_INDEX.get(stage),
+        step_name=stage,
+        layer="simulation",
+        source="gromacs",
+        outcome="started",
+        message_code="mdrun.started",
+    )
     if input_text is not None and process.stdin is not None:
         process.stdin.write(input_text.encode())
         process.stdin.close()
@@ -403,6 +476,16 @@ def _run_mdrun_with_live_eta(
                     except Exception:
                         # Status observation must never interrupt an engine run.
                         pass
+                append_structured_event(
+                    cwd,
+                    "process_heartbeat",
+                    step=_STAGE_STEP_INDEX.get(stage),
+                    step_name=stage,
+                    layer="simulation",
+                    source="gromacs",
+                    outcome=snapshot.get("status") if isinstance(snapshot, dict) else "running",
+                    message_code="mdrun.heartbeat",
+                )
                 next_heartbeat_at = now + MDRUN_HEARTBEAT_INTERVAL_S
             if timeout is not None and time.monotonic() - started_at >= timeout:
                 if termination is None:
@@ -436,6 +519,23 @@ def _run_mdrun_with_live_eta(
                 returncode=returncode,
                 checkpoint_exists=(cwd / f"{stage}.cpt").is_file(),
             )
+        append_structured_event(
+            cwd,
+            "process_finished",
+            step=_STAGE_STEP_INDEX.get(stage),
+            step_name=stage,
+            layer="simulation",
+            source="gromacs",
+            outcome=(
+                "timed_out" if timed_out
+                else "stopped" if stopped
+                else "succeeded" if returncode == 0
+                else "failed"
+            ),
+            error_kind=termination.reason if termination is not None else None,
+            duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+            message_code="mdrun.finished",
+        )
         if timed_out:
             raise subprocess.TimeoutExpired(
                 command, timeout,
@@ -469,6 +569,7 @@ def grompp_and_mdrun(
     topol: str | Path | None = None,
     itps: Iterable[str | Path] | None = None,
     tpr: str | Path | None = None,
+    nproc: int | None = None,
     extra_grompp: list[str] | None = None,
     extra_mdrun: list[str] | None = None,
     continuation_checkpoint: str | Path | None = None,
@@ -557,19 +658,49 @@ def grompp_and_mdrun(
             duration_s=time.time() - started_at,
             extra={"inputs": _inputs_dict(inputs)},
         )
+    grompp_warning_policy: dict[str, object] | None = None
     if grompp.returncode != 0:
         raw = _stderr_tail(grompp)
-        return StepResult(
-            step_name=f"md_{stage}", step_index=step_index, success=False,
-            error=StepError(
-                kind=ErrorKind.INPUT_CONTRACT,
-                message=f"{stage}: grompp 失败",
-                raw_output=raw,
-                hint=_grompp_hint(raw),
-            ),
-            duration_s=time.time() - started_at,
-            extra={"inputs": _inputs_dict(inputs)},
-        )
+        warning_policy = _permitted_net_charge_warning(grompp)
+        if warning_policy is not None:
+            # This is a narrow, evidence-based exception for charge rounding
+            # in generated topologies.  It never turns caller-supplied
+            # arbitrary warnings into an accepted input.
+            retry = run_gmx(
+                [*grompp_args, "-maxwarn", "1"], inputs.work_dir, timeout=60,
+            )
+            if retry.returncode == 0:
+                grompp_warning_policy = warning_policy
+                grompp_warning_policy["maxwarn"] = 1
+                grompp = retry
+            else:
+                raw = _stderr_tail(retry)
+                return StepResult(
+                    step_name=f"md_{stage}", step_index=step_index, success=False,
+                    error=StepError(
+                        kind=ErrorKind.INPUT_CONTRACT,
+                        message=f"{stage}: grompp 失败",
+                        raw_output=raw,
+                        hint=_grompp_hint(raw),
+                    ),
+                    duration_s=time.time() - started_at,
+                    extra={
+                        "inputs": _inputs_dict(inputs),
+                        "grompp_warning_policy": warning_policy,
+                    },
+                )
+        else:
+            return StepResult(
+                step_name=f"md_{stage}", step_index=step_index, success=False,
+                error=StepError(
+                    kind=ErrorKind.INPUT_CONTRACT,
+                    message=f"{stage}: grompp 失败",
+                    raw_output=raw,
+                    hint=_grompp_hint(raw),
+                ),
+                duration_s=time.time() - started_at,
+                extra={"inputs": _inputs_dict(inputs)},
+            )
 
     if on_progress:
         on_progress({
@@ -578,6 +709,8 @@ def grompp_and_mdrun(
             "current": 2, "total": 2,
         })
 
+    configured_nproc = nproc_from_config(inputs.work_dir / "config.json")
+    effective_nproc = resolve_nproc(nproc, configured_nproc)
     mdrun_args = ["mdrun", "-s", str(inputs.tpr), "-deffnm", stage, "-v"]
     if append:
         if continuation_checkpoint is None:
@@ -591,6 +724,14 @@ def grompp_and_mdrun(
                 extra={"inputs": _inputs_dict(inputs)},
             )
         mdrun_args.extend(["-cpi", str(continuation_checkpoint), "-append"])
+    resource_flags = ("-nt", "-ntmpi", "-ntomp")
+    has_resource_override = any(
+        argument == flag or argument.startswith(f"{flag}=")
+        for argument in (extra_mdrun or [])
+        for flag in resource_flags
+    )
+    if not has_resource_override:
+        mdrun_args.extend(["-nt", str(effective_nproc)])
     if extra_mdrun:
         mdrun_args.extend(extra_mdrun)
     try:
@@ -687,7 +828,11 @@ def grompp_and_mdrun(
         step_name=f"md_{stage}", step_index=step_index, success=True,
         outputs=outputs, artifacts=artifacts,
         duration_s=time.time() - started_at,
-        extra={"inputs": _inputs_dict(inputs)},
+        extra={
+            "inputs": _inputs_dict(inputs),
+            **({"grompp_warning_policy": grompp_warning_policy}
+               if grompp_warning_policy is not None else {}),
+        },
     )
 
 
@@ -767,41 +912,40 @@ def check_last_fraction(
 
 
 def analyze_final_window(xvg_path: Path, window_ps: float) -> dict:
-    """Compute block means, trend, and uncertainty for the final EQ window."""
+    """Compute final-window means and a least-squares linear slope."""
     _, columns = parse_xvg(xvg_path)
     if len(columns) < 2 or not columns[0] or not columns[1]:
         return {"ok": False, "reason": "XVG 中没有可分析的时间序列"}
     times, values = columns[0], columns[1]
     cutoff = times[-1] - float(window_ps)
-    selected = [value for time_value, value in zip(times, values) if time_value >= cutoff]
+    selected = [
+        (time_value, value)
+        for time_value, value in zip(times, values)
+        if time_value >= cutoff
+    ]
     if len(selected) < 4:
         return {"ok": False, "reason": "最终验收窗口中的采样点不足"}
-    block_count = min(4, len(selected))
-    base, remainder = divmod(len(selected), block_count)
-    block_means: list[float] = []
-    position = 0
-    for index in range(block_count):
-        width = base + (1 if index < remainder else 0)
-        block = selected[position:position + width]
-        position += width
-        block_means.append(sum(block) / len(block))
-    mean = sum(selected) / len(selected)
-    variance = sum((value - mean) ** 2 for value in selected) / max(1, len(selected) - 1)
+    selected_times = [item[0] for item in selected]
+    selected_values = [item[1] for item in selected]
+    mean_time = sum(selected_times) / len(selected_times)
+    mean = sum(selected_values) / len(selected_values)
+    variance = sum((value - mean) ** 2 for value in selected_values) / max(1, len(selected_values) - 1)
     sem = (variance / len(selected)) ** 0.5
-    first, last = block_means[0], block_means[-1]
-    drift = abs(last - first)
-    relative_drift = drift / max(abs(mean), 1e-12)
-    first_last_scale = max(sem * (2 ** 0.5), 1e-12)
-    trend_zscore = drift / first_last_scale
+    time_variance = sum((time_value - mean_time) ** 2 for time_value in selected_times)
+    slope_per_ps = (
+        sum((time_value - mean_time) * (value - mean) for time_value, value in selected)
+        / time_variance
+        if time_variance > 0
+        else 0.0
+    )
     return {
         "ok": True,
         "window_ps": float(window_ps),
         "sample_count": len(selected),
         "mean": mean,
         "standard_error": sem,
-        "block_means": block_means,
-        "relative_drift": relative_drift,
-        "trend_zscore": trend_zscore,
+        "linear_slope_per_ps": slope_per_ps,
+        "relative_slope_per_ns": abs(slope_per_ps) * 1000.0 / max(abs(mean), 1e-12),
     }
 
 
@@ -817,6 +961,40 @@ def _inputs_dict(inputs: GromacsInputs) -> dict[str, object]:
 
 def _stderr_tail(result: subprocess.CompletedProcess) -> str:
     return (result.stderr or result.stdout or "(no output)")[-1000:]
+
+
+def _permitted_net_charge_warning(
+    result: subprocess.CompletedProcess,
+) -> dict[str, object] | None:
+    """Recognize the only grompp warning currently allowed by policy.
+
+    GROMACS rejects ``-maxwarn`` by default.  Generated charge files can leave
+    a small floating-point residue in the total charge, so a *single* Ewald
+    net-charge warning is allowed when ``abs(Q) <= 0.15 e``.  Any additional
+    warning, a missing charge value, or a larger imbalance remains fatal.
+    """
+    output = "\n".join(
+        value for value in (getattr(result, "stderr", ""), getattr(result, "stdout", ""))
+        if value
+    )
+    if not _EWALD_NET_CHARGE_RE.search(output):
+        return None
+    match = _NET_CHARGE_RE.search(output)
+    if match is None:
+        return None
+    try:
+        total_charge = float(match.group(1))
+    except ValueError:
+        return None
+    warning_count = len(_GROMPP_WARNING_HEADER_RE.findall(output))
+    if warning_count != 1 or abs(total_charge) > GROMPP_NET_CHARGE_TOLERANCE_E:
+        return None
+    return {
+        "name": "net_charge_rounding",
+        "total_charge_e": total_charge,
+        "tolerance_e": GROMPP_NET_CHARGE_TOLERANCE_E,
+        "warning_count": warning_count,
+    }
 
 
 def _mdrun_failure_evidence(result: subprocess.CompletedProcess, raw_output: str) -> dict[str, object]:

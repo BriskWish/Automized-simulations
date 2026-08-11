@@ -32,7 +32,7 @@ def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, st
         arg = argv[index]
         if arg == "--no-llm":
             no_llm = True
-        elif arg in ("g16", "orca"):
+        elif arg in ("g16", "g09", "orca"):
             backend = arg
         elif arg in {"--run-dir", "--lock-fd", "--launch-token", "--resume-pending-action"}:
             if index + 1 >= len(argv):

@@ -2,6 +2,7 @@
 
 import html
 import os
+import re
 from collections.abc import Mapping
 
 import gradio as gr
@@ -14,8 +15,13 @@ from willy.frontend_api import (
     stop_pipeline,
     is_pipeline_running,
     get_llm_config_notice,
+    get_llm_provider_mode,
+    get_managed_gateway_status,
+    request_managed_gateway_registration,
     save_llm_config,
+    save_llm_mode,
     test_llm_connection,
+    test_managed_gateway_connection,
     get_latest_run_control_state,
     run_assistant_pending_message,
     chat_run_assistant,
@@ -60,7 +66,7 @@ APP_CSS = """
     --status-running: #17825d;
     --status-error: #b6333c;
     --status-stopped: #67736d;
-    --workbench-panel-height: 52.8rem;
+    --workbench-panel-height: 63.4rem;
 }
 
 html.willy-dark,
@@ -125,6 +131,11 @@ html, body, .gradio-container {
 
 .gradio-container :is(button, input, textarea, select, [role="tab"], label, .block-label) {
     font-family: var(--willy-ui-font) !important;
+}
+
+.gradio-container [role="tab"] {
+    font-size: 1.1rem;
+    font-weight: 700;
 }
 
 footer { display: none !important; }
@@ -259,6 +270,63 @@ footer { display: none !important; }
     color: var(--button-secondary-text-color);
 }
 
+#llm-provider-mode .wrap {
+    display: grid !important;
+    gap: 0.65rem !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+}
+
+#llm-provider-mode .wrap > label {
+    align-items: center;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    box-sizing: border-box;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    font-weight: 600;
+    gap: 0.7rem;
+    min-height: 3.4rem;
+    padding: 0.75rem 0.9rem;
+    transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+
+#llm-provider-mode .wrap > label input[type="radio"] {
+    appearance: none !important;
+    background: var(--input-bg) !important;
+    border: 2px solid #7c8580 !important;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 1.05rem;
+    margin: 0;
+    width: 1.05rem;
+}
+
+#llm-provider-mode .wrap > label input[type="radio"]:checked {
+    background: radial-gradient(circle at center, #111111 0 0.27rem, transparent 0.29rem) !important;
+    border-color: #1d2b24 !important;
+}
+
+#llm-provider-mode .wrap > label:has(input[type="radio"]:checked) {
+    background: #d5e5dc;
+    border-color: #2e6349;
+    box-shadow: 0 0.3rem 0.85rem rgba(46, 99, 73, 0.22);
+    color: #1d4634;
+}
+
+#llm-provider-mode .wrap > label:focus-within {
+    outline: 2px solid var(--status-running);
+    outline-offset: 2px;
+}
+
+.gradio-container.willy-dark #llm-provider-mode .wrap > label:has(input[type="radio"]:checked) {
+    background: #1e4938;
+    border-color: #66b88d;
+    box-shadow: 0 0.3rem 0.85rem rgba(0, 0, 0, 0.38);
+    color: #e6f4e9;
+}
+
 #stop-pipeline-button:disabled {
     background: #858d89 !important;
     border-color: #858d89 !important;
@@ -279,6 +347,16 @@ footer { display: none !important; }
     border-color: var(--border-color-accent);
 }
 
+.gradio-container.willy-dark #proposal-assistant code,
+.gradio-container.willy-dark #run-assistant code {
+    background: #36413c !important;
+    border: 1px solid #53645b;
+    border-radius: 4px;
+    color: #f0f5f1 !important;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    padding: 0.08rem 0.3rem;
+}
+
 #visualization-panel,
 #proposal-assistant,
 #run-assistant,
@@ -287,10 +365,11 @@ footer { display: none !important; }
     border-radius: 6px;
     box-sizing: border-box;
     height: var(--workbench-panel-height);
+    min-height: var(--workbench-panel-height);
     padding: 1rem;
 }
 
-#proposal-assistant { overflow-y: auto; }
+#proposal-assistant { overflow: hidden; }
 
 #visualization-panel,
 #run-assistant,
@@ -310,16 +389,57 @@ footer { display: none !important; }
     margin-bottom: 0.5rem;
 }
 
+#structure-selector-row {
+    align-items: flex-end;
+    flex: 0 0 auto;
+    flex-wrap: nowrap !important;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+#structure-selector-row > .gr-column {
+    min-width: 0;
+}
+
+#structure-selector-row > * {
+    min-width: 0 !important;
+}
+
 #structure-viewer {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
+    height: min(43.2rem, calc(var(--workbench-panel-height) - 12rem));
     min-height: 0;
     overflow: hidden;
 }
 
-#structure-viewer iframe {
+#structure-viewer .structure-viewer-frame {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    height: 100%;
+    min-height: 0;
+}
+
+#structure-viewer .structure-viewer-frame iframe {
     display: block;
-    height: min(36rem, calc(var(--workbench-panel-height) - 11rem)) !important;
+    height: 100% !important;
+    min-height: 0;
     width: 100% !important;
+}
+
+#structure-viewer .structure-viewer-name {
+    color: #765f4f;
+    font-family: system-ui, sans-serif;
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    padding: 0.45rem 0 0.2rem;
+    text-align: center;
+}
+
+#structure-legend {
+    flex: 0 0 auto;
+    margin: 0 0 0.45rem;
+    text-align: center;
 }
 
 #proposal-assistant {
@@ -333,22 +453,48 @@ footer { display: none !important; }
     flex-direction: column;
 }
 
-#proposal-header {
+#proposal-header,
+#run-header {
     align-items: center;
+    flex: 0 0 2.25rem;
     gap: 0.5rem;
     margin-bottom: 0.65rem;
+    min-height: 2.25rem;
 }
 
-#proposal-header .panel-title { margin: 0; }
+#proposal-header .panel-title,
+#run-header .panel-title {
+    margin: 0;
+}
 
 #proposal-chat,
 #run-chat {
-    margin-top: auto;
+    flex: 0 0 auto;
+    height: 650px !important;
+    margin-top: 0;
+}
+
+#remote-task-page {
+    margin: 0 auto;
+    max-width: 52rem;
+    padding: 1.25rem 0;
+}
+
+#remote-task-page .panel-title {
+    margin-bottom: 0.85rem;
+}
+
+#remote-capability-summary {
+    border-left: 3px solid var(--run-title);
+    color: var(--muted-text);
+    margin-top: 0.65rem;
+    padding-left: 0.8rem;
 }
 
 #proposal-input-row,
 #run-input-row {
     margin-bottom: 0;
+    margin-top: auto;
 }
 
 #run-assistant {
@@ -380,6 +526,44 @@ footer { display: none !important; }
     font-size: 1rem;
     height: calc(var(--workbench-panel-height) - 5rem);
     justify-content: center;
+}
+
+#beginner-guide-page {
+    margin: 0 auto;
+    max-width: 70rem;
+    padding: 0.5rem 0 1.5rem;
+}
+
+#beginner-guide-page .guide-section {
+    border-top: 1px solid var(--input-border);
+    padding: 1.15rem 0;
+}
+
+#beginner-guide-page .guide-section:first-child {
+    border-top: 0;
+    padding-top: 0;
+}
+
+#beginner-guide-page h2 {
+    color: var(--text);
+    font-size: 1.25rem;
+    margin: 0 0 0.65rem;
+}
+
+#beginner-guide-page h3 {
+    color: var(--text);
+    font-size: 1rem;
+    margin: 1rem 0 0.35rem;
+}
+
+#beginner-guide-page p {
+    color: var(--muted-text);
+    line-height: 1.75;
+    margin: 0.55rem 0;
+}
+
+#beginner-guide-page code {
+    color: var(--text);
 }
 
 #about-page {
@@ -454,6 +638,33 @@ footer { display: none !important; }
     height: auto !important;
     margin: 0 auto;
     max-width: 100%;
+}
+
+#third-party-notices {
+    border-top: 1px dashed var(--input-border);
+    margin-top: 2rem;
+    padding-top: 1.25rem;
+}
+
+#third-party-notices h2 {
+    color: var(--text);
+    font-size: 1.1rem;
+    margin: 0 0 0.65rem;
+}
+
+#third-party-notices p,
+#third-party-notices li {
+    color: var(--muted-text);
+    line-height: 1.7;
+}
+
+#third-party-notices p {
+    margin: 0.8rem 0;
+}
+
+#third-party-notices ol {
+    margin: 0.55rem 0 1rem;
+    padding-left: 1.35rem;
 }
 
 #run-chat .pipeline-status-indicator {
@@ -542,11 +753,19 @@ footer { display: none !important; }
 }
 
 @media (max-width: 768px) {
-    :root { --workbench-panel-height: 48rem; }
+    :root { --workbench-panel-height: 57.6rem; }
 
     #assistant-row,
     #workspace-row {
         flex-wrap: wrap;
+    }
+
+    #structure-selector-row {
+        flex-wrap: wrap !important;
+    }
+
+    #structure-selector-row > * {
+        flex-basis: 100% !important;
     }
 
     #assistant-row > div,
@@ -577,10 +796,59 @@ THEME_TOGGLE_JS = """
 
 PROPOSAL_EXAMPLE = (
     "示例：请帮我跑一个 MD：100 Li+、100 PF6-、400 EC、600 EMC，"
-    "生产 20 ns；优化 Gaussian16，力场 OPLSAA"
+    "生产 20 ns；优化 Gaussian16/Gaussian09，力场 OPLSAA"
 )
 
+# Keep both assistants aligned while leaving room for their three-line input rows.
+ASSISTANT_CHAT_HEIGHT = 650
+
 OFFICIAL_ACCOUNT_QR = "assets/qrcode_for_gh_7df1329939c6_258.jpg"
+
+BEGINNER_GUIDE_HTML = """
+<section class="guide-section">
+    <h2>零、Agent 的概况</h2>
+    <p>Willy 基于Linux/WSL2系统,由方案助理和运行助理协作完成分子动力学工作流。方案助理负责把自然语言需求整理为可确认的体系与协议；运行助理负责展示当前工程状态、阶段产物和需要用户确认的调整方案。</p>
+    <p>二者功能、聊天记录不互通。</p>
+    <p>位置：在“任务”页上方左右两侧使用两名助理。只有确认最新方案后，流水线才会启动。</p>
+    <p>Agent严格执行 结构优化-电荷设置-拓扑生成-模拟参数生成-进行模拟 的操作链路，仅在参数初始配置或报错时发生LLM介入。</p>
+    <p>MD模拟过程中遵循以下步骤： 1.能量最小化（Energy Minimization, em）；2.梯度退火平衡(Gradient Annealing Equilibrium， EQ)；3.生产阶段（Production, prod)</p>
+</section>
+<section class="guide-section">
+    <h2>一、运行 Agent 最少需要的外置依赖</h2>
+    <p>实现完整工作流，至少需要本机具备：1.一个用于量化计算的软件（Gaussian16、Gaussian09 或 ORCA）；2. <strong>GROMACS 2022.0 或更高版本</strong>。如果您没有这些软件，需要自行安装，Willy只检验软件可用性。实际使用哪个后端/力场，由用户确认方案决定。</p>
+    <p><strong>推荐 ORCA：</strong>建议使用 ORCA 6.x 的 Linux x86_64 官方发行包。在 <a href="https://orcaforum.kofo.mpg.de/" target="_blank" rel="noopener noreferrer">ORCA Forum</a> 注册并接受许可后下载，解压至本机目录；将该安装目录填入 <code>WILLY_ORCA_HOME</code>，或将 <code>orca</code> 放入 PATH。请勿使用来源不明的重打包二进制。</p>
+    <p><strong>LigParGen（仅 OPLS-AA 路径）：</strong>除 LigParGen 外，还需要带格式插件和数据文件的完整 Open Babel 3、C shell（<code>csh</code>）以及 BOSS 运行环境。内置的精简 Open Babel 运行时不能替代完整安装。对应位置为本机 <code>.env</code>：<code>WILLY_LIGPARGEN_BIN</code>、<code>WILLY_OBABEL_BIN</code>、<code>WILLY_CSH_BIN</code>、<code>WILLY_BOSS_HOME</code>；未选择 OPLS-AA 时无需配置这一组依赖。</p>
+    <p>位置：LLM 服务在“配置”页填写并测试；本机软件的可用情况会在工程启动后记录，并由运行助理报告。</p>
+</section>
+<section class="guide-section">
+    <h2>二、体系的初始确定</h2>
+    <p>在“任务”页的方案助理输入体系组分、数量、目标温度、模拟时长和偏好的量子或力场后端。需要使用自有结构时，通过同页的“上传结构”加入结构，再让方案助理生成方案。</p>
+    <p>位置：方案摘要会出现在方案助理对话中；请先核对分子、电荷、自旋、组分数量和模拟目标，再确认运行。</p>
+</section>
+<section class="guide-section">
+    <h2>三、可供修改的参数</h2>
+    <h3>3.1 量子层</h3>
+    <p>可调整量化计算后端的分子电荷与自旋、结构优化与单点计算要求。位置：在“任务”页向方案助理提出修改，并在新的方案摘要中核对。</p>
+    <h3>3.2 拓扑层</h3>
+    <p>可调整力场选择和组分对应关系。位置：在方案确认前通过方案助理修改；运行中出现拓扑错误时，运行助理会报告处理状态。</p>
+    <h3>3.3 模拟层</h3>
+    <p>可调整初始密度、盒子尺寸、EM/EQ/PROD 协议、温度、压力、耦合方式、时间步长、生产时长和输出精度。位置：在方案确认前提出；EQ 验收失败后的协议改动必须在运行助理中再次确认。</p>
+</section>
+<section class="guide-section">
+    <h2>四、LLM 的报错处理</h2>
+    <p>若方案助理无法响应或无法调用工具，先在“配置”页核对 API Key、Base URL 和 Model，再使用“测试连接”。测试不会保存配置，也不会自动补全 Base URL 的 <code>/v1</code>。</p>
+    <p>若问题发生在科学计算阶段，请查看运行助理的新状态气泡和待确认方案；不要把聊天中的“中止”当作控制命令，停止操作只通过“中止流水线”按钮完成。</p>
+</section>
+<section class="guide-section">
+    <h2>五、获取结构</h2>
+    <p>在“任务”页左下的“可视化”区域，先在左栏选择运行目录，再在右栏选择该运行目录下的 PDB 或 MOL2 文件。已验收的 EM、EQ、PROD 阶段可生成用于查看的结构产物。</p>
+    <p>位置：可视化右侧的图表绘制区域仍在开发中；结构文件名称保留完整名称或运行内相对路径，便于区分历史工程。</p>
+</section>
+<section class="guide-section">
+    <h2>六、其他</h2>
+    <p>RDF、RMSD等可视化图表、SSH服务器连接为后续功能开发，欢迎各位用户提出宝贵意见和建议！</p>
+</section>
+"""
 
 
 def _refresh_current_run_structure_choices(selected_choice: str | None):
@@ -598,13 +866,69 @@ def _render_current_run_structure(choice: str | None):
     return frontend_api.render_run_visualization_html(choice)
 
 
+def _refresh_visualization_run_choices(
+    selected_run_id: str | None,
+    selected_file: str | None,
+):
+    """Refresh both selectors after the run directory list changes."""
+    run_choices = frontend_api.get_run_visualization_run_choices()
+    run_id = selected_run_id if selected_run_id in run_choices else (
+        run_choices[0] if run_choices else None
+    )
+    file_choices = frontend_api.get_run_visualization_file_choices(run_id)
+    file_choice = selected_file if selected_file in file_choices else (
+        file_choices[0] if file_choices else None
+    )
+    return (
+        gr.update(choices=run_choices, value=run_id, interactive=True),
+        gr.update(choices=file_choices, value=file_choice, interactive=True),
+        frontend_api.render_run_visualization_html(file_choice, run_id=run_id),
+        frontend_api.render_run_visualization_legend_html(file_choice, run_id=run_id),
+    )
+
+
+def _refresh_visualization_file_choices(
+    selected_run_id: str | None,
+    selected_file: str | None,
+):
+    """Refresh files for the selected run without changing the run choice."""
+    file_choices = frontend_api.get_run_visualization_file_choices(selected_run_id)
+    file_choice = selected_file if selected_file in file_choices else (
+        file_choices[0] if file_choices else None
+    )
+    return (
+        gr.update(choices=file_choices, value=file_choice, interactive=True),
+        frontend_api.render_run_visualization_html(file_choice, run_id=selected_run_id),
+        frontend_api.render_run_visualization_legend_html(
+            file_choice, run_id=selected_run_id,
+        ),
+    )
+
+
+def _render_selected_visualization(
+    selected_run_id: str | None,
+    selected_file: str | None,
+):
+    """Render only the file authorized by the selected run directory."""
+    return (
+        frontend_api.render_run_visualization_html(
+            selected_file,
+            run_id=selected_run_id,
+        ),
+        frontend_api.render_run_visualization_legend_html(
+            selected_file,
+            run_id=selected_run_id,
+        ),
+    )
+
+
 def _render_proposal_chat(history):
     """Return the text-only proposal conversation for Gradio rendering."""
     return [dict(message) for message in list(history or [])]
 
 
-def _chat_wrapper(message, history, pending_plan=None):
-    """Adapt the proposal generator and keep the conversation input consistent."""
+def _chat_wrapper(message, history, pending_plan=None, execution_context=None):
+    """Adapt the proposal generator and bind the current execution intent."""
     current_history = list(history or [])
     latest_chatbot = _render_proposal_chat(current_history)
     latest_state = current_history
@@ -621,7 +945,10 @@ def _chat_wrapper(message, history, pending_plan=None):
         return
 
     for msg_val, chatbot_val, state_val, plan_val, _html_val, _confirmation_state in chat(
-        message, current_history, pending_plan,
+        message,
+        current_history,
+        pending_plan,
+        execution_context=execution_context,
     ):
         latest_chatbot = _render_proposal_chat(chatbot_val)
         latest_state = state_val
@@ -803,6 +1130,27 @@ def _is_pending_action_approval(message: str | None) -> bool:
     return has_approval and (has_execution or has_proposal)
 
 
+def _pending_option_id(message: str | None, action: Mapping[str, object] | None) -> str | None:
+    """Parse an explicit Chinese/Arabic option number for the current action."""
+    if not action or not isinstance(action.get("options"), list) or len(action["options"]) < 2:
+        return None
+    normalized = _normalize_run_control_text(message).lower()
+    match = re.search(r"(?:方案|选|选择)([一二三123])", normalized)
+    if not match:
+        return None
+    ordinal = {"一": "1", "二": "2", "三": "3"}.get(match.group(1), match.group(1))
+    option_id = f"option_{ordinal}"
+    return option_id if any(
+        isinstance(option, Mapping) and option.get("option_id") == option_id
+        for option in action["options"]
+    ) else None
+
+
+def _is_option_confirmation(message: str | None) -> bool:
+    normalized = _normalize_run_control_text(message).lower()
+    return any(marker in normalized for marker in ("确认", "同意", "批准"))
+
+
 def _run_assistant_reply(history, message: str, reply: str):
     """Append a local deterministic response without involving the LLM."""
     current_history = list(history or [])
@@ -819,7 +1167,8 @@ def _run_assistant_welcome_history() -> list[dict[str, str]]:
         "content": (
             "你好！我是 **Willy-运行助理**。☀️\n\n"
             "我会自动跟踪当前运行，并说明当前工序、处理对象、完成进度、"
-            "错误摘要、自动修复和已登记产物。"
+            "错误摘要、自动修复和已登记产物。\n\n"
+            "全部工程文件保存在本项目根目录的 `md_run/最新编号/` 中。"
         ),
     }]
 
@@ -861,11 +1210,24 @@ def _run_assistant_snapshot() -> dict[str, object]:
         snapshot = {}
     run_id = snapshot.get("run_id") if isinstance(snapshot, Mapping) else None
     summary = snapshot.get("summary") if isinstance(snapshot, Mapping) else None
+    live_summary = snapshot.get("live_summary") if isinstance(snapshot, Mapping) else None
     action = snapshot.get("pending_action") if isinstance(snapshot, Mapping) else None
+    error_event = snapshot.get("error_event") if isinstance(snapshot, Mapping) else None
+    status_event_id = snapshot.get("status_event_id") if isinstance(snapshot, Mapping) else None
     return {
         "run_id": run_id if isinstance(run_id, str) else None,
         "summary": summary if isinstance(summary, str) else "### 工程状态\n\n暂时无法读取当前运行。",
+        "live_summary": live_summary if isinstance(live_summary, str) else summary,
         "pending_action": _public_pending_action(action),
+        "error_event": dict(error_event) if isinstance(error_event, Mapping) else None,
+        # Older adapters can omit this field.  Keep one live card rather than
+        # treating each polling result as a fresh historical transition.
+        "status_event_id": (
+            status_event_id
+            if isinstance(status_event_id, str) and status_event_id.strip()
+            else f"{run_id or 'none'}:status:legacy"
+        ),
+        "timeline_events": bool(snapshot.get("timeline_events")) if isinstance(snapshot, Mapping) else False,
     }
 
 
@@ -885,6 +1247,61 @@ def _pending_action_text(action: Mapping[str, object] | None) -> str | None:
         return None
 
     summary = _public_action_text(action.get("summary")) or "当前阶段需要确认协议调整。"
+
+    def source_lines(value: Mapping[str, object]) -> list[str]:
+        status = value.get("knowledge_status")
+        source = value.get("advice_source")
+        if status == "retrieved" and source == "knowledge_base":
+            names = []
+            for entry in value.get("knowledge_entries", []) if isinstance(value.get("knowledge_entries"), list) else []:
+                if isinstance(entry, Mapping):
+                    name = _public_action_text(entry.get("name"), limit=140)
+                    number = entry.get("number")
+                    if name and isinstance(number, int):
+                        names.append(f"{number} {name}")
+            lines = [f"知识库依据：{ '；'.join(names) }" if names else "知识库依据：已读取并校验条目"]
+        elif status in {"not_matched", "unavailable"} or source == "llm_unverified":
+            lines = ["知识库状态：未命中或不可用；建议来源：LLM 未经知识库验证的推断。"]
+        else:
+            return []
+        notice = _public_action_text(value.get("compatibility_notice"), limit=220)
+        if notice:
+            lines.append(f"兼容性提醒：{notice}")
+        return lines
+
+    options = action.get("options")
+    if isinstance(options, list) and len(options) > 1:
+        lines = [
+            "#### 待确认的模拟调整",
+            f"问题摘要：{summary}",
+            "检测到多个可能原因，请选择一个相互独立的方案：",
+        ]
+        for ordinal, option in enumerate(options[:3], 1):
+            if not isinstance(option, Mapping):
+                continue
+            title = _public_action_text(option.get("title"), limit=120) or f"方案{ordinal}"
+            cause = _public_action_text(option.get("cause"), limit=200)
+            evidence = _public_action_text(option.get("evidence"), limit=240)
+            option_summary = _public_action_text(option.get("summary"), limit=200)
+            lines.append(f"**方案{ordinal}：{title}**")
+            if cause:
+                lines.append(f"可能原因：{cause}")
+            if evidence:
+                lines.append(f"依据：{evidence}")
+            if option_summary:
+                lines.append(f"处理摘要：{option_summary}")
+            lines.extend(source_lines(option))
+            adjustments = option.get("adjustments")
+            for adjustment in adjustments[:8] if isinstance(adjustments, list) else []:
+                if not isinstance(adjustment, Mapping):
+                    continue
+                name = _public_action_text(adjustment.get("name"), limit=48)
+                before = _public_action_text(adjustment.get("before"), limit=48)
+                after = _public_action_text(adjustment.get("after"), limit=48)
+                if name and before and after:
+                    lines.append(f"- {name}：{before} -> {after}")
+        lines.append("回复“方案1/方案一”选择；回复“确认方案1/确认方案一”直接执行。")
+        return "\n\n".join(lines)
     restart_step = action.get("restart_step")
     restart_label = f"第 {restart_step} 步" if isinstance(restart_step, int) else "指定失败步骤"
     step_label = _public_action_text(action.get("step_label"), limit=64)
@@ -930,35 +1347,142 @@ def _pending_action_text(action: Mapping[str, object] | None) -> str | None:
             safe_editable.append(f"- {name}（当前 {current}，范围 {value_range}）")
     if safe_editable:
         lines.extend(["可复审参数：", *safe_editable])
+    lines.extend(source_lines(action))
     lines.append("回复“确认”“同意”或“按方案执行”以按此方案重跑。")
     return "\n\n".join(lines)
 
 
-def _render_run_assistant_chat(history, snapshot: Mapping[str, object]) -> list[dict[str, str]]:
-    """Render welcome, then live cards, without changing LLM conversation state."""
-    summary = snapshot.get("summary")
-    cards = [{
+_RUN_ASSISTANT_EVENT_KIND = "_run_assistant_event_kind"
+_RUN_ASSISTANT_EVENT_ID = "_run_assistant_event_id"
+
+
+def _run_assistant_event(
+    kind: str,
+    event_id: str,
+    content: str,
+) -> dict[str, str]:
+    """Create an app-owned visual bubble that never becomes LLM context."""
+    return {
         "role": "assistant",
-        "content": summary if isinstance(summary, str) else "### 工程状态\n\n暂时无法读取当前运行。",
-    }]
-    action_text = _pending_action_text(snapshot.get("pending_action"))
-    if action_text:
-        cards.append({"role": "assistant", "content": action_text})
-    messages = [dict(message) for message in list(history or [])]
+        "content": content,
+        _RUN_ASSISTANT_EVENT_KIND: kind,
+        _RUN_ASSISTANT_EVENT_ID: event_id[:240],
+    }
+
+
+def _run_assistant_event_id(message: object) -> str | None:
+    if not isinstance(message, Mapping):
+        return None
+    event_id = message.get(_RUN_ASSISTANT_EVENT_ID)
+    return event_id if isinstance(event_id, str) and event_id else None
+
+
+def _run_assistant_event_kind(message: object) -> str | None:
+    if not isinstance(message, Mapping):
+        return None
+    kind = message.get(_RUN_ASSISTANT_EVENT_KIND)
+    return kind if isinstance(kind, str) and kind else None
+
+
+def _status_bubble(snapshot: Mapping[str, object]) -> dict[str, str]:
+    content = snapshot.get("live_summary", snapshot.get("summary"))
+    run_id = snapshot.get("run_id")
+    event_id = snapshot.get("status_event_id")
+    safe_content = content if isinstance(content, str) else "### 工程状态\n\n暂时无法读取当前运行。"
+    safe_run_id = run_id if isinstance(run_id, str) else "none"
+    safe_event_id = event_id if isinstance(event_id, str) else f"{safe_run_id}:status:legacy"
+    return _run_assistant_event("status", safe_event_id, safe_content)
+
+
+def _snapshot_notice_bubbles(snapshot: Mapping[str, object]) -> list[dict[str, str]]:
+    """Render immutable public error and proposal events once per identity."""
+    notices: list[dict[str, str]] = []
+    error = snapshot.get("error_event")
+    if isinstance(error, Mapping):
+        event_id = error.get("event_id")
+        content = error.get("content")
+        if isinstance(event_id, str) and event_id and isinstance(content, str) and content:
+            notices.append(_run_assistant_event("error", event_id, content[:2_000]))
+    action = snapshot.get("pending_action")
+    action_text = _pending_action_text(action if isinstance(action, Mapping) else None)
+    run_id = snapshot.get("run_id")
+    action_id = action.get("action_id") if isinstance(action, Mapping) else None
+    if action_text and isinstance(run_id, str) and isinstance(action_id, str) and action_id:
+        notices.append(_run_assistant_event(
+            "proposal", f"{run_id}:pending_action:{action_id}", action_text
+        ))
+    return notices
+
+
+def _sync_run_assistant_history(history, snapshot: Mapping[str, object]) -> list[dict[str, str]]:
+    """Refresh one live status bubble, sealing it when its public phase changes."""
+    current = [dict(message) for message in list(history or []) if isinstance(message, Mapping)]
     welcome = _run_assistant_welcome_history()[0]
-    if messages and messages[0] == welcome:
-        return [messages[0], *cards, *messages[1:]]
-    return [*cards, *messages]
+    if not current or current[0] != welcome:
+        current = [welcome, *[message for message in current if message != welcome]]
+    status = _status_bubble(snapshot)
+    status_id = _run_assistant_event_id(status)
+    latest_status_index = next(
+        (
+            index
+            for index in range(len(current) - 1, -1, -1)
+            if _run_assistant_event_kind(current[index]) == "status"
+        ),
+        None,
+    )
+    if latest_status_index is None or _run_assistant_event_id(current[latest_status_index]) != status_id:
+        # A step/state/action/error transition seals the previous card as a
+        # historical snapshot and creates a new card for the current run.
+        current.append(status)
+    else:
+        # Heartbeats and ETA updates belong to the current card, not history.
+        current[latest_status_index] = status
+
+    existing = {
+        event_id
+        for event_id in (_run_assistant_event_id(message) for message in current)
+        if event_id is not None
+    }
+    for notice in _snapshot_notice_bubbles(snapshot):
+        event_id = _run_assistant_event_id(notice)
+        if event_id is not None and event_id not in existing:
+            current.append(notice)
+            existing.add(event_id)
+    return current
+
+
+def _run_assistant_llm_history(history) -> list[dict[str, str]]:
+    """Exclude app-rendered status/events from browser dialogue sent to the LLM."""
+    return [
+        {"role": message["role"], "content": message["content"]}
+        for message in list(history or [])
+        if isinstance(message, Mapping)
+        and isinstance(message.get("role"), str)
+        and isinstance(message.get("content"), str)
+        and _run_assistant_event_kind(message) is None
+    ]
+
+
+def _render_run_assistant_chat(history) -> list[dict[str, str]]:
+    """Render every status, error and proposal as an independent chat message."""
+    return [
+        {"role": message["role"], "content": message["content"]}
+        for message in list(history or [])
+        if isinstance(message, Mapping)
+        and isinstance(message.get("role"), str)
+        and isinstance(message.get("content"), str)
+    ]
 
 
 def _refresh_run_assistant_view(history, bound_run_id, stop_requested, stop_confirmation_pending):
-    """Replace live info bubbles without appending them to dialogue history."""
+    """Refresh the current status card and retain prior status/event bubbles."""
     snapshot = _run_assistant_snapshot()
     current_history, current_run_id = _run_assistant_history_for_current_run(
         history, bound_run_id, snapshot["run_id"]
     )
+    current_history = _sync_run_assistant_history(current_history, snapshot)
     return (
-        _render_run_assistant_chat(current_history, snapshot),
+        _render_run_assistant_chat(current_history),
         current_history,
         current_run_id,
         _refresh_stop_button(stop_requested, stop_confirmation_pending),
@@ -996,6 +1520,23 @@ def _confirm_pending_action(action: Mapping[str, object]) -> str:
     except Exception:
         return "确认请求未送达，请稍后重试。"
     return _public_action_text(result, limit=240) or "确认请求未送达，请稍后重试。"
+
+
+def _select_pending_action(action: Mapping[str, object], option_id: str) -> str:
+    """Select one public option through the backend CAS boundary."""
+    action_id = action.get("action_id")
+    run_id = action.get("run_id")
+    selector = getattr(frontend_api, "select_pending_action_option", None)
+    if not isinstance(action_id, str) or not isinstance(run_id, str) or not callable(selector):
+        return "当前待确认方案暂不可选择，请稍后刷新状态。"
+    kwargs = {}
+    if isinstance(action.get("state_revision"), int) and isinstance(action.get("config_fingerprint"), str):
+        kwargs = {"state_revision": action["state_revision"], "config_fingerprint": action["config_fingerprint"]}
+    try:
+        result = selector(action_id, option_id, run_id, **kwargs)
+    except Exception:
+        return "方案选择未送达，请刷新状态后重试。"
+    return _public_action_text(result, limit=240) or "方案选择未送达，请刷新状态后重试。"
 
 
 def _requests_pending_action_revision(message: str | None) -> bool:
@@ -1055,10 +1596,11 @@ def _ask_run_assistant(message, history, bound_run_id=None):
     current_history, current_run_id = _run_assistant_history_for_current_run(
         history, bound_run_id, snapshot["run_id"]
     )
+    current_history = _sync_run_assistant_history(current_history, snapshot)
     if not message or not message.strip():
         yield (
             "",
-            _render_run_assistant_chat(current_history, snapshot),
+            _render_run_assistant_chat(current_history),
             current_history,
             gr.update(interactive=True),
             current_run_id,
@@ -1072,14 +1614,16 @@ def _ask_run_assistant(message, history, bound_run_id=None):
     ]
     yield (
         gr.update(value="", interactive=False),
-        _render_run_assistant_chat(pending_history, snapshot),
+        _render_run_assistant_chat(pending_history),
         pending_history,
         gr.update(interactive=False),
         current_run_id,
     )
 
     try:
-        reply = chat_run_assistant(current_run_id, message, current_history)
+        reply = chat_run_assistant(
+            current_run_id, message, _run_assistant_llm_history(current_history)
+        )
     except Exception:
         reply = "运行助理暂时不可用，请稍后重试。"
     final_snapshot = _run_assistant_snapshot()
@@ -1088,9 +1632,10 @@ def _ask_run_assistant(message, history, bound_run_id=None):
     )
     if final_run_id == current_run_id:
         final_history = current_history + [user_entry, {"role": "assistant", "content": reply}]
+    final_history = _sync_run_assistant_history(final_history, final_snapshot)
     yield (
         gr.update(value="", interactive=True),
-        _render_run_assistant_chat(final_history, final_snapshot),
+        _render_run_assistant_chat(final_history),
         final_history,
         gr.update(interactive=True),
         final_run_id,
@@ -1109,18 +1654,61 @@ def _handle_run_assistant_message(
     current_history, current_run_id = _run_assistant_history_for_current_run(
         history, bound_run_id, snapshot["run_id"]
     )
+    current_history = _sync_run_assistant_history(current_history, snapshot)
     normalized = _normalize_run_control_text(message)
     action = _awaiting_confirmation_action(snapshot["pending_action"])
+    option_id = _pending_option_id(message, action)
+    if action and option_id:
+        selection_reply = _select_pending_action(action, option_id)
+        # “确认方案一” is an explicit selection plus approval in one request.
+        if _is_option_confirmation(message):
+            selected_snapshot = _run_assistant_snapshot()
+            selected_action = _awaiting_confirmation_action(selected_snapshot.get("pending_action"))
+            if selected_action and selected_action.get("selected_option_id") == option_id:
+                selection_reply = _confirm_pending_action(selected_action)
+                selection_reply = f"已选择并确认方案{option_id.rsplit('_', 1)[-1]}。{selection_reply}"
+        updated = _run_assistant_reply(current_history, message, selection_reply)
+        final_snapshot = _run_assistant_snapshot()
+        final_history, final_run_id = _run_assistant_history_for_current_run(
+            updated, current_run_id, final_snapshot["run_id"]
+        )
+        final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        yield (
+            gr.update(value="", interactive=True),
+            _render_run_assistant_chat(final_history),
+            final_history,
+            gr.update(interactive=True),
+            _refresh_stop_button(stop_requested, stop_confirmation_pending),
+            stop_confirmation_pending,
+            stop_requested,
+            final_run_id,
+        )
+        return
     if action and _is_pending_action_approval(message):
+        if action.get("selection_required") and not action.get("selected_option_id"):
+            public_reply = "当前有多个候选方案，请先回复“方案1/方案一”“方案2/方案二”或“方案3/方案三”，再明确确认。"
+            updated = _run_assistant_reply(current_history, message, public_reply)
+            yield (
+                gr.update(value="", interactive=True),
+                _render_run_assistant_chat(updated),
+                updated,
+                gr.update(interactive=True),
+                _refresh_stop_button(stop_requested, stop_confirmation_pending),
+                stop_confirmation_pending,
+                stop_requested,
+                current_run_id,
+            )
+            return
         public_reply = _confirm_pending_action(action)
         updated = _run_assistant_reply(current_history, message, public_reply)
         final_snapshot = _run_assistant_snapshot()
         final_history, final_run_id = _run_assistant_history_for_current_run(
             updated, current_run_id, final_snapshot["run_id"]
         )
+        final_history = _sync_run_assistant_history(final_history, final_snapshot)
         yield (
             gr.update(value="", interactive=True),
-            _render_run_assistant_chat(final_history, final_snapshot),
+            _render_run_assistant_chat(final_history),
             final_history,
             gr.update(interactive=True),
             _refresh_stop_button(stop_requested, stop_confirmation_pending),
@@ -1138,7 +1726,7 @@ def _handle_run_assistant_message(
         ]
         yield (
             gr.update(value="", interactive=False),
-            _render_run_assistant_chat(pending_history, snapshot),
+            _render_run_assistant_chat(pending_history),
             pending_history,
             gr.update(interactive=False),
             _refresh_stop_button(stop_requested, stop_confirmation_pending),
@@ -1153,9 +1741,10 @@ def _handle_run_assistant_message(
         )
         if final_run_id == current_run_id:
             final_history = current_history + [user_entry, {"role": "assistant", "content": public_reply}]
+        final_history = _sync_run_assistant_history(final_history, final_snapshot)
         yield (
             gr.update(value="", interactive=True),
-            _render_run_assistant_chat(final_history, final_snapshot),
+            _render_run_assistant_chat(final_history),
             final_history,
             gr.update(interactive=True),
             _refresh_stop_button(stop_requested, stop_confirmation_pending),
@@ -1175,7 +1764,7 @@ def _handle_run_assistant_message(
         updated = _run_assistant_reply(current_history, message, public_reply)
         yield (
             gr.update(value="", interactive=True),
-            _render_run_assistant_chat(updated, snapshot),
+            _render_run_assistant_chat(updated),
             updated,
             gr.update(interactive=True),
             _refresh_stop_button(stop_requested, stop_confirmation_pending),
@@ -1226,63 +1815,152 @@ def _test_llm_connection(api_key, base_url, model):
     )
 
 
+def _managed_gateway_status_markdown() -> str:
+    status = get_managed_gateway_status()
+    if not status.get("ok"):
+        return "托管网关描述尚不可用。请使用部署者随安装包提供的配置。"
+    state = status.get("device_state")
+    state_message = {
+        "not_registered": "本机尚未申请接入。申请后等待管理员批准。",
+        "pending_or_approved": "本机已登记。管理员批准后可使用“检查托管服务”验证。",
+    }.get(state, "本机身份状态未知。")
+    return f"**{status['label']}** · 模型别名：`{status['model']}`。\n\n{state_message}"
+
+
+def _select_llm_mode(mode: str):
+    """Persist the narrow provider selection and toggle mutually exclusive controls."""
+    normalized = mode if mode in {"managed", "byok"} else "byok"
+    result = save_llm_mode(normalized)
+    managed = normalized == "managed"
+    return (
+        gr.update(visible=managed),
+        gr.update(visible=not managed),
+        gr.update(value=get_llm_config_notice()),
+        gr.update(value=result),
+    )
+
+
+def _request_managed_gateway_registration():
+    """Request a single server-counted slot for this device public key."""
+    return request_managed_gateway_registration(), _managed_gateway_status_markdown()
+
+
+def _test_managed_gateway_connection():
+    """Expose only a public status while the device-bound check runs."""
+    yield gr.update(value="正在检查托管服务..."), gr.update(interactive=False)
+    result = test_managed_gateway_connection()
+    yield gr.update(value=_format_llm_connection_result(result)), gr.update(interactive=True)
+
+
+_REMOTE_MODE_PREVIEW_CHOICES = [
+    ("SSH", "ssh"),
+    ("Slurm", "slurm"),
+]
+
+_LOCAL_EXECUTION_CONTEXT = {
+    "execution_mode": "local",
+    "execution_profile_id": "local-default",
+    "available": True,
+    "summary": "本版本仅支持本机 GROMACS；远程 SSH/Slurm 执行尚未开放。",
+}
+
+
+def _proposal_execution_summary(context: Mapping[str, object]) -> str:
+    """Render the selected intent and its server-side freeze boundary."""
+    summary = context.get("summary")
+    if not isinstance(summary, str) or not summary:
+        return "执行偏好暂不可读取；生成方案前不会选择远程执行。"
+    return f"**当前方案执行方式**：{summary}"
+
+
+def _proposal_welcome_history(context: Mapping[str, object]) -> list[dict[str, str]]:
+    """Build the proposal assistant's greeting with the active execution boundary."""
+    return [{
+        "role": "assistant",
+        "content": (
+            "你好！我是 **Willy-方案助理**，你的 MD 模拟助手。☀️\n\n"
+            "只需用自然语言描述你的体系，我会给出方案，"
+            "自动完成体系准备、EM、NPT退火和生产模拟，并展示运行进度。"
+            "需要全精度 TRR 轨迹时，请在对话中明确提出。您也可以上传自己的结构后再启动。\n\n"
+            f"{_proposal_execution_summary(context)}\n\n"
+            "提示：G09 未经可靠全链路验证，使用时可能出现运行问题。\n\n"
+            "（仅分子个数、分子名为必要，其他可选填）"
+        ),
+    }]
+
+
 # ============================================================
 # UI
 # ============================================================
 
-with gr.Blocks(title="Willy Agent") as app:
+with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
     with gr.Row(elem_id="app-header"):
-        gr.HTML("<h1>Willy AI Driven MD Agent</h1>", elem_id="app-title")
+        gr.HTML("<h1>Willy : AI驱动的小分子Gromacs模拟工具</h1>", elem_id="app-title")
         dark_mode = gr.Checkbox(label="夜间模式", value=False, elem_id="theme-toggle", container=False)
         dark_mode.change(js=THEME_TOGGLE_JS, inputs=[dark_mode], outputs=[])
 
+    initial_execution_context = dict(_LOCAL_EXECUTION_CONTEXT)
+    execution_profile_state = gr.State(initial_execution_context)
+
     with gr.Tabs():
-        with gr.Tab("任务"):
+        with gr.Tab("本地任务"):
             with gr.Row(elem_id="assistant-row", equal_height=True):
                 with gr.Column(scale=1):
                     with gr.Column(elem_id="proposal-assistant"):
                         with gr.Row(elem_id="proposal-header"):
                             gr.HTML("<div class='panel-title'>方案助理</div>")
-                        welcome_msg = [{"role": "assistant",
-                            "content": "你好！我是 **Willy-方案助理**，你的 MD 模拟助手。☀️\n\n"
-                                       "只需用自然语言描述你的体系，我会给出方案，"
-                                       "自动完成体系准备、EM、NPT退火和生产模拟，并展示运行进度。"
-                                       "需要全精度 TRR 轨迹时，请在对话中明确提出。您也可以上传自己的结构后再启动。\n\n"
-                                       "（仅分子个数、分子名为必要，其他可选填）"}]
+                        welcome_msg = _proposal_welcome_history(initial_execution_context)
                         chat_state = gr.State(welcome_msg)
                         proposal_plan_state = gr.State(None)
-                        chatbot = gr.Chatbot(height=480, value=welcome_msg, label="", elem_id="proposal-chat")
+                        chatbot = gr.Chatbot(
+                            height=ASSISTANT_CHAT_HEIGHT,
+                            value=welcome_msg,
+                            label="",
+                            elem_id="proposal-chat",
+                        )
                         with gr.Row(elem_id="proposal-input-row"):
                             msg = gr.Textbox(placeholder=PROPOSAL_EXAMPLE, lines=3, label="", scale=4)
                             with gr.Column(scale=1, min_width=80):
                                 send_btn = gr.Button("发送", variant="primary")
-                                upload = gr.UploadButton("上传结构", file_types=[".gjf", ".mol2", ".pdb", ".xyz"])
+                                upload = gr.UploadButton(
+                                    "上传结构",
+                                    file_types=[".gjf", ".inp", ".mol2", ".pdb", ".xyz"],
+                                )
                         upload.upload(
                             fn=_on_upload,
                             inputs=[upload, chat_state, proposal_plan_state],
                             outputs=[upload, chatbot, chat_state, proposal_plan_state])
 
-                        msg.submit(fn=_chat_wrapper, inputs=[msg, chat_state, proposal_plan_state],
+                        msg.submit(fn=_chat_wrapper, inputs=[
+                                       msg, chat_state, proposal_plan_state, execution_profile_state,
+                                   ],
                                    outputs=[msg, chatbot, chat_state, proposal_plan_state, send_btn, upload],
                                    trigger_mode="once", concurrency_limit=1,
                                    concurrency_id="proposal-assistant-chat")
-                        send_btn.click(fn=_chat_wrapper, inputs=[msg, chat_state, proposal_plan_state],
+                        send_btn.click(fn=_chat_wrapper, inputs=[
+                                       msg, chat_state, proposal_plan_state, execution_profile_state,
+                                   ],
                                        outputs=[msg, chatbot, chat_state, proposal_plan_state, send_btn, upload],
                                        trigger_mode="once", concurrency_limit=1,
                                        concurrency_id="proposal-assistant-chat")
 
                 with gr.Column(scale=1):
                     with gr.Column(elem_id="run-assistant"):
-                        gr.HTML("<div class='panel-title'>运行助理</div>")
+                        with gr.Row(elem_id="run-header"):
+                            gr.HTML("<div class='panel-title'>运行助理</div>")
                         run_welcome_msg = _run_assistant_welcome_history()
-                        run_chat_state = gr.State(run_welcome_msg)
                         run_assistant_run_id = gr.State(None)
                         initial_run_snapshot = _run_assistant_snapshot()
+                        initial_run_history = _sync_run_assistant_history(
+                            run_welcome_msg, initial_run_snapshot
+                        )
+                        run_chat_state = gr.State(initial_run_history)
                         run_chatbot = gr.Chatbot(
-                            height=480,
-                            value=_render_run_assistant_chat(run_welcome_msg, initial_run_snapshot),
+                            height=ASSISTANT_CHAT_HEIGHT,
+                            value=_render_run_assistant_chat(initial_run_history),
                             label="",
                             elem_id="run-chat",
+                            group_consecutive_messages=False,
                         )
                         with gr.Row(elem_id="run-input-row"):
                             run_message = gr.Textbox(
@@ -1369,36 +2047,82 @@ with gr.Blocks(title="Willy Agent") as app:
                 with gr.Column(scale=1):
                     with gr.Column(elem_id="visualization-panel"):
                         gr.HTML("<div class='panel-title'>可视化</div>")
-                        initial_structure_choices = frontend_api.get_run_visualization_choices()
+                        initial_run_choices = frontend_api.get_run_visualization_run_choices()
+                        initial_run_choice = (
+                            initial_run_choices[0] if initial_run_choices else None
+                        )
+                        initial_structure_choices = frontend_api.get_run_visualization_file_choices(
+                            initial_run_choice,
+                        )
                         initial_structure_choice = (
                             initial_structure_choices[0] if initial_structure_choices else None
                         )
-                        structure_selector = gr.Dropdown(
-                            choices=initial_structure_choices,
-                            value=initial_structure_choice,
-                            label="结构",
-                            info="打开下拉菜单时刷新当前运行目录",
-                            allow_custom_value=False,
-                            interactive=True,
-                            elem_id="structure-selector",
+                        with gr.Row(elem_id="structure-selector-row"):
+                            run_selector = gr.Dropdown(
+                                choices=initial_run_choices,
+                                value=initial_run_choice,
+                                label="运行目录",
+                                allow_custom_value=False,
+                                interactive=True,
+                                scale=1,
+                                min_width=0,
+                                elem_id="structure-run-selector",
+                            )
+                            structure_selector = gr.Dropdown(
+                                choices=initial_structure_choices,
+                                value=initial_structure_choice,
+                                label="结构文件",
+                                allow_custom_value=False,
+                                interactive=True,
+                                scale=1,
+                                min_width=0,
+                                elem_id="structure-selector",
+                            )
+                        structure_legend = gr.HTML(
+                            frontend_api.render_run_visualization_legend_html(
+                                initial_structure_choice,
+                                run_id=initial_run_choice,
+                            ),
+                            elem_id="structure-legend",
                         )
                         structure_viewer = gr.HTML(
-                            frontend_api.render_run_visualization_html(initial_structure_choice),
+                            frontend_api.render_run_visualization_html(
+                                initial_structure_choice,
+                                run_id=initial_run_choice,
+                            ),
                             elem_id="structure-viewer",
                         )
+                        run_selector.focus(
+                            fn=_refresh_visualization_run_choices,
+                            inputs=[run_selector, structure_selector],
+                            outputs=[run_selector, structure_selector, structure_viewer, structure_legend],
+                            trigger_mode="always_last",
+                            concurrency_limit=1,
+                            concurrency_id="structure-directory-refresh",
+                            show_progress="hidden",
+                        )
+                        run_selector.change(
+                            fn=_refresh_visualization_run_choices,
+                            inputs=[run_selector, structure_selector],
+                            outputs=[run_selector, structure_selector, structure_viewer, structure_legend],
+                            trigger_mode="always_last",
+                            concurrency_limit=1,
+                            concurrency_id="structure-directory-refresh",
+                            show_progress="hidden",
+                        )
                         structure_selector.focus(
-                            fn=_refresh_current_run_structure_choices,
-                            inputs=[structure_selector],
-                            outputs=[structure_selector, structure_viewer],
+                            fn=_refresh_visualization_file_choices,
+                            inputs=[run_selector, structure_selector],
+                            outputs=[structure_selector, structure_viewer, structure_legend],
                             trigger_mode="always_last",
                             concurrency_limit=1,
                             concurrency_id="structure-directory-refresh",
                             show_progress="hidden",
                         )
                         structure_selector.change(
-                            fn=_render_current_run_structure,
-                            inputs=[structure_selector],
-                            outputs=[structure_viewer],
+                            fn=_render_selected_visualization,
+                            inputs=[run_selector, structure_selector],
+                            outputs=[structure_viewer, structure_legend],
                             trigger_mode="always_last",
                             concurrency_limit=1,
                             concurrency_id="structure-directory-refresh",
@@ -1410,71 +2134,142 @@ with gr.Blocks(title="Willy Agent") as app:
                         gr.HTML("<div class='panel-title'>图表绘制</div>")
                         gr.HTML("<div class='development-placeholder'>开发中...</div>")
 
+        with gr.Tab("远程任务"):
+            with gr.Column(elem_id="remote-task-page"):
+                gr.HTML("<div class='panel-title'>远程任务</div>")
+                gr.Markdown(
+                    "**本版本暂不支持远程执行。**\n\n"
+                    "SSH/Slurm 的执行方式和配置输入已冻结；不会连接远程主机、"
+                    "不会提交任务，也不会影响本地任务的方案或流水线。",
+                    elem_id="remote-task-unavailable-notice",
+                )
+                execution_mode = gr.Radio(
+                    choices=_REMOTE_MODE_PREVIEW_CHOICES,
+                    value=None,
+                    label="远程执行方式（已冻结）",
+                    interactive=False,
+                    elem_id="remote-mode-selector",
+                )
+                execution_profile = gr.Dropdown(
+                    choices=[],
+                    value=None,
+                    label="远程执行配置（已冻结）",
+                    allow_custom_value=False,
+                    interactive=False,
+                    elem_id="remote-profile-selector",
+                )
+                remote_capability_summary = gr.Markdown(
+                    "远程 profile、连接预检、文件传输和调度提交将在后续版本开放。",
+                    elem_id="remote-capability-summary",
+                )
+
         with gr.Tab("配置"):
             llm_base_url, llm_model = llm_form_defaults()
-            gr.Markdown(get_llm_config_notice(), elem_id="llm-configuration-notice")
+            llm_configuration_notice = gr.Markdown(get_llm_config_notice(), elem_id="llm-configuration-notice")
             api_key_status = gr.Markdown("", elem_id="llm-configuration-status")
-            api_key_input = gr.Textbox(
-                label="OpenAI-compatible API Key",
-                placeholder="sk-***你的API key***",
-                type="password",
-                info="支持 OpenAI、DeepSeek、阿里云百炼、智谱 AI、月之暗面（Kimi）等厂商。",
+            llm_mode = gr.Radio(
+                choices=[("托管网关（服务器）", "managed"), ("自带 API Key", "byok")],
+                value=get_llm_provider_mode(),
+                label="LLM 使用方式",
+                elem_id="llm-provider-mode",
             )
-            llm_base_url_input = gr.Textbox(
-                label="Base URL",
-                value=llm_base_url,
-                placeholder="https://api.deepseek.com 或 http://localhost:8000/v1",
-                info="按服务提供商的URL文档填写。部分兼容/中转站服务不能使用网址直填，需在URL结尾添加 /v1。",
-            )
-            llm_model_input = gr.Textbox(
-                label="Model",
-                value=llm_model,
-                info="只能填写服务提供商支持的模型，请注意横线、下划线或大小写格式。",
-            )
-            with gr.Row():
-                api_key_test = gr.Button(
-                    "测试连接",
-                    variant="secondary",
-                    elem_id="test-llm-connection-button",
+            with gr.Column(visible=get_llm_provider_mode() == "managed") as managed_llm_config:
+                managed_gateway_status = gr.Markdown(
+                    _managed_gateway_status_markdown(), elem_id="managed-gateway-status",
                 )
-                api_key_save = gr.Button("保存", variant="primary")
-            api_key_test.click(
-                fn=_test_llm_connection,
-                inputs=[api_key_input, llm_base_url_input, llm_model_input],
-                outputs=[api_key_status, api_key_test, api_key_save],
-                trigger_mode="once",
-                concurrency_limit=1,
-                concurrency_id="llm-connection-test",
-                show_progress="hidden",
+                with gr.Row():
+                    managed_register = gr.Button("申请接入", variant="primary", elem_id="managed-gateway-register")
+                    managed_test = gr.Button("检查托管服务", variant="secondary", elem_id="managed-gateway-test")
+                managed_register.click(
+                    fn=_request_managed_gateway_registration,
+                    outputs=[api_key_status, managed_gateway_status],
+                    trigger_mode="once",
+                    concurrency_limit=1,
+                    concurrency_id="managed-gateway-register",
+                    show_progress="hidden",
+                )
+                managed_test.click(
+                    fn=_test_managed_gateway_connection,
+                    outputs=[api_key_status, managed_test],
+                    trigger_mode="once",
+                    concurrency_limit=1,
+                    concurrency_id="managed-gateway-test",
+                    show_progress="hidden",
+                )
+            with gr.Column(visible=get_llm_provider_mode() != "managed") as byok_llm_config:
+                api_key_input = gr.Textbox(
+                    label="OpenAI-compatible API Key",
+                    placeholder="sk-***你的API key***",
+                    type="password",
+                    info=(
+                        "支持 OpenAI、DeepSeek、阿里云百炼、智谱 AI、月之暗面（Kimi）等厂商。"
+                        "Agent制作者不会以任何方式获取您的API-key。"
+                    ),
+                )
+                llm_base_url_input = gr.Textbox(
+                    label="Base URL",
+                    value=llm_base_url,
+                    placeholder="https://api.deepseek.com 或 http://localhost:8000/v1",
+                    info="按服务提供商的URL文档填写。部分兼容/中转站服务不能使用网址直填，需在URL结尾添加 /v1。",
+                )
+                llm_model_input = gr.Textbox(
+                    label="Model",
+                    value=llm_model,
+                    info="只能填写服务提供商支持的模型，请注意横线、下划线或大小写格式。",
+                )
+                with gr.Row():
+                    api_key_test = gr.Button(
+                        "测试连接",
+                        variant="secondary",
+                        elem_id="test-llm-connection-button",
+                    )
+                    api_key_save = gr.Button("保存", variant="primary")
+                api_key_test.click(
+                    fn=_test_llm_connection,
+                    inputs=[api_key_input, llm_base_url_input, llm_model_input],
+                    outputs=[api_key_status, api_key_test, api_key_save],
+                    trigger_mode="once",
+                    concurrency_limit=1,
+                    concurrency_id="llm-connection-test",
+                    show_progress="hidden",
+                )
+                api_key_save.click(
+                    fn=_save_llm_config,
+                    inputs=[api_key_input, llm_base_url_input, llm_model_input],
+                    outputs=[api_key_input, api_key_status],
+                )
+            llm_mode.change(
+                fn=_select_llm_mode,
+                inputs=[llm_mode],
+                outputs=[managed_llm_config, byok_llm_config, llm_configuration_notice, api_key_status],
             )
-            api_key_save.click(
-                fn=_save_llm_config,
-                inputs=[api_key_input, llm_base_url_input, llm_model_input],
-                outputs=[api_key_input, api_key_status],
-            )
+
+        with gr.Tab("新手指南"):
+            with gr.Column(elem_id="beginner-guide-page"):
+                gr.HTML(BEGINNER_GUIDE_HTML)
 
         with gr.Tab("关于"):
             with gr.Column(elem_id="about-page"):
                 gr.HTML(
                     """
                     <section class="about-intro">
-                        <h2>Willy AI Driven MD Agent</h2>
+                        <h2>Willy : AI驱动的小分子Gromacs模拟工具</h2>
                         <p>Willy 是基于Gromacs软件的MD模拟自动化Agent组。目前它有两名员工：Willy-方案助理 和 Willy-运行助理。</p>
                     </section>
                     <div class="about-grid">
                         <section class="about-section">
                             <h2>参与者</h2>
                             <ul>
-                                <li>项目整体统筹（唯一真人）：小w </li>
-                                <li>架构、交付与质量：ChatGPT 5.6-terra </li>
+                                <li>项目整体统筹：小w </li>
+                                <li>架构、交付、质量、网关：ChatGPT 5.6-terra </li>
                                 <li>前端、文档、测试、Tools等领域工程：ChatGPT 5.6-terra， DeepSeek V4 Pro </li>
                             </ul>
                         </section>
                         <section class="about-section">
                             <h2>Willy 能做什么？</h2>
                             <ul>
-                                <li>Willy-方案助理会根据您的自然语言描述生成配置，执行从分子optimization到 GROMACS 模拟的全链路并谨慎地处理错误和重试。</li>
-                                <li>Willy-运行助理负责监控和记录整个模拟流程。</li>
+                                <li>Willy-方案助理会根据您的自然语言描述生成配置，执行从分子结构优化到 GROMACS 模拟的全链路。</li>
+                                <li>Willy-运行助理负责监控和记录整个模拟流程，并在出现问题时为您提供建议、解决方案和重跑续跑计划。</li>
                                 <li>您还可以通过可视化界面看到运行中产出的的分子结构与MD盒子结果。</li>
                             </ul>
                         </section>
@@ -1482,8 +2277,8 @@ with gr.Blocks(title="Willy Agent") as app:
                             <h2>后续规划</h2>
                             <ul>
                                 <li>扩展更多的工具链集成。</li>
-                                <li>扩展确认式恢复、重试和分支运行控制。</li>
                                 <li>提供历史运行对比，以及受控的后处理和图表能力。</li>
+                                <li>提供对服务器上的GROMACS软件远程控制功能。</li>
                             </ul>
                         </section>
                     </div>
@@ -1497,6 +2292,27 @@ with gr.Blocks(title="Willy Agent") as app:
                         container=False,
                         interactive=False,
                         elem_id="official-account-code",
+                    )
+                with gr.Column(elem_id="third-party-notices"):
+                    gr.HTML(
+                        """
+                        <section>
+                            <h2>第三方组件引用与著作权</h2>
+                            <p>Willy 集成并编排第三方科学软件，但 Willy 作者不拥有其原始项目的著作权。</p>
+                            <p>研究工作如使用了 Willy 集成的 Sobtop 拓扑文件生成、Multiwfn 电荷生成，请至少引用以下文献或网站：</p>
+                            <ol>
+                                <li>Tian Lu, Sobtop, Version [当前版本], <a href="http://sobereva.com/soft/Sobtop" target="_blank" rel="noopener noreferrer">http://sobereva.com/soft/<strong>Sobtop</strong></a> (accessed on 日 月 年)</li>
+                                <li>Tian Lu, Feiwu Chen, Multiwfn: A Multifunctional Wavefunction Analyzer, Journal of Computational Chemistry 33, 580-592 (2012). DOI: 10.1002/jcc.22885</li>
+                                <li>Tian Lu, A comprehensive electron wavefunction analysis toolbox for chemists, Multiwfn, Journal of Chemical Physics 161, 082503 (2024). DOI: 10.1063/5.0216272</li>
+                            </ol>
+                            <p>研究工作如使用了 Willy 集成的 Packmol 建盒组件，请至少引用以下文献：</p>
+                            <ol>
+                                <li>L. Martinez, R. Andrade, E. G. Birgin, J. M. Martinez, Packmol: A package for building initial configurations for molecular dynamics simulations, Journal of Computational Chemistry 30, 2157-2164 (2009). DOI: 10.1002/jcc.21224</li>
+                                <li>J. M. Martinez, L. Martinez, Packing optimization for the automated generation of complex system's initial configurations for molecular dynamics and docking, Journal of Computational Chemistry 24, 819-825 (2003). DOI: 10.1002/jcc.10216</li>
+                            </ol>
+                            <p>使用 Sobtop、Packmol 或其他第三方组件时，使用者还应遵守其各自的许可、分发和引用要求。Willy 对这些组件仅提供集成与工作流编排，不主张其原始软件、文档或学术成果的著作权。</p>
+                        </section>
+                        """
                     )
 
 app.queue()

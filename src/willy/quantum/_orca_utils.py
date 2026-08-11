@@ -72,7 +72,7 @@ def extract_xyz(struct_path: str, workdir: str) -> str:
     commands = f"100\n2\n2\n{tmp_xyz.resolve()}\n0\nq\n"
 
     try:
-        run_managed_command(
+        result = run_managed_command(
             [multiwfn, str(mp.resolve())],
             input_text=commands,
             cwd=workdir,
@@ -82,6 +82,8 @@ def extract_xyz(struct_path: str, workdir: str) -> str:
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{mp.name}: Multiwfn 坐标提取超时 (60s)")
+    if result.returncode != 0:
+        raise RuntimeError(f"{mp.name}: Multiwfn 坐标提取执行失败")
 
     if not tmp_xyz.exists():
         raise RuntimeError(

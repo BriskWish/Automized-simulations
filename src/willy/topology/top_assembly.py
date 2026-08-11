@@ -13,7 +13,7 @@ from willy.topology.backends import normalize_topology_config
 from willy.topology.manifest import (
     TopologyManifestComponent,
     load_manifest,
-    manifest_path,
+    manifest_exists,
     write_manifest,
 )
 from willy.topology.validation import run_output_path, validate_topology_files
@@ -168,19 +168,29 @@ def _prepare_assembly_itps(
     topo_dir: Path,
     manifest: dict[str, Any],
     components: list[dict[str, Any]],
-) -> int:
+) -> tuple[int, list[str] | None]:
     """Copy source ITPs and revise only the copies used by ``topol.top``."""
     from willy.topology.itp_revise import revise_itp
 
     revised = 0
+    namespaced_atomtypes: list[str] | None = [] if manifest.get("forcefield_family") == "oplsaa" else None
     for component in components:
         source = Path(component["itp"])
         assembly_itp = _assembly_itp_path(component, topo_dir)
         shutil.copy2(source, assembly_itp)
+        if namespaced_atomtypes is not None:
+            from willy.topology.itp_namespace import ITPNamespaceError, namespace_itp
+
+            try:
+                namespace_result = namespace_itp(assembly_itp, component["residue_name"])
+            except ITPNamespaceError as exc:
+                raise AssemblyValidationError(str(exc), ErrorKind.ATOMTYPE_CONFLICT) from exc
+            namespaced_atomtypes.extend(namespace_result.atomtype_lines)
+            component["atomtype_namespace"] = dict(namespace_result.mapping)
         revised += revise_itp(str(assembly_itp), residue_name=component["residue_name"])
         component["assembly_itp"] = str(assembly_itp)
     _write_manifest_data(topo_dir, manifest)
-    return revised
+    return revised, namespaced_atomtypes
 
 
 def _validated_manifest_components(
@@ -192,13 +202,13 @@ def _validated_manifest_components(
     backend = manifest.get("backend")
     family = manifest.get("forcefield_family")
     if backend not in {"sobtop", "oplsaa"} or family not in _FORCEFIELD_TEMPLATES:
-        raise AssemblyValidationError("topology_manifest.json 的后端或力场族无效")
+        raise AssemblyValidationError("拓扑 manifest 的后端或力场族无效")
     if topology["backend"] != backend or topology["force_field"] != family:
-        raise AssemblyValidationError("配置快照与 topology_manifest.json 的后端/力场族不一致")
+        raise AssemblyValidationError("配置快照与拓扑 manifest 的后端/力场族不一致")
 
     manifest_components = manifest.get("components")
     if not isinstance(manifest_components, list):
-        raise AssemblyValidationError("topology_manifest.json 缺少 components 列表")
+        raise AssemblyValidationError("拓扑 manifest 缺少 components 列表")
     by_residue = {component.get("residue_name"): component for component in manifest_components}
     enabled: list[dict[str, Any]] = []
     for residue_name, quantity in config.residues.items():
@@ -242,6 +252,7 @@ def generate_top(
     config_path: str | None = None,
     topo_dir: str | None = None,
     output_path: str | None = None,
+    atomtype_lines: list[str] | None = None,
 ) -> Path:
     """Generate ``topol.top`` from validated components in the run manifest."""
     config_file = Path(config_path) if config_path is not None else CONFIG_PATH
@@ -257,13 +268,20 @@ def generate_top(
     topology, issues, _ = normalize_topology_config(raw_config.get("topology", {}))
     if issues:
         raise AssemblyValidationError("; ".join(issues))
-    if not manifest_path(directory).is_file():
-        raise AssemblyValidationError(f"缺少 {manifest_path(directory).name}，Step 4 未产生可用拓扑产物")
+    if not manifest_exists(directory):
+        raise AssemblyValidationError("缺少拓扑 manifest，Step 4 未产生可用拓扑产物")
     manifest = load_manifest(directory)
     components = _validated_manifest_components(manifest, config, directory, topology)
     family = manifest["forcefield_family"]
     template = _FORCEFIELD_TEMPLATES[family]
-    atomtype_lines = _collect_dedup_atomtypes(components)
+    if atomtype_lines is None:
+        if family == "oplsaa":
+            # Direct callers may request generation after Step 4 without
+            # going through ``build``.  Prepare fresh namespaced copies so
+            # their references and global atomtype definitions stay aligned.
+            _, atomtype_lines = _prepare_assembly_itps(directory, manifest, components)
+        else:
+            atomtype_lines = _collect_dedup_atomtypes(components)
     assembly_itps: list[Path] = []
     for component in components:
         expected = _assembly_itp_path(component, directory)
@@ -317,9 +335,17 @@ def build(
             raise AssemblyValidationError("; ".join(issues))
         manifest = load_manifest(directory)
         components = _validated_manifest_components(manifest, config, directory, topology)
-        _collect_dedup_atomtypes(components)
-        revised = _prepare_assembly_itps(directory, manifest, components)
-        top_path = generate_top(config_path=str(config_file), topo_dir=str(directory), output_path=output_path)
+        if manifest.get("forcefield_family") == "oplsaa":
+            atomtype_lines = None
+        else:
+            atomtype_lines = _collect_dedup_atomtypes(components)
+        revised, namespaced_atomtypes = _prepare_assembly_itps(directory, manifest, components)
+        if namespaced_atomtypes is not None:
+            atomtype_lines = namespaced_atomtypes
+        top_path = generate_top(
+            config_path=str(config_file), topo_dir=str(directory), output_path=output_path,
+            atomtype_lines=atomtype_lines,
+        )
     except AssemblyValidationError as exc:
         return StepResult(
             step_name="top_assembly", step_index=5, success=False,

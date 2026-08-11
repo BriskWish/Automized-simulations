@@ -1,6 +1,7 @@
 import json
 
 from willy.run_provenance import RUN_PROVENANCE_FILENAME, create_or_refresh_provenance
+from willy.run_metadata import create_run_manifest, load_run_manifest
 
 
 def test_provenance_is_run_local_redacted_and_tracks_config_revisions(tmp_path):
@@ -45,3 +46,23 @@ def test_provenance_rejects_config_outside_current_run(tmp_path):
         assert "当前 run" in str(exc)
     else:
         raise AssertionError("外部 config 不应写入 provenance")
+
+
+def test_provenance_uses_unified_private_section_when_enabled(tmp_path):
+    run_dir = tmp_path / "md_run" / "md_unified"
+    run_dir.mkdir(parents=True)
+    config = run_dir / "config.json"
+    config.write_text('{"md":{"run_seed":7}}', encoding="utf-8")
+    create_run_manifest(run_dir)
+
+    payload = create_or_refresh_provenance(
+        run_dir, project_root=tmp_path, backend="g16", config_path=config,
+        random_seed=7, capabilities={"gmx": {"status": "available"}},
+        llm_model="model-a", prompt_versions={"simulation": "v2"},
+    )
+
+    unified = load_run_manifest(run_dir)
+    stored = unified["sections"]["provenance"]["data"]
+    assert payload["run_id"] == "md_unified"
+    assert stored["random_seed"] == 7
+    assert not (run_dir / RUN_PROVENANCE_FILENAME).exists()

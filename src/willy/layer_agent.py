@@ -344,6 +344,25 @@ class LayerAgent:
                 "error_message": "工具提案不符合动作契约",
                 "extra": {"policy_denied": True},
             }, ensure_ascii=False)
+        rejection = self._tool_request_rejection(tool_name, args, step_result)
+        if rejection:
+            self._record_decision(
+                validated, decision, attempt=ctx.attempts,
+                result="evidence_rejected", success=False,
+            )
+            return json.dumps({
+                "_step_result": True,
+                "success": False,
+                "step_name": step_result.step_name,
+                "step_index": step_result.step_index,
+                "error_kind": ErrorKind.INPUT_CONTRACT.value,
+                "error_message": rejection,
+                "extra": {
+                    "policy_denied": True,
+                    "evidence_rejected": True,
+                    "policy_id": decision.policy_id,
+                },
+            }, ensure_ascii=False)
         if not decision.allowed:
             self._record_decision(
                 validated, decision, attempt=ctx.attempts,
@@ -368,6 +387,15 @@ class LayerAgent:
         tool_result = self.handle_tool(tool_name, args)
         self._record_execution(validated, decision, tool_result, attempt=ctx.attempts)
         return tool_result
+
+    def _tool_request_rejection(
+        self,
+        tool_name: str,
+        args: Mapping[str, object],
+        step_result: StepResult,
+    ) -> str | None:
+        """Let a layer reject an otherwise valid tool proposal from evidence."""
+        return None
 
     def _build_action_proposal(
         self,
@@ -526,6 +554,14 @@ class LayerAgent:
             parts.append(
                 "\n## 失败步骤保留的产物\n"
                 f"{json.dumps(step_result.outputs, indent=2, default=str)}\n"
+            )
+        if step_result.extra:
+            # Extra data is bounded, structured evidence (not raw logs).  It
+            # lets the model distinguish a preflight contract failure from an
+            # actual external-process failure without guessing from text.
+            parts.append(
+                "\n## 私有执行证据（仅用于诊断）\n"
+                f"{json.dumps(step_result.extra, ensure_ascii=False, indent=2, default=str)}\n"
             )
         parts.append(f"\n## config.json\n```json\n{config_text[:2000]}\n```\n")
         parts.append(f"\n## 运行目录\n{run_dir}\n")

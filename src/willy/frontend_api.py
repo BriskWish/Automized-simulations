@@ -14,6 +14,7 @@ app.py 只通过此模块访问后端，不再直接触碰路径/shell/文件系
 
 from __future__ import annotations
 from collections.abc import Mapping
+import importlib
 import json, math, os, re, shutil, subprocess, signal, tempfile, threading, time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,9 +29,19 @@ from willy.llm_config import (
     form_llm_settings,
     load_llm_settings,
     validate_llm_values,
+    load_llm_provider_mode,
+)
+from willy.managed_gateway import (
+    ManagedGatewayError,
+    ManagedIdentityStore,
+    load_managed_gateway_profile,
+    managed_gateway_usage_snapshot,
+    managed_identity_status,
+    request_managed_registration,
 )
 from willy.run_registry import RunRegistry, RunRegistryError, RunStateConflict
 from willy.step_registry import EQ_STEP, STEP_REGISTRY
+from willy.simulation.mdrun_eta import MDRUN_HEARTBEAT_INTERVAL_S
 from willy.pipeline_launch import (
     active_pipeline_run_id,
     cleanup_finished_launch,
@@ -42,6 +53,29 @@ from willy.pipeline_launch import (
 
 ROOT = get_project_root()
 _TRANSIENT_RUN_STATES = {"running", "retrying", "stopping"}
+_REMOTE_REGISTRY_MODULE = "willy.remote_registry"
+_REMOTE_REGISTRY_SNAPSHOT_FUNCTION = "get_public_execution_snapshot"
+_EXECUTION_MODES = ("local", "ssh", "slurm")
+_EXECUTION_MODE_LABELS = {
+    "local": "本机执行",
+    "ssh": "SSH 执行",
+    "slurm": "Slurm 调度",
+}
+_EXECUTION_CONNECTION_STATES = {
+    "ready", "not_configured", "unavailable", "unknown",
+}
+_EXECUTION_PROFILE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+
+
+def _refresh_agent_llm_client() -> None:
+    """Keep the in-process Config Agent aligned with a just-saved local mode."""
+    try:
+        from willy.agent_config import refresh_llm_client
+
+        refresh_llm_client()
+    except Exception:
+        # Persistence is still valid even when an optional interactive agent is unavailable.
+        pass
 
 
 class LLMConnectionResult(TypedDict):
@@ -51,6 +85,35 @@ class LLMConnectionResult(TypedDict):
     code: str
     message: str
     suggestion: str
+
+
+class ExecutionProfile(TypedDict):
+    """Redacted execution-profile data allowed to cross the frontend boundary."""
+
+    profile_id: str
+    mode: str
+    label: str
+    available: bool
+    connection_state: str
+
+
+class ExecutionProfileSnapshot(TypedDict):
+    """Read-only execution selection data for the remote-task page."""
+
+    registry_state: str
+    profiles: list[ExecutionProfile]
+    selected_mode: str
+    selected_profile_id: str
+    summary: str
+
+
+class ExecutionProposalContext(TypedDict):
+    """Safe selection intent sent to Config Agent for server-side validation."""
+
+    execution_mode: str
+    execution_profile_id: str
+    available: bool
+    summary: str
 
 
 LLM_CONNECTION_TIMEOUT_S = 12.0
@@ -108,7 +171,43 @@ _LLM_CONNECTION_PUBLIC_ERRORS: dict[str, tuple[str, str]] = {
         "当前模型不支持 function calling",
         "更换支持工具调用的模型；Willy 的配置与自动修复依赖该能力。",
     ),
+    "managed_not_selected": (
+        "当前未选择托管网关模式",
+        "在配置页选择“托管网关”后再检查服务。",
+    ),
+    "managed_not_registered": (
+        "本机尚未登记到托管网关",
+        "在配置页申请接入，并等待网关管理员批准。",
+    ),
+    "managed_not_approved": (
+        "设备尚未获得托管网关批准",
+        "请让网关管理员在本机管理页面批准该设备。",
+    ),
+    "managed_gateway_protocol": (
+        "托管网关返回的状态无效",
+        "请联系网关管理员检查服务版本和运行状态。",
+    ),
+    "managed_gateway_rejected": (
+        "托管网关拒绝了状态查询",
+        "请联系网关管理员检查设备授权状态。",
+    ),
+    "managed_gateway_unreachable": (
+        "无法连接托管网关",
+        "检查网关地址、网络路径和网关进程状态。",
+    ),
+    "managed_gateway_timeout": (
+        "托管网关连接超时",
+        "检查网关负载、网络路径和防火墙设置后重试。",
+    ),
 }
+
+
+def get_llm_provider_mode() -> str:
+    """Return a UI-safe mode even when a local file is temporarily malformed."""
+    try:
+        return load_llm_provider_mode(ROOT)
+    except LLMConfigError:
+        return "byok"
 
 def get_llm_config_status() -> str:
     """Report LLM configuration state without ever returning a credential."""
@@ -118,6 +217,19 @@ def get_llm_config_status() -> str:
         return "OpenAI-compatible LLM 配置无效，请检查 Base URL、Model 和 API Key。"
     if settings is None:
         return "尚未配置 OpenAI-compatible LLM 服务。"
+    if getattr(settings, "provider_mode", "byok") == "managed":
+        profile = getattr(settings, "managed_profile", None)
+        label = getattr(profile, "label", "托管网关")
+        try:
+            state = managed_identity_status(profile) if profile is not None else "not_configured"
+        except ManagedGatewayError:
+            state = "not_configured"
+        state_label = {
+            "not_registered": "尚未注册设备",
+            "pending_or_approved": "设备已登记，等待或已获得管理员批准",
+            "not_configured": "托管配置不可用",
+        }.get(state, "状态未知")
+        return f"托管 LLM 网关：{label}；{state_label}；模型：{settings.model}。"
     source = "系统环境变量" if settings.source == "environment" else "本机 .env"
     legacy = "（已兼容旧 DeepSeek 密钥）" if settings.legacy_key else ""
     return f"OpenAI-compatible LLM 已通过{source}配置，模型：{settings.model}。{legacy}"
@@ -130,6 +242,12 @@ def get_llm_config_notice() -> str:
     except LLMConfigError:
         settings = None
     model = settings.model if settings is not None else "当前无可用模型"
+    if settings is not None and getattr(settings, "provider_mode", "byok") == "managed":
+        return (
+            "当前使用托管 LLM 网关；设备私钥只保存在本机受保护身份文件，"
+            "接入申请由服务器计数并由管理员批准。LLM prompt 会经过网关运营者控制的服务。"
+            f"当前模型别名：*{model}*。"
+        )
     return (
         "Agent制作者不会以任何方式获取您的API-key。"
         "您提供的LLM只会在您电脑本地的.env配置。"
@@ -153,6 +271,7 @@ def save_llm_config(api_key: str, base_url: str, model: str) -> str:
             "WILLY_LLM_BASE_URL",
             "WILLY_LLM_MODEL",
             "DEEPSEEK_API_KEY",
+            "WILLY_LLM_MODE",
         }
         for line in existing_lines:
             name = line.split("=", 1)[0].strip() if "=" in line else ""
@@ -175,7 +294,78 @@ def save_llm_config(api_key: str, base_url: str, model: str) -> str:
     except OSError:
         return "保存失败，请检查项目目录的写入权限。"
 
-    return "OpenAI-compatible LLM 配置已保存到本机 .env。请重启应用后生效。"
+    _refresh_agent_llm_client()
+    return "OpenAI-compatible LLM 配置已保存到本机 .env。"
+
+
+def save_llm_mode(mode: str) -> str:
+    """Persist only the local provider mode; managed endpoint fields stay immutable."""
+    normalized = mode.strip().lower() if isinstance(mode, str) else ""
+    if normalized not in {"byok", "managed"}:
+        return "LLM 模式无效。"
+    env_path = ROOT / ".env"
+    try:
+        existing_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+        updated_lines = [
+            line for line in existing_lines
+            if line.split("=", 1)[0].strip() != "WILLY_LLM_MODE"
+        ]
+        if normalized == "managed":
+            updated_lines.append("WILLY_LLM_MODE=managed")
+        fd, temp_name = tempfile.mkstemp(prefix=".env-", suffix=".tmp", dir=ROOT)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(updated_lines) + ("\n" if updated_lines else ""))
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, env_path)
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
+    except OSError:
+        return "LLM 模式保存失败，请检查项目目录的写入权限。"
+    if normalized == "managed":
+        try:
+            load_managed_gateway_profile(ROOT)
+        except ManagedGatewayError:
+            # The mode selection is valid even if a deployment profile arrives later.
+            pass
+    _refresh_agent_llm_client()
+    return "已选择托管 LLM 网关。" if normalized == "managed" else "已选择自带 API Key。"
+
+
+def get_managed_gateway_status() -> dict[str, object]:
+    """Return a redacted local managed-profile/identity status for the UI."""
+    try:
+        profile = load_managed_gateway_profile(ROOT)
+        state = managed_identity_status(profile)
+    except ManagedGatewayError as error:
+        return {"ok": False, "code": error.code, "message": "托管网关配置尚不可用，请联系部署者。"}
+    return {
+        "ok": True,
+        "code": "ok",
+        "profile_id": profile.profile_id,
+        "label": profile.label,
+        "model": profile.model,
+        "device_state": state,
+    }
+
+
+def request_managed_gateway_registration() -> str:
+    """Submit this machine's public key for one server-counted registration slot."""
+    try:
+        profile = load_managed_gateway_profile(ROOT)
+        status = request_managed_registration(profile, store=ManagedIdentityStore())
+    except ManagedGatewayError as error:
+        messages = {
+            "managed_registration_denied": "该设备身份已被网关拒绝或撤销。",
+            "managed_registration_limit_reached": "接入申请已达服务器名额上限。",
+            "managed_registration_rate_limited": "申请次数过多，请稍后再试。",
+            "managed_access_denied": "该设备尚未获得网关批准。",
+            "managed_gateway_unreachable": "无法连接托管网关。",
+            "managed_gateway_timeout": "托管网关连接超时。",
+        }
+        return messages.get(error.code, "托管设备申请未完成，请联系网关管理员。")
+    _refresh_agent_llm_client()
+    return "设备公钥已发送，当前为待审批状态；请等待网关管理员批准。" if status == "pending" else "本机设备已获得网关批准。"
 
 
 def get_api_key_status() -> str:
@@ -312,6 +502,273 @@ def test_llm_connection(api_key: str, base_url: str, model: str) -> LLMConnectio
     return _connection_result(True, "ok")
 
 
+def test_managed_gateway_connection() -> LLMConnectionResult:
+    """Check the gateway and return this device's remaining token quota."""
+    try:
+        settings = load_llm_settings(ROOT)
+    except LLMConfigError:
+        return _connection_result(False, "managed_not_registered")
+    if settings is None or getattr(settings, "provider_mode", "byok") != "managed":
+        return _connection_result(False, "managed_not_selected")
+    profile = getattr(settings, "managed_profile", None)
+    if profile is None:
+        return _connection_result(False, "managed_gateway_protocol")
+    try:
+        usage = managed_gateway_usage_snapshot(profile)
+    except ManagedGatewayError as error:
+        if error.code == "managed_device_not_registered":
+            return _connection_result(False, "managed_not_registered")
+        if error.code in {"managed_access_denied", "managed_quota_exceeded"}:
+            return _connection_result(False, "managed_not_approved")
+        return _connection_result(False, error.code if error.code in _LLM_CONNECTION_PUBLIC_ERRORS else "network")
+    except Exception:
+        return _connection_result(False, "network")
+
+    def remaining(period: str) -> int:
+        details = usage.get(period) if isinstance(usage, Mapping) else None
+        if not isinstance(details, Mapping):
+            raise ValueError("invalid usage period")
+        limit = details.get("limit")
+        settled = details.get("settled_tokens")
+        reserved = details.get("reserved_tokens")
+        values = (limit, settled, reserved)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+            raise ValueError("invalid usage values")
+        if limit < 1:
+            raise ValueError("invalid usage limit")
+        return max(0, limit - settled - reserved)
+
+    try:
+        daily_remaining = remaining("daily")
+        monthly_remaining = remaining("monthly")
+    except ValueError:
+        return _connection_result(False, "managed_gateway_protocol")
+    return {
+        "ok": True,
+        "code": "ok",
+        "message": "托管网关连接成功",
+        "suggestion": f"本日剩余 Token：{daily_remaining:,}；本月剩余 Token：{monthly_remaining:,}。",
+    }
+
+
+def _fallback_execution_profiles() -> list[ExecutionProfile]:
+    """Provide safe choices before the optional remote registry is installed."""
+    return [
+        {
+            "profile_id": "local-default",
+            "mode": "local",
+            "label": _EXECUTION_MODE_LABELS["local"],
+            "available": True,
+            "connection_state": "ready",
+        },
+        {
+            "profile_id": "ssh-not-configured",
+            "mode": "ssh",
+            "label": _EXECUTION_MODE_LABELS["ssh"],
+            "available": False,
+            "connection_state": "not_configured",
+        },
+        {
+            "profile_id": "slurm-not-configured",
+            "mode": "slurm",
+            "label": _EXECUTION_MODE_LABELS["slurm"],
+            "available": False,
+            "connection_state": "not_configured",
+        },
+    ]
+
+
+def _remote_registry_snapshot() -> tuple[object | None, str]:
+    """Read a local registry capability view, never a connection API.
+
+    ``get_public_execution_snapshot`` is the preferred narrow contract.  The
+    ``public_remote_capabilities`` fallback keeps independently upgraded
+    frontends compatible with the initial registry implementation.  Both
+    registry functions are required to be local, read-only metadata reads.
+    """
+    try:
+        module = importlib.import_module(_REMOTE_REGISTRY_MODULE)
+        reader = getattr(module, _REMOTE_REGISTRY_SNAPSHOT_FUNCTION, None)
+        if not callable(reader):
+            reader = getattr(module, "public_remote_capabilities", None)
+        if not callable(reader):
+            return None, "unavailable"
+        snapshot = reader()
+    except Exception:
+        # The UI must remain usable while the execution subsystem is absent,
+        # misconfigured, or upgraded independently.
+        return None, "unavailable"
+    return snapshot, "ready" if isinstance(snapshot, Mapping) else "unavailable"
+
+
+def _safe_execution_mode(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    mode = value.strip().lower()
+    return mode if mode in _EXECUTION_MODES else None
+
+
+def _safe_connection_state(value: object, available: bool) -> str:
+    if isinstance(value, str) and value.strip().lower() in _EXECUTION_CONNECTION_STATES:
+        return value.strip().lower()
+    return "unknown" if available else "not_configured"
+
+
+def _safe_profile_id(value: object, *, mode: str, index: int) -> str:
+    if isinstance(value, str):
+        candidate = value.strip()
+        if _EXECUTION_PROFILE_ID.fullmatch(candidate):
+            return candidate
+    return f"{mode}-{index + 1}"
+
+
+def _public_execution_profiles(snapshot: object | None) -> list[ExecutionProfile]:
+    """Whitelist remote registry data so hosts, paths, keys and commands stay private."""
+    profiles: list[ExecutionProfile] = []
+    raw_profiles = snapshot.get("profiles") if isinstance(snapshot, Mapping) else None
+    registry_configured = (
+        isinstance(snapshot, Mapping)
+        and snapshot.get("available") is True
+    )
+    if isinstance(raw_profiles, Mapping):
+        # Initial registry releases expose a profile-ID keyed capability map.
+        # ``direct`` is SSH transport; the map itself has no connection result.
+        for index, (raw_profile_id, raw_profile) in enumerate(raw_profiles.items()):
+            if not isinstance(raw_profile, Mapping):
+                continue
+            launcher = raw_profile.get("launcher")
+            mode = "ssh" if launcher == "direct" else "slurm" if launcher == "slurm" else None
+            if mode is None:
+                continue
+            profile_id = _safe_profile_id(raw_profile_id, mode=mode, index=index)
+            if any(item["profile_id"] == profile_id for item in profiles):
+                profile_id = f"{mode}-{index + 1}"
+            profiles.append({
+                "profile_id": profile_id,
+                "mode": mode,
+                "label": _EXECUTION_MODE_LABELS[mode],
+                "available": registry_configured,
+                # A parsed local entry is only registered.  Connectivity is
+                # exclusively established by the later deterministic preflight.
+                "connection_state": "unknown" if registry_configured else "not_configured",
+            })
+    elif isinstance(raw_profiles, (list, tuple)):
+        for index, raw_profile in enumerate(raw_profiles):
+            if not isinstance(raw_profile, Mapping):
+                continue
+            mode = _safe_execution_mode(raw_profile.get("mode"))
+            if mode is None:
+                continue
+            profile_id = _safe_profile_id(
+                raw_profile.get("profile_id", raw_profile.get("id")),
+                mode=mode,
+                index=index,
+            )
+            if any(item["profile_id"] == profile_id for item in profiles):
+                profile_id = f"{mode}-{index + 1}"
+            available = raw_profile.get("available") is True
+            connection_state = _safe_connection_state(
+                raw_profile.get("connection_state", raw_profile.get("status")),
+                available,
+            )
+            if mode != "local" and available:
+                # Profile discovery is never a network probe, even when an
+                # older registry reports a generic "ready" boolean.
+                connection_state = "unknown"
+            profiles.append({
+                "profile_id": profile_id,
+                "mode": mode,
+                # Labels are derived from the mode, never copied from a host alias.
+                "label": _EXECUTION_MODE_LABELS[mode],
+                "available": available,
+                "connection_state": connection_state,
+            })
+
+    for fallback in _fallback_execution_profiles():
+        if not any(item["mode"] == fallback["mode"] for item in profiles):
+            profiles.append(fallback)
+    return profiles
+
+
+def _select_public_execution_profile(
+    profiles: list[ExecutionProfile],
+    selected_mode: str | None,
+    selected_profile_id: str | None,
+) -> ExecutionProfile:
+    """Resolve a browser selection without persisting or invoking remote work."""
+    requested_mode = _safe_execution_mode(selected_mode)
+    if isinstance(selected_profile_id, str):
+        for profile in profiles:
+            if profile["profile_id"] == selected_profile_id:
+                if requested_mode is None or profile["mode"] == requested_mode:
+                    return profile
+    if requested_mode is not None:
+        for profile in profiles:
+            if profile["mode"] == requested_mode:
+                return profile
+    return next(profile for profile in profiles if profile["mode"] == "local")
+
+
+def _execution_profile_summary(profile: ExecutionProfile, registry_state: str) -> str:
+    mode_label = profile["label"]
+    if profile["mode"] == "local":
+        return f"已选择{mode_label}。此页面不会启动进程或提交任务。"
+    if profile["available"] and registry_state == "ready":
+        return (
+            f"已选择{mode_label}配置，已在本机登记，尚未进行连接预检。"
+            "连接详情已隐藏；此页面不会发起连接或提交任务。"
+        )
+    return f"已选择{mode_label}配置，但当前不可用或尚未配置。此页面不会发起连接或提交任务。"
+
+
+def get_execution_profile_snapshot(
+    selected_mode: str | None = None,
+    selected_profile_id: str | None = None,
+) -> ExecutionProfileSnapshot:
+    """Return a redacted, read-only execution-profile selection snapshot.
+
+    The optional registry contract is intentionally narrow:
+    ``willy.remote_registry.get_public_execution_snapshot()`` may return only
+    public profile IDs, modes, booleans and coarse connection states.  The
+    initial ``public_remote_capabilities()`` map is also supported.  This
+    facade never exposes raw registry fields and never calls execution APIs.
+    """
+    raw_snapshot, registry_state = _remote_registry_snapshot()
+    profiles = _public_execution_profiles(raw_snapshot)
+    profile = _select_public_execution_profile(profiles, selected_mode, selected_profile_id)
+    return {
+        "registry_state": registry_state,
+        "profiles": profiles,
+        "selected_mode": profile["mode"],
+        "selected_profile_id": profile["profile_id"],
+        "summary": _execution_profile_summary(profile, registry_state),
+    }
+
+
+def get_execution_profile_proposal_context(
+    selected_mode: str | None,
+    selected_profile_id: str | None,
+) -> ExecutionProposalContext:
+    """Prepare a safe selection intent for the Config Agent handoff.
+
+    The UI supplies this selection intent to the Config Agent.  That backend
+    independently resolves the profile against its private registry before it
+    freezes ``config.execution.md``; this helper never mutates a plan or
+    launches a pipeline.
+    """
+    snapshot = get_execution_profile_snapshot(selected_mode, selected_profile_id)
+    profile = next(
+        item for item in snapshot["profiles"]
+        if item["profile_id"] == snapshot["selected_profile_id"]
+    )
+    return {
+        "execution_mode": snapshot["selected_mode"],
+        "execution_profile_id": snapshot["selected_profile_id"],
+        "available": profile["available"],
+        "summary": snapshot["summary"],
+    }
+
+
 def get_active_run_id() -> str | None:
     """Return only the run ID currently owned by the atomic launch lock."""
     run_id = active_pipeline_run_id(ROOT)
@@ -363,6 +820,35 @@ def _legacy_runner_pid_is_alive(pid: int) -> bool:
         return True
 
 
+def _legacy_pipeline_group_is_alive(pgid: int) -> bool:
+    """Recognize children in a legacy runner's dedicated process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _latest_transient_run_has_live_evidence() -> bool:
+    """Check the newest run-local liveness snapshot without changing status."""
+    try:
+        registry = RunRegistry(ROOT)
+        latest = registry.list_runs(limit=1)
+        run_id = latest[0].get("run_id") if latest else None
+        if not isinstance(run_id, str):
+            return False
+        status = registry.get_run_status(run_id, reconcile=False)
+        if status.get("state") not in _TRANSIENT_RUN_STATES:
+            return False
+        return bool(registry.get_live_stage_evidence(run_id, status).get("active"))
+    except (OSError, RunRegistryError):
+        return False
+
+
 def stop_pipeline(clean: bool = False) -> str:
     """Persist a user stop before asking the target pipeline to exit."""
     run_id = get_active_run_id()
@@ -402,7 +888,7 @@ def is_pipeline_running() -> bool:
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            if _legacy_runner_pid_is_alive(pid):
+            if _legacy_runner_pid_is_alive(pid) or _legacy_pipeline_group_is_alive(pid):
                 return True
         except ValueError:
             pass
@@ -411,14 +897,10 @@ def is_pipeline_running() -> bool:
         except OSError:
             pass
 
-    # 回退：pgrep 精确匹配
-    try:
-        result = subprocess.run(
-            ['pgrep', '-f', r'run_pipeline\.py'],
-            capture_output=True, timeout=2)
-        return result.returncode == 0
-    except Exception:
-        return False
+    # A runner can briefly disappear from the project lock while its managed
+    # GROMACS child is still writing the run-local heartbeat.  Keep launch and
+    # stop controls conservative in that window.
+    return _latest_transient_run_has_live_evidence()
 
 
 def is_pipeline_alive() -> bool:
@@ -429,7 +911,7 @@ def is_pipeline_alive() -> bool:
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            if _legacy_runner_pid_is_alive(pid):
+            if _legacy_runner_pid_is_alive(pid) or _legacy_pipeline_group_is_alive(pid):
                 return True
         except ValueError:
             pass
@@ -437,17 +919,11 @@ def is_pipeline_alive() -> bool:
             pid_file.unlink(missing_ok=True)
         except OSError:
             pass
-    try:
-        result = subprocess.run(
-            ['pgrep', '-f', r'run_pipeline\.py'],
-            capture_output=True, timeout=2)
-        return result.returncode == 0
-    except Exception:
-        return False
+    return _latest_transient_run_has_live_evidence()
 
 
 def reconcile_stale_pipeline_state() -> str | None:
-    """Finalize only the newest transient run after verified local process exit."""
+    """Finalize a stale run only after run-local liveness evidence is stale."""
     if is_pipeline_running():
         return None
     try:
@@ -458,10 +934,38 @@ def reconcile_stale_pipeline_state() -> str | None:
         if not isinstance(run_id, str):
             return None
         registry = RunRegistry(ROOT)
-        status = registry.get_run_status(run_id)
+        status = registry.get_run_status(run_id, reconcile=False)
         if status.get("state") not in _TRANSIENT_RUN_STATES:
             return None
-        registry.mark_aborted(run_id, event_type="run_aborted_after_process_exit")
+        evidence = registry.get_live_stage_evidence(run_id, status)
+        if evidence.get("active"):
+            return None
+        expected_revision = status.get("state_revision")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            return None
+
+        # Re-read after the evidence check.  A heartbeat or stage result that
+        # arrived meanwhile must win over this stale-process conclusion.
+        latest_status = registry.get_run_status(run_id, reconcile=False)
+        if (
+            latest_status.get("state") not in _TRANSIENT_RUN_STATES
+            or latest_status.get("state_revision") != expected_revision
+        ):
+            return None
+        registry.mark_aborted(
+            run_id,
+            event_type="run_aborted_after_process_exit",
+            expected_revision=expected_revision,
+            event_details={
+                "source": "stale_reconciliation",
+                "reason": "runner_and_run_local_evidence_stale",
+                "stage": evidence.get("stage"),
+                "evidence_source": evidence.get("source"),
+                "evidence_age_s": evidence.get("evidence_age_s"),
+                "checked_revision": expected_revision,
+                "grace_s": max(60.0, MDRUN_HEARTBEAT_INTERVAL_S * 3.0),
+            },
+        )
         from willy.simulation.manifest import clear_stop_request
         clear_stop_request(registry.resolve_run_id(run_id))
         return run_id
@@ -470,8 +974,11 @@ def reconcile_stale_pipeline_state() -> str | None:
 
 
 def get_latest_run_control_state() -> str | None:
-    """Return persisted control state after reconciling a dead latest process."""
-    reconcile_stale_pipeline_state()
+    """Return persisted control state without mutating the run.
+
+    Stale-process reconciliation is an explicit maintenance action, never a
+    side effect of the frontend polling timer.
+    """
     run_id = get_active_run_id()
     if run_id is None:
         choices = RunRegistry(ROOT).list_runs(limit=1)
@@ -479,7 +986,7 @@ def get_latest_run_control_state() -> str | None:
     if not isinstance(run_id, str):
         return None
     try:
-        return str(RunRegistry(ROOT).get_run_status(run_id).get("state", "unknown"))
+        return str(RunRegistry(ROOT).get_run_status(run_id, reconcile=False).get("state", "unknown"))
     except RunRegistryError:
         return None
 
@@ -581,7 +1088,7 @@ def resolve_molecule(choice: str, catalog: dict[str, dict[str, str]]) -> tuple[s
 
 # 空状态占位（暖灰底色，与可视化区域一致）
 _VIEWER_EMPTY = (
-    '<div style="width:100%;height:400px;border-radius:6px;background:#eee9e2;'
+    '<div class="structure-viewer-empty" style="width:100%;height:100%;box-sizing:border-box;border-radius:6px;background:#eee9e2;'
     'display:flex;align-items:center;justify-content:center;'
     'color:#765f4f;font-size:14px;border:2px dashed #d9d0c6;flex-direction:column;gap:8px">'
     '<span style="font-size:28px">🔬</span>'
@@ -639,6 +1146,117 @@ DEFAULT_SPHERE_SCALE = 0.35
 DEFAULT_STICK_RADIUS = 0.22
 VIEWER_SPHERE_SCALE_RANGE = (0.15, 0.65)
 VIEWER_STICK_RADIUS_RANGE = (0.08, 0.40)
+VIEWER_SPHERE_RENDER_FACTOR = 0.5
+_VIEWER_ELEMENT_LEGEND = {
+    "H": ("氢", "#FFFFFF"),
+    "C": ("碳", "#909090"),
+    "N": ("氮", "#3050F8"),
+    "O": ("氧", "#FF0D0D"),
+    "F": ("氟", "#90E050"),
+    "P": ("磷", "#FF8000"),
+    "S": ("硫", "#FFFF30"),
+    "Cl": ("氯", "#1FF01F"),
+    "Br": ("溴", "#A62929"),
+    "I": ("碘", "#940094"),
+    "Li": ("锂", "#CC80FF"),
+    "Na": ("钠", "#AB5CF2"),
+    "Mg": ("镁", "#8AFF00"),
+    "Ca": ("钙", "#3DFF00"),
+    "Zn": ("锌", "#7D80B0"),
+}
+
+
+def _canonical_viewer_element(value: str) -> str | None:
+    """Normalize a PDB/MOL2 element token to one rendered by the viewer."""
+    token = value.strip().split(".", 1)[0]
+    match = re.match(r"[A-Za-z]{1,2}", token)
+    if match is None:
+        return None
+    symbol = match.group(0)
+    canonical = symbol[0].upper() + symbol[1:].lower()
+    return canonical if canonical in _VIEWER_ELEMENT_LEGEND else None
+
+
+def _pdb_with_explicit_elements(mol_data: str) -> str:
+    """Normalize PDB atom names and element columns for deterministic 3Dmol parsing."""
+    normalized_lines: list[str] = []
+    for line in mol_data.splitlines():
+        if not line.startswith(("ATOM  ", "HETATM")):
+            normalized_lines.append(line)
+            continue
+        # Atom names are authoritative for the Packmol and GROMACS PDB files
+        # accepted by this viewer: H4 -> H, O2 -> O and Li100 -> Li.
+        element = _canonical_viewer_element(line[12:16])
+        if element is None:
+            element = _canonical_viewer_element(line[76:78])
+        if element is None:
+            normalized_lines.append(line)
+            continue
+        padded = line.ljust(78)
+        normalized_lines.append(
+            f"{padded[:12]}{element:<4}{padded[16:76]}{element:>2}{padded[78:]}"
+        )
+    suffix = "\n" if mol_data.endswith("\n") else ""
+    return "\n".join(normalized_lines) + suffix
+
+
+def _viewer_legend_elements(mol_data: str, fmt: str) -> list[str]:
+    """Return displayed elements in the Jmol legend order for PDB or MOL2 data."""
+    elements: set[str] = set()
+    if fmt == "pdb":
+        for line in mol_data.splitlines():
+            if not line.startswith(("ATOM  ", "HETATM")):
+                continue
+            element = _canonical_viewer_element(line[12:16])
+            if element is None:
+                element = _canonical_viewer_element(line[76:78])
+            if element is not None:
+                elements.add(element)
+    elif fmt == "mol2":
+        in_atom_section = False
+        for line in mol_data.splitlines():
+            if line.startswith("@<TRIPOS>ATOM"):
+                in_atom_section = True
+                continue
+            if line.startswith("@<TRIPOS>"):
+                in_atom_section = False
+                continue
+            if not in_atom_section:
+                continue
+            fields = line.split()
+            element = _canonical_viewer_element(fields[5]) if len(fields) > 5 else None
+            if element is None and len(fields) > 1:
+                element = _canonical_viewer_element(fields[1])
+            if element is not None:
+                elements.add(element)
+    return [symbol for symbol in _VIEWER_ELEMENT_LEGEND if symbol in elements]
+
+
+def _viewer_legend_html(mol_data: str, fmt: str) -> str:
+    """Build the structure-local atom color legend for the dedicated UI area."""
+    elements = _viewer_legend_elements(mol_data, fmt)
+    if not elements:
+        return ""
+    items = []
+    for symbol in elements:
+        name, color = _VIEWER_ELEMENT_LEGEND[symbol]
+        items.append(
+            '<span style="display:inline-flex;align-items:center;gap:0.32rem;white-space:nowrap">'
+            f'<span aria-hidden="true" style="width:0.72rem;height:0.72rem;border-radius:50%;'
+            'background:radial-gradient(circle at 30% 28%,rgba(255,255,255,.95) 0 7%,'
+            f'rgba(255,255,255,.28) 8%,transparent 25%),radial-gradient(circle at 68% 72%,'
+            f'rgba(0,0,0,.46),transparent 58%),{color};border:1px solid #9c958c;'
+            'box-shadow:inset -1px -1px 1px rgba(0,0,0,.25),0 1px 1px rgba(0,0,0,.18);'
+            'box-sizing:border-box"></span>'
+            f"{symbol} {name}</span>"
+        )
+    return (
+        '<div aria-label="原子颜色图例" style="display:flex;flex-wrap:wrap;align-items:center;justify-content:center;'
+        'gap:0.35rem 0.8rem;padding:0;color:#5b5148;'
+        'font:12px system-ui,sans-serif;line-height:1.25">'
+        + "".join(items)
+        + "</div>"
+    )
 
 
 def _run_directory_numeric_key(run_id: str) -> tuple[tuple[int, ...], str]:
@@ -683,14 +1301,42 @@ def _visualization_run_id() -> str | None:
     return max(valid_run_ids, key=_run_directory_numeric_key, default=None)
 
 
-def _current_run_visualization_artifacts() -> list[dict[str, object]]:
-    """List readable PDB/MOL2 files from the current visualization run.
+def get_run_visualization_run_choices() -> list[str]:
+    """List valid ``md_run`` directories for the visualization run selector."""
+    registry = RunRegistry(ROOT)
+    try:
+        candidates = [
+            directory.name
+            for directory in registry.runs_dir.iterdir()
+            if directory.is_dir()
+        ]
+    except OSError:
+        return []
 
-    Each call resolves the run again: the active launch lock has priority, and
-    otherwise the newest numerically named run directory is selected. Labels
-    are run-relative filenames so the browser never receives an absolute path.
+    valid: list[str] = []
+    for run_id in candidates:
+        try:
+            registry.resolve_run_id(run_id)
+        except RunRegistryError:
+            continue
+        valid.append(run_id)
+
+    valid.sort(key=_run_directory_numeric_key, reverse=True)
+    active_run_id = get_active_run_id()
+    if active_run_id in valid:
+        valid.remove(active_run_id)
+        valid.insert(0, active_run_id)
+    return valid
+
+
+def _current_run_visualization_artifacts(run_id: str | None = None) -> list[dict[str, object]]:
+    """List readable PDB/MOL2 files from one authorized visualization run.
+
+    When no run_id is supplied, the active launch lock has priority and the
+    newest numerically named run directory is selected for compatibility.
+    Labels are run-relative filenames so the browser never receives paths.
     """
-    run_id = _visualization_run_id()
+    run_id = run_id or _visualization_run_id()
     if run_id is None:
         return []
     registry = RunRegistry(ROOT)
@@ -705,6 +1351,8 @@ def _current_run_visualization_artifacts() -> list[dict[str, object]]:
         if not candidate.is_file():
             continue
         relative = candidate.relative_to(run_dir)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
         fmt = _RUN_VISUALIZATION_FORMATS.get(relative.suffix.lower())
         if fmt is None:
             continue
@@ -720,16 +1368,24 @@ def _current_run_visualization_artifacts() -> list[dict[str, object]]:
     return result
 
 
-def get_run_visualization_choices() -> list[str]:
-    """List the active run's PDB/MOL2 filenames without exposing paths."""
-    return [str(item["label"]) for item in _current_run_visualization_artifacts()]
+def get_run_visualization_choices(run_id: str | None = None) -> list[str]:
+    """List one run's PDB/MOL2 filenames without exposing paths."""
+    return [str(item["label"]) for item in _current_run_visualization_artifacts(run_id)]
 
 
-def get_run_visualization_data(choice: str | None) -> dict[str, object] | None:
-    """Read one selected structure from the active run directory."""
+def get_run_visualization_file_choices(run_id: str | None = None) -> list[str]:
+    """Explicit alias for the right-hand visualization file selector."""
+    return get_run_visualization_choices(run_id)
+
+
+def get_run_visualization_data(
+    choice: str | None,
+    run_id: str | None = None,
+) -> dict[str, object] | None:
+    """Read one selected structure from the selected run directory."""
     if not isinstance(choice, str) or not choice:
         return None
-    for artifact in _current_run_visualization_artifacts():
+    for artifact in _current_run_visualization_artifacts(run_id):
         if artifact["label"] != choice:
             continue
         path = artifact["path"]
@@ -772,12 +1428,20 @@ def _render_viewer_html(
     stick_radius: float | int | None = DEFAULT_STICK_RADIUS,
 ) -> str:
     """Render one already-authorized PDB/MOL2 structure in the embedded viewer."""
-    sphere_scale = _viewer_style_value(
-        sphere_scale, DEFAULT_SPHERE_SCALE, VIEWER_SPHERE_SCALE_RANGE)
+    sphere_scale = (
+        _viewer_style_value(
+            sphere_scale, DEFAULT_SPHERE_SCALE, VIEWER_SPHERE_SCALE_RANGE)
+        * VIEWER_SPHERE_RENDER_FACTOR
+    )
     stick_radius = _viewer_style_value(
         stick_radius, DEFAULT_STICK_RADIUS, VIEWER_STICK_RADIUS_RANGE)
 
+    if fmt == "pdb":
+        mol_data = _pdb_with_explicit_elements(mol_data)
     mol_json = json.dumps(mol_data)
+    element_colors_json = json.dumps({
+        symbol: color for symbol, (_name, color) in _VIEWER_ELEMENT_LEGEND.items()
+    })
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -791,8 +1455,26 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
   function init(){{
     if(typeof $3Dmol==="undefined"){{setTimeout(init,150);return;}}
     var v=$3Dmol.createViewer("v",{{backgroundColor:"#eee9e2"}});
-    v.addModel({mol_json},"{fmt}");
+    var model=v.addModel({mol_json},"{fmt}",{{keepH:true}});
     v.setStyle({{}},{{stick:{{radius:{stick_radius:.2f},colorscheme:"Jmol"}},sphere:{{scale:{sphere_scale:.2f},colorscheme:"Jmol"}}}});
+    // Use the same fixed color table as the legend for all known elements.
+    // This does not depend on the remote 3Dmol build's Jmol palette.
+    var elementColors={element_colors_json};
+    var metalCations=["Li","Na","Mg","Ca","Zn"];
+    model.selectedAtoms({{}}).forEach(function(atom){{
+      var rawElement=String(atom.elem||atom.atom||"").replace(/[0-9]+$/,"");
+      var element=rawElement.charAt(0).toUpperCase()+rawElement.slice(1,2).toLowerCase();
+      var color=elementColors[element];
+      if(color){{
+        v.setStyle({{serial:atom.serial}},{{
+          stick:{{radius:{stick_radius:.2f},color:color}},
+          sphere:{{scale:{sphere_scale:.2f},color:color}}
+        }});
+      }}
+      if(metalCations.indexOf(element)>=0){{
+        v.setStyle({{serial:atom.serial}},{{sphere:{{scale:{sphere_scale:.2f},color:color||"#909090"}}}});
+      }}
+    }});
     v.zoomTo();v.render();v.zoom(1.2);
   }}
   init();
@@ -802,11 +1484,11 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
     import html as _h
     safe_display_name = _h.escape(display_name)
     return (
-        f'<div style="background:#eee9e2;border-radius:6px;overflow:hidden">'
-        f'<iframe srcdoc="{_h.escape(html)}" style="width:100%;height:340px;border:none" '
+        f'<div class="structure-viewer-frame" style="background:#eee9e2;border-radius:6px;display:grid;'
+        f'grid-template-rows:minmax(0,1fr) auto;height:43.2rem;min-height:0;overflow:hidden">'
+        f'<iframe srcdoc="{_h.escape(html)}" style="width:100%;height:100%;border:none" '
         f'sandbox="allow-scripts allow-same-origin"></iframe>'
-        f'<div style="text-align:center;padding:6px 0 14px;font-size:12px;color:#765f4f;'
-        f'font-family:system-ui,sans-serif">{safe_display_name}</div>'
+        f'<div class="structure-viewer-name">{safe_display_name}</div>'
         f'</div>'
     )
 
@@ -834,9 +1516,11 @@ def render_run_visualization_html(
     choice: str | None,
     sphere_scale: float | int | None = DEFAULT_SPHERE_SCALE,
     stick_radius: float | int | None = DEFAULT_STICK_RADIUS,
+    *,
+    run_id: str | None = None,
 ) -> str:
-    """Render the selected PDB/MOL2 artifact from the current run."""
-    viewer_data = get_run_visualization_data(choice)
+    """Render the selected PDB/MOL2 artifact from one run."""
+    viewer_data = get_run_visualization_data(choice, run_id)
     if viewer_data is None:
         return _VIEWER_EMPTY.replace(
             "从下方下拉菜单选择分子查看",
@@ -849,6 +1533,21 @@ def render_run_visualization_html(
         str(viewer_data["label"]),
         sphere_scale,
         stick_radius,
+    )
+
+
+def render_run_visualization_legend_html(
+    choice: str | None,
+    *,
+    run_id: str | None = None,
+) -> str:
+    """Render a selected run artifact's atom-color legend outside the viewer."""
+    viewer_data = get_run_visualization_data(choice, run_id)
+    if viewer_data is None:
+        return ""
+    return _viewer_legend_html(
+        str(viewer_data["content"]),
+        str(viewer_data["format"]),
     )
 
 
@@ -998,7 +1697,7 @@ def get_pending_action(run_id: str | None = None) -> dict[str, object] | None:
     if not isinstance(selected_run_id, str):
         return None
     try:
-        status = registry.get_run_status(selected_run_id)
+        status = registry.get_run_status(selected_run_id, reconcile=False)
     except RunRegistryError:
         return None
     if status.get("state") != "awaiting_confirmation":
@@ -1039,10 +1738,75 @@ def get_pending_action(run_id: str | None = None) -> dict[str, object] | None:
         "summary": summary,
         "adjustments": action.get("adjustments", []) if isinstance(action.get("adjustments"), list) else [],
     }
+    if action.get("knowledge_status") in {"retrieved", "not_matched", "unavailable"} and action.get("advice_source") in {"knowledge_base", "llm_unverified"}:
+        public["knowledge_status"] = action["knowledge_status"]
+        public["knowledge_entries"] = action.get("knowledge_entries", [])[:3] if isinstance(action.get("knowledge_entries"), list) else []
+        public["advice_source"] = action["advice_source"]
+        public["compatibility_notice"] = str(action.get("compatibility_notice") or "")[:300]
+    if isinstance(action.get("options"), list):
+        public["options"] = action["options"][:3]
+        public["selected_option_id"] = action.get("selected_option_id")
+        public["selection_required"] = bool(action.get("selection_required", False))
     editable = action.get("editable_parameters")
     if isinstance(editable, list):
         public["editable_parameters"] = editable[:8]
     return public
+
+
+def select_pending_action_option(
+    action_id: str,
+    option_id: str,
+    run_id: str | None = None,
+    *,
+    state_revision: int | None = None,
+    config_fingerprint: str | None = None,
+) -> str:
+    """Select one candidate while keeping the run in awaiting_confirmation."""
+    action = get_pending_action(run_id)
+    if action is None or action.get("action_id") != action_id:
+        return "待确认方案已失效，请刷新工程状态。"
+    options = action.get("options")
+    if not isinstance(options, list) or len(options) < 2:
+        if action.get("selected_option_id") == option_id:
+            return "已选择该方案，请回复“确认重跑”以执行。"
+        return "当前只有一个可执行方案。"
+    if action.get("selected_option_id") == option_id:
+        return "已选择该方案，请回复“确认重跑”以执行。"
+    expected_revision = action.get("state_revision") if state_revision is None else state_revision
+    expected_fingerprint = action.get("config_fingerprint") if config_fingerprint is None else config_fingerprint
+    selected_run_id = action.get("run_id")
+    if not isinstance(selected_run_id, str) or not isinstance(expected_revision, int) or not isinstance(expected_fingerprint, str):
+        return "待确认方案已失效，请刷新工程状态。"
+    registry = RunRegistry(ROOT)
+    try:
+        run_dir = registry.resolve_run_id(selected_run_id)
+        from willy.simulation.pending_action import (
+            PendingActionError,
+            pending_action_lock,
+            select_pending_action_option as persist_option,
+            load_pending_action,
+            public_pending_action,
+        )
+        with pending_action_lock(run_dir):
+            status = registry.get_run_status(selected_run_id, reconcile=False)
+            if status.get("state") != "awaiting_confirmation" or status.get("state_revision") != expected_revision:
+                raise RunStateConflict("待确认方案已更新")
+            private_action = load_pending_action(run_dir)
+            if private_action.get("action_id") != action_id or private_action.get("config_sha256") != expected_fingerprint:
+                raise RunStateConflict("待确认方案已更新")
+            selected = persist_option(run_dir, action_id, option_id)
+            updated = dict(status)
+            extra = dict(status.get("extra")) if isinstance(status.get("extra"), Mapping) else {}
+            extra["pending_action"] = public_pending_action(selected)
+            updated["extra"] = extra
+            registry.compare_and_swap_status(
+                run_dir, expected_revision=expected_revision, status=updated,
+                event_type="pending_action_option_selected",
+            )
+    except (OSError, ValueError, RunRegistryError, PendingActionError, RunStateConflict):
+        return "方案选择已失效，请刷新工程状态后重试。"
+    ordinal = option_id.rsplit("_", 1)[-1]
+    return f"已选择方案{ordinal}；当前仍等待确认，请回复“确认方案{ordinal}”或“确认重跑”。"
 
 
 def confirm_pending_action(
@@ -1086,9 +1850,9 @@ def confirm_pending_action(
     retrying_status: dict[str, object] | None = None
     try:
         run_dir = registry.resolve_run_id(run_id)
-        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        manifest = registry._read_registry_manifest(run_dir)
         backend = manifest.get("backend")
-        if backend not in {"g16", "orca"}:
+        if backend not in {"g16", "g09", "orca"}:
             return "运行后端无效，无法重跑。"
         reservation = reserve_existing_run_launch(ROOT, run_id)
     except (OSError, ValueError, json.JSONDecodeError, RunRegistryError, PipelineLaunchError):
@@ -1105,7 +1869,7 @@ def confirm_pending_action(
             validate_pending_action_for_launch,
         )
         with pending_action_lock(run_dir):
-            waiting_status = registry.get_run_status(run_id)
+            waiting_status = registry.get_run_status(run_id, reconcile=False)
             if waiting_status.get("state") != "awaiting_confirmation":
                 raise RunStateConflict("待确认方案已失效")
             waiting_extra = waiting_status.get("extra", {})
@@ -1222,6 +1986,29 @@ def revise_pending_action(
     if len(request) > 600:
         return "调整要求过长，请简要说明希望修改的参数或阶段。"
 
+    def rejected(reason: str) -> str:
+        """Record and expose a bounded validation reason without raw LLM text."""
+        public_reason = " ".join(str(reason or "").split())[:360]
+        if not public_reason or "/" in public_reason or "\\" in public_reason:
+            public_reason = "替代方案未形成可执行的受限 EQ 参数修改"
+        try:
+            registry.append_decision_trace(run_dir, {
+                "decision_id": action_id,
+                "action_id": action_id,
+                "layer": "simulation",
+                "step": EQ_STEP,
+                "error_kind": status.get("error_kind", "equilibration_failed"),
+                "policy_id": "simulation.eq.user_revision",
+                "selected_tool": "tools_retry_eq",
+                "tool_effect": "requires_confirmation",
+                "result": "rejected_validation",
+                "success": False,
+                "rejection_reason": public_reason,
+            })
+        except (OSError, ValueError, RunRegistryError):
+            pass
+        return f"新的调整方案未通过校验：{public_reason}。原方案仍保持等待确认。"
+
     action = get_pending_action(run_id)
     if action is None or action.get("action_id") != action_id:
         return "待确认方案已失效，请刷新工程状态。"
@@ -1252,11 +2039,13 @@ def revise_pending_action(
     registry = RunRegistry(ROOT)
     try:
         run_dir = registry.resolve_run_id(selected_run_id)
-        status = registry.get_run_status(selected_run_id)
+        status = registry.get_run_status(selected_run_id, reconcile=False)
         if status.get("state") != "awaiting_confirmation":
             return "当前工程不在等待确认状态，无法更新方案。"
-        from willy.simulation.pending_action import validate_pending_action_for_launch
-        validate_pending_action_for_launch(run_dir, action_id)
+        from willy.simulation.pending_action import load_pending_action
+        current_action = load_pending_action(run_dir)
+        if current_action.get("action_id") != action_id or current_action.get("config_sha256") != current_fingerprint:
+            raise RunStateConflict("待确认方案已更新")
     except (OSError, ValueError, RunRegistryError):
         return "待确认方案不可用，请刷新工程状态后重试。"
 
@@ -1281,16 +2070,18 @@ def revise_pending_action(
             pending_action_lock,
             public_pending_action,
             replace_eq_pending_action,
-            validate_pending_action_for_launch,
+            load_pending_action,
         )
         with pending_action_lock(run_dir):
-            current_status = registry.get_run_status(selected_run_id)
+            current_status = registry.get_run_status(selected_run_id, reconcile=False)
             if (
                 current_status.get("state") != "awaiting_confirmation"
                 or current_status.get("state_revision") != expected_revision
             ):
                 raise RunStateConflict("待确认方案已更新")
-            current_action = validate_pending_action_for_launch(run_dir, action_id)
+            current_action = load_pending_action(run_dir)
+            if current_action.get("state") != "pending" or current_action.get("action_id") != action_id:
+                raise PendingActionError("待确认方案已失效或不匹配")
             if current_action.get("config_sha256") != expected_fingerprint:
                 raise RunStateConflict("待确认方案已更新")
             replacement = replace_eq_pending_action(
@@ -1333,19 +2124,23 @@ def revise_pending_action(
                 })
             except OSError:
                 pass
-    except (OSError, ValueError, PendingActionError, RunRegistryError, RunStateConflict):
-        return "新的调整方案未通过校验，原方案仍保持等待确认。"
+    except PendingActionError as exc:
+        return rejected(str(exc))
+    except RunStateConflict:
+        return rejected("待确认方案已更新或状态版本已变化，请刷新后重新提交调整")
+    except (OSError, ValueError, RunRegistryError):
+        return rejected("运行状态或冻结配置校验失败，请刷新后重新提交调整")
     return "已按你的要求更新待确认方案；请审阅新方案后再明确确认。"
 
 
-def get_run_summary_markdown(run_id: str | None) -> str:
+def get_run_summary_markdown(run_id: str | None, *, include_error: bool = True) -> str:
     """Render the selected run's public engineering state for the run assistant."""
     run_id = run_id or latest_run_id()
     if run_id is None:
         return "### 工程状态\n\n暂无可读取的运行。"
     try:
         registry = RunRegistry(ROOT)
-        status = registry.get_run_status(run_id)
+        status = registry.get_run_status(run_id, reconcile=False)
     except RunRegistryError as exc:
         return f"⚠ 无法读取运行：{exc}"
     state = status.get("state", "unknown")
@@ -1357,7 +2152,7 @@ def get_run_summary_markdown(run_id: str | None) -> str:
         lines.extend(_mdrun_eta_summary_lines(registry.get_mdrun_eta(run_id)))
     if state == "retrying":
         lines.extend(_repair_lines(status.get("repair")))
-    if status.get("error"):
+    if include_error and status.get("error"):
         lines.extend(["", f"{_status_indicator('error')}{status['error']}"])
     if state == "escalated":
         lines.extend(["", f"{_status_indicator('stopped')}**自动处理未完成**"])
@@ -1382,6 +2177,53 @@ def get_run_summary_markdown(run_id: str | None) -> str:
     return "\n".join(lines)
 
 
+def _public_run_error_event(
+    run_id: str,
+    status: Mapping[str, object],
+) -> dict[str, str] | None:
+    """Return one public, immutable-in-UI error event for a status revision."""
+    error = status.get("error")
+    if not isinstance(error, str) or not error.strip():
+        return None
+    revision = status.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return None
+    state = status.get("state")
+    lines = [
+        f"#### 工程错误 · 运行 {run_id}",
+        f"{_status_indicator('error')}{error.strip()}",
+    ]
+    if state == "awaiting_confirmation":
+        lines.extend([
+            "",
+            "已生成新的待确认调整方案；当前未修改配置，未启动重跑。",
+        ])
+    elif state == "escalated":
+        lines.extend(["", "自动处理未完成，当前工程未继续执行。"])
+    return {
+        "event_id": f"{run_id}:error:{revision}",
+        "content": "\n".join(lines),
+    }
+
+
+def _run_status_event_id(
+    run_id: str | None,
+    status: Mapping[str, object] | None,
+    pending_action: Mapping[str, object] | None,
+    error_event: Mapping[str, object] | None,
+) -> str:
+    """Identify a user-visible status transition without tracking heartbeats."""
+    state = status.get("state") if isinstance(status, Mapping) else "unavailable"
+    step = status.get("step") if isinstance(status, Mapping) else None
+    action_id = pending_action.get("action_id") if isinstance(pending_action, Mapping) else None
+    error_id = error_event.get("event_id") if isinstance(error_event, Mapping) else None
+    safe_state = state if isinstance(state, str) else "unknown"
+    safe_step = str(step) if isinstance(step, int) and not isinstance(step, bool) else "none"
+    safe_action = action_id if isinstance(action_id, str) and action_id else "none"
+    safe_error = error_id if isinstance(error_id, str) and error_id else "none"
+    return f"{run_id or 'none'}:status:{safe_state}:{safe_step}:{safe_action}:{safe_error}"
+
+
 def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
     """Return one run's public status and pending action from a shared ID.
 
@@ -1390,10 +2232,31 @@ def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
     historical run's awaiting-confirmation action.
     """
     selected_run_id = run_id or latest_run_id()
+    summary = get_run_summary_markdown(selected_run_id)
+    live_summary = get_run_summary_markdown(selected_run_id, include_error=False)
+    status: Mapping[str, object] | None = None
+    if isinstance(selected_run_id, str):
+        try:
+            status = RunRegistry(ROOT).get_run_status(selected_run_id, reconcile=False)
+        except RunRegistryError:
+            status = None
+    pending_action = get_pending_action(selected_run_id)
+    error_event = (
+        _public_run_error_event(selected_run_id, status)
+        if isinstance(selected_run_id, str) and isinstance(status, Mapping)
+        else None
+    )
     return {
         "run_id": selected_run_id,
-        "summary": get_run_summary_markdown(selected_run_id),
-        "pending_action": get_pending_action(selected_run_id),
+        "summary": summary,
+        "live_summary": live_summary,
+        "pending_action": pending_action,
+        "error_event": error_event,
+        "status_event_id": _run_status_event_id(
+            selected_run_id, status, pending_action, error_event
+        ),
+        # App-owned visual event history is enabled only for this richer snapshot.
+        "timeline_events": True,
     }
 
 

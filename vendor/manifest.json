@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "purpose": "Release-facing inventory for bundled runtime payloads. Integrity validation is deterministic and read-only; components marked evidence_pending deliberately block --require-release-ready until their upstream source, version and redistribution terms are recorded.",
+  "components": [
+    {
+      "id": "multiwfn-linux-x86_64",
+      "distribution_status": "release_ready",
+      "source_url": "http://sobereva.com/multiwfn/",
+      "version": "3.8(dev)-2025-02-14",
+      "license_files": [
+        "multiwfn/linux-x86_64/3.8-dev-2025-02-14/LICENSE.txt",
+        "multiwfn/linux-x86_64/3.8-dev-2025-02-14/NOTICE.md"
+      ],
+      "files": [
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/Multiwfn", "size_bytes": 41919825, "sha256": "63d5164f06f881fd98a03623403c00eb4b53dc5b02b618a893cfc450c415e902"},
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/settings.ini", "size_bytes": 20030, "sha256": "c9b3d9172af8073c893c90fa5164a8b1fe8cb04572b24672f3047a4baee2ba27"},
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/LICENSE.txt", "size_bytes": 1254, "sha256": "0846f4144fd66d07a5b17e340863147a6797bbec871114d804ae620ffd7e8360"},
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/NOTICE.md", "size_bytes": 1018, "sha256": "529602db40f38b4ba4ead6229926e434f5927b2b81696ce88248e6b8db63cd14"},
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/manifest.json", "size_bytes": 1431, "sha256": "c1af3140cfb7088a0d17cb3f2d87e3ce780b1452bf03ac5e11bb30a58797ea83"}
+      ]
+    },
+    {
+      "id": "packmol-linux-runtime",
+      "distribution_status": "evidence_pending",
+      "source_url": "https://m3g.github.io/packmol/",
+      "version": "unverified",
+      "upstream_license_basis": {
+        "license": "GNU General Public License (exact binary notice pending)",
+        "evidence_url": "https://m3g.github.io/packmol/packmol2.pdf"
+      },
+      "license_files": [],
+      "files": [
+        {"path": "packmol", "size_bytes": 426608, "sha256": "ad7b697b0865c053bdb435bc45405c53d224307c4ee863f8bbc075e9992fe5ab"}
+      ]
+    },
+    {
+      "id": "sobtop-runtime",
+      "distribution_status": "evidence_pending",
+      "source_url": "http://sobereva.com/soft/sobtop/",
+      "version": "unverified",
+      "license_files": [],
+      "files": [
+        {"path": "sobtop/sobtop", "size_bytes": 17804208, "sha256": "97a78133ccbe7ccd8bcfd1d40eb86b08ad9faa319ad992cbdd671c9bd95dc2ca"},
+        {"path": "sobtop/sobtop.exe", "size_bytes": 14447104, "sha256": "b60e1ccf33fdc9cf810b46d9fcdcbb15e6e1bab24c4e6aeeefd3700e0aa9b2ce"},
+        {"path": "sobtop/atomtype", "size_bytes": 192208, "sha256": "e53b0ade8043d9a0bbceac9d63384ff8f244394a8accec9f0c379ccce91d8f08"},
+        {"path": "sobtop/atomtype.exe", "size_bytes": 232208, "sha256": "7e8614baa8c157814866d72c67d0f394b5fb5dea7d542f4f2f5827a98f95faed"},
+        {"path": "sobtop/libiomp5md.dll", "size_bytes": 2047000, "sha256": "0ad71f466d115d353dce94ba32b63e288f48198e89f551d46dcce461fedbd195"},
+        {"path": "sobtop/sobtop.ini", "size_bytes": 936, "sha256": "8299d65ff602f7bc57b410c2073d0e4cd224e71583f023c99923eb68bf6a28c4"},
+        {"path": "sobtop/ATOMTYPE_AMBER.DEF", "size_bytes": 7057, "sha256": "f07888e09394e95f6940a4a54d5b874e6ead019bb0045adf0c6f9a15a85fa6fe"},
+        {"path": "sobtop/ATOMTYPE_GFF.DEF", "size_bytes": 16851, "sha256": "33631b041f3f5f88434e2ae395734eaa1094fa3da0babbadf78c6b3266132e80"},
+        {"path": "sobtop/CORR_NAME_TYPE.DAT", "size_bytes": 1445, "sha256": "f7138c8d5d9a10ab02c577be76597201212465da3711dbfc34861f7d5d81f968"},
+        {"path": "sobtop/LJ_param.dat", "size_bytes": 19763, "sha256": "785ddb1831143b79ccb9711b9145ed756ab5773ecfdcc258ccc8315622fbbfc5"},
+        {"path": "sobtop/assign_AT.dat", "size_bytes": 2235, "sha256": "bc25b9db15e9598739548027478b8fec6ba8c4bf8f6e8d316e70d9736a8ec5fa"},
+        {"path": "sobtop/bondcrit.dat", "size_bytes": 434, "sha256": "ba7e51a9da408e206cd6e245da9ad7576b0188b491b9b2a921f7ed83b88be116"},
+        {"path": "sobtop/bonded_param.dat", "size_bytes": 267053, "sha256": "000637d5f1e6c06426feebfa62bd3953c1b51bac0120b2d63bdac8a514859941"}
+      ],
+      "excluded_from_release_artifact": ["sobtop/examples/", "sobtop/.willy-sobtop.lock"]
+    },
+    {
+      "id": "openbabel-minimal-runtime",
+      "distribution_status": "evidence_pending",
+      "source_url": "https://openbabel.org/",
+      "version": "unverified",
+      "upstream_license_basis": {
+        "license": "GPL-2.0",
+        "evidence_url": "https://openbabel.org/docs/UseTheLibrary/intro.html"
+      },
+      "license_files": [],
+      "files": [
+        {"path": "obabel", "size_bytes": 145, "sha256": "6809a51450c631e893de06079bb16e3fe5906936b75d511d05e28fe3df93fa58"},
+        {"path": "obabel.bin", "size_bytes": 35216, "sha256": "16c9406c1ae6a0f41f22ff8ff6acf5d40ea0888cfe2a10846c9c3a9961d51b67"},
+        {"path": "libopenbabel.so.7", "size_bytes": 2362072, "sha256": "c3e815c6f325e11e244ef67a6e84bb2dc42b3207a976be5b7222a9f2ef228fd8"},
+        {"path": "libopenbabel.so.7.0.0", "size_bytes": 2362072, "sha256": "c3e815c6f325e11e244ef67a6e84bb2dc42b3207a976be5b7222a9f2ef228fd8"},
+        {"path": "libcoordgen.so.3", "size_bytes": 551080, "sha256": "769a1efa3bc9a827253944aa36fa972916f4340853a7368a191dcb7d5539959a"},
+        {"path": "libcoordgen.so.3.0.2", "size_bytes": 551080, "sha256": "769a1efa3bc9a827253944aa36fa972916f4340853a7368a191dcb7d5539959a"}
+      ]
+    },
+    {
+      "id": "3dmol-legacy-asset",
+      "distribution_status": "exclude_from_release_artifact",
+      "source_url": "unverified",
+      "version": "unverified",
+      "upstream_license_basis": {
+        "license": "BSD (exact asset version and local notice pending)",
+        "evidence_url": "https://3dmol.org/doc/"
+      },
+      "license_files": [],
+      "files": [
+        {"path": "3Dmol-min.js", "size_bytes": 524112, "sha256": "c24a17b28f38a6fbde99cea746e2d7414da2c60efce65fa75d5293bed204e510"}
+      ],
+      "reason": "The current frontend loads 3Dmol from its documented remote URL and does not reference this local asset. Remove it or record its provenance before a source/release package includes it."
+    }
+  ]
+}

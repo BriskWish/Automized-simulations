@@ -1,10 +1,12 @@
 """
 singlepoint_orca.py
 ===================
-ORCA 两步法 Step 2: 高精度单点能 → *_opt.fchk。
+ORCA 两步法 Step 2: 高精度单点能 → *_opt.molden + *_opt.fchk。
 
 .molden (DZ优化) → 提取坐标 → *_opt.inp → ORCA SP(def2-TZVP)
 → orca_2mkl → *_opt.molden → Multiwfn molden→fchk → *_opt.fchk
+
+``*_opt.molden`` 是 ORCA 的 MOL2 转换源；FCHK 仅用于后续 RESP 电荷。
 """
 
 import subprocess
@@ -30,10 +32,10 @@ def run(
     nproc: int = 8,
     mem_mb: int = 5000,
 ) -> StepResult:
-    """ORCA single-point at B3LYP def2-TZVP → *_opt.fchk。
+    """ORCA single-point at B3LYP def2-TZVP → *_opt.molden + *_opt.fchk。
 
-    内部完成: 提取坐标 → ORCA SP → orca_2mkl → Multiwfn molden→fchk。
-    最终输出 *_opt.fchk，与 G16 链路统一。
+    内部完成: 提取坐标 → ORCA SP → orca_2mkl → *_opt.molden → Multiwfn molden→fchk。
+    最终同时保留 *_opt.molden（MOL2 连通性源）和 *_opt.fchk（RESP 输入）。
 
     Args:
         molden_path: Step 1 产出的 .molden（优化后几何+波函数）。
@@ -45,7 +47,7 @@ def run(
         mem_mb: 每核内存 (MB)。
 
     Returns:
-        StepResult: outputs["fchk"] = *_opt.fchk 路径。
+        StepResult: outputs["fchk"] 和 outputs["molden"] 分别为对应产物路径。
     """
     _start = _time.time()
     mp = Path(molden_path)
@@ -56,13 +58,14 @@ def run(
 
     opt_name = f"{name}_opt"
     opt_fchk = Path(workdir) / f"{opt_name}.fchk"
+    opt_molden = Path(workdir) / f"{opt_name}.molden"
 
-    if opt_fchk.exists():
-        print(f"[sp_orca] ⏭ {name}: {opt_fchk.name} 已存在，跳过 ORCA SP")
+    if opt_fchk.exists() and opt_molden.exists():
+        print(f"[sp_orca] ⏭ {name}: {opt_fchk.name} 和 {opt_molden.name} 已存在，跳过 ORCA SP")
         return StepResult(
             step_name="sp_orca", step_index=2, success=True,
-            outputs={"fchk": str(opt_fchk)},
-            artifacts=[str(opt_fchk)], duration_s=0.0,
+            outputs={"fchk": str(opt_fchk), "molden": str(opt_molden)},
+            artifacts=[str(opt_fchk), str(opt_molden)], duration_s=0.0,
         )
 
     # ── Extract coordinates ──
@@ -145,7 +148,6 @@ def run(
         pass
 
     molden_input = Path(workdir) / f"{opt_name}.molden.input"
-    opt_molden = Path(workdir) / f"{opt_name}.molden"
     if molden_input.exists():
         molden_input.rename(opt_molden)
 
@@ -162,7 +164,7 @@ def run(
     multiwfn = find_multiwfn()
     commands = f"100\n2\n7\n{opt_fchk.resolve()}\n0\nq\n"
     try:
-        run_managed_command(
+        result = run_managed_command(
             [multiwfn, str(opt_molden.resolve())],
             input_text=commands,
             cwd=workdir,
@@ -174,6 +176,13 @@ def run(
             step_name="sp_orca", step_index=2, success=False,
             error=StepError(kind=ErrorKind.TIMEOUT,
                             message=f"{name}: Multiwfn molden→fchk 超时"),
+            duration_s=_time.time() - _start,
+        )
+    if result.returncode != 0:
+        return StepResult(
+            step_name="sp_orca", step_index=2, success=False,
+            error=StepError(kind=ErrorKind.ORCA_CRASH,
+                            message=f"{name}: Multiwfn molden→fchk 执行失败"),
             duration_s=_time.time() - _start,
         )
 
@@ -192,7 +201,7 @@ def run(
 
     return StepResult(
         step_name="sp_orca", step_index=2, success=True,
-        outputs={"fchk": str(opt_fchk)},
-        artifacts=[str(opt_fchk)],
+        outputs={"fchk": str(opt_fchk), "molden": str(opt_molden)},
+        artifacts=[str(opt_fchk), str(opt_molden)],
         duration_s=_time.time() - _start,
     )

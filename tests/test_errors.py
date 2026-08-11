@@ -46,6 +46,7 @@ class TestErrorKind:
         ErrorKind.FORMCHK_FAILED,
         ErrorKind.GROMPP_FAILED,
         ErrorKind.MDRUN_FAILED,
+        ErrorKind.PACKMOL_FAILED,
         ErrorKind.EM_NOT_CONVERGED,
         ErrorKind.EQ_NOT_CONVERGED,
         ErrorKind.TIMEOUT,

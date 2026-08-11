@@ -30,7 +30,7 @@ def make_chg(
 ) -> StepResult:
     """*_opt.fchk → Multiwfn RESP(内部ESP) → .chg。
 
-    Multiwfn 菜单: 7→18→2→y→q (单步RESP, 内部算ESP)。
+    Multiwfn 菜单: 7→18→2→y→0→0→q (单步RESP, 内部算ESP)。
 
     Args:
         fchk_path: *_opt.fchk 路径。
@@ -76,10 +76,11 @@ def make_chg(
             duration_s=_time.time() - _start,
         )
 
-    # Multiwfn RESP: 7→18→2→y→q
-    commands = "7\n18\n2\ny\nq\n"
+    # Multiwfn RESP: 7→18→2→y→0→0→q.  The two zeroes leave the
+    # post-fit menus cleanly so the process exits with a success status.
+    commands = "7\n18\n2\ny\n0\n0\nq\n"
     try:
-        run_managed_command(
+        result = run_managed_command(
             [multiwfn, str(fp.resolve()), "-ispecial", "1"],
             input_text=commands,
             cwd=workdir,
@@ -91,6 +92,13 @@ def make_chg(
             step_name="chg_resp", step_index=3, success=False,
             error=StepError(kind=ErrorKind.TIMEOUT,
                             message=f"{output_name}: Multiwfn RESP 超时 (600s)"),
+            duration_s=_time.time() - _start,
+        )
+    if result.returncode != 0:
+        return StepResult(
+            step_name="chg_resp", step_index=3, success=False,
+            error=StepError(kind=ErrorKind.RESP_FAILED,
+                            message=f"{output_name}: Multiwfn RESP 执行失败"),
             duration_s=_time.time() - _start,
         )
 

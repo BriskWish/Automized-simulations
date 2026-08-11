@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "component": "Multiwfn",
+  "version": "3.8(dev)",
+  "upstream_update_date": "2025-02-14",
+  "upstream_page": "http://sobereva.com/multiwfn/",
+  "platform": "linux-x86_64-glibc",
+  "status": "active_bundled",
+  "activation_note": "Willy resolves this bundled binary exclusively; WILLY_MULTIWFN_BIN, MULTIWFN_BIN and PATH do not alter the execution target.",
+  "direct_dynamic_dependencies": [
+    "glibc",
+    "libXm.so.4",
+    "libXt.so.6",
+    "libX11.so.6",
+    "libGL.so.1",
+    "libm.so.6",
+    "libpthread.so.0",
+    "libc.so.6",
+    "ld-linux-x86-64.so.2",
+    "libgcc_s.so.1",
+    "libdl.so.2"
+  ],
+  "files": {
+    "Multiwfn": {
+      "size_bytes": 41919825,
+      "sha256": "63d5164f06f881fd98a03623403c00eb4b53dc5b02b618a893cfc450c415e902",
+      "executable": true
+    },
+    "settings.ini": {
+      "size_bytes": 20030,
+      "sha256": "c9b3d9172af8073c893c90fa5164a8b1fe8cb04572b24672f3047a4baee2ba27"
+    },
+    "LICENSE.txt": {
+      "size_bytes": 1254,
+      "sha256": "0846f4144fd66d07a5b17e340863147a6797bbec871114d804ae620ffd7e8360"
+    },
+    "NOTICE.md": {
+      "size_bytes": 1018,
+      "sha256": "529602db40f38b4ba4ead6229926e434f5927b2b81696ce88248e6b8db63cd14"
+    }
+  },
+  "verified_operations": [
+    "fch_to_xyz",
+    "molden_to_fchk",
+    "fch_to_resp_chg"
+  ],
+  "not_included": [
+    "examples",
+    "MtwfnFld",
+    "graphical_assets",
+    "other_platform_binaries"
+  ]
+}

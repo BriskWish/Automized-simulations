@@ -54,6 +54,22 @@ def test_legacy_live_lock_remains_authoritative_until_its_owner_exits(tmp_path):
         reserve_pipeline_launch(tmp_path)
 
 
+def test_running_lock_remains_active_when_managed_process_group_survives(tmp_path, monkeypatch):
+    from willy import pipeline_launch
+
+    monkeypatch.setattr(pipeline_launch, "_recorded_pid_is_alive", lambda record, prefix: False)
+    monkeypatch.setattr(pipeline_launch, "_process_group_is_alive", lambda pgid: pgid == 4242)
+    (tmp_path / ".pipeline.lock").write_text(json.dumps({
+        "state": "running",
+        "run_id": "md__202608010001",
+        "runner_pid": 999999,
+        "runner_pgid": 4242,
+    }))
+
+    assert pipeline_launch.pipeline_launch_is_active(tmp_path)
+    assert pipeline_launch.active_pipeline_run_id(tmp_path) == "md__202608010001"
+
+
 def test_frontend_recovers_the_current_run_from_a_live_legacy_lock(tmp_path, monkeypatch):
     import willy.frontend_api as frontend_api
     from willy.run_registry import RunRegistry
@@ -90,7 +106,13 @@ def test_frontend_launch_conflict_does_not_spawn_a_second_child(tmp_path, monkey
     import willy.agent_config as agent_config
 
     monkeypatch.setattr(agent_config, "ROOT", tmp_path)
-    config = {"backend": "g16", "residues": {"Li": 1}}
+    (tmp_path / "struct").mkdir()
+    (tmp_path / "struct" / "Li.gjf").write_text("#p b3lyp/6-31g\n\nLi\n\n1 1\nLi 0 0 0\n")
+    config = {
+        "backend": "g16", "residues": {"Li": 1},
+        "molecules": {"Li": {"charge": 1, "spin": 1}},
+        "non_neutral_confirmed": True,
+    }
     monkeypatch.setattr(agent_config, "validate_config", lambda config: [])
     popen = MagicMock()
     monkeypatch.setattr(agent_config.subprocess, "Popen", popen)
@@ -134,9 +156,9 @@ def test_orchestrator_binds_state_to_run_before_any_status_write(tmp_path, monke
     from willy.simulation.protocol import default_md_config
 
     (tmp_path / "struct").mkdir()
-    (tmp_path / "struct" / "Li.gjf").write_text("Li input")
+    (tmp_path / "struct" / "Li.gjf").write_text("#p b3lyp/6-31g\n\nLi\n\n0 1\nLi 0 0 0\n")
     (tmp_path / "config.json").write_text(json.dumps({
-        "molecules": {"Li": {"charge": 0}},
+        "molecules": {"Li": {"charge": 0, "spin": 1}},
         "residues": {"Li": 1},
         "md": default_md_config(),
     }))

@@ -321,7 +321,7 @@ def _require_completed_production(workspace: Path, sources: dict[str, Path]) -> 
     if prod.get("status") != "completed":
         raise PostprocessError(
             "生产阶段尚未在 manifest 中验收完成。",
-            "完成 PROD 并确认 md_manifest.json 的 stages.prod.status 为 completed。",
+            "完成 PROD 并确认 MD 私有记录的 stages.prod.status 为 completed。",
             kind=ErrorKind.INPUT_CONTRACT,
         )
 
@@ -357,7 +357,7 @@ def _require_completed_production(workspace: Path, sources: dict[str, Path]) -> 
             )
         actual[name] = fingerprint
     return {
-        "run_manifest": "md_manifest.json",
+        "run_manifest": "run_manifest.json" if (workspace / "run_manifest.json").is_file() else "md_manifest.json",
         "prod_status": prod["status"],
         "contract_fingerprint": prod.get("contract", {}).get("fingerprint", ""),
         "verified_artifacts": actual,

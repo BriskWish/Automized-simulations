@@ -81,6 +81,30 @@ def test_pending_action_applies_only_its_validated_fields(tmp_path):
         apply_pending_action(run_dir, action["action_id"])
 
 
+def test_pending_action_normalizes_eq_pressure_and_hold_aliases(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    action = create_eq_pending_action(run_dir, proposal={
+        "adjustments": [
+            {"field": "tau_p", "after": "2.5 ps"},
+            {"field": "hold_time", "after": "4 ns"},
+        ],
+    }, allow_fallback=False)
+
+    assert [item["field"] for item in action["adjustments"]] == [
+        "eq_tau_p", "eq_segment.hold_target",
+    ]
+    assert [item["value"] for item in action["adjustments"]] == [2.5, 4.0]
+
+
+def test_pending_action_reports_unsupported_replacement_field(tmp_path):
+    run_dir = _run_dir(tmp_path)
+
+    with pytest.raises(PendingActionError, match="不支持的调整字段"):
+        create_eq_pending_action(run_dir, proposal={
+            "adjustments": [{"field": "arbitrary_config_path", "after": 2.5}],
+        }, allow_fallback=False)
+
+
 def test_replacing_pending_action_preserves_config_until_new_confirmation(tmp_path):
     run_dir = _run_dir(tmp_path)
     before = (run_dir / "config.json").read_bytes()

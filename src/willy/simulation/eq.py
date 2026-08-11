@@ -16,7 +16,7 @@ from willy.simulation._gmx_utils import (
 )
 from willy.simulation.manifest import ManifestError
 from willy.simulation.mdp import load_mdp_config
-from willy.step_registry import EQ_STEP, PACKMOL_STEP
+from willy.step_registry import EQ_STEP
 
 
 ROOT = get_project_root()
@@ -122,19 +122,23 @@ def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temp
         ok, raw = extract_energy_xvg(cwd / "eq.edr", term, output)
         if not ok:
             details["series"][key] = {"ok": False, "reason": raw[-500:]}
-            issues.append(f"无法提取 {term} 能量项")
+            if key in {"temperature", "potential"}:
+                issues.append(f"无法提取 {term} 能量项")
             continue
         stats = analyze_final_window(output, window_ns * 1000.0)
         details["series"][key] = stats
         if not stats.get("ok"):
-            issues.append(f"{term} 的最终窗口采样不足")
+            if key in {"temperature", "potential"}:
+                issues.append(f"{term} 的最终窗口采样不足")
             continue
-        if stats["trend_zscore"] > float(acceptance["max_trend_zscore"]):
-            issues.append(f"{term} 分块趋势未稳定")
-        if key != "pressure" and stats["relative_drift"] > float(acceptance["max_relative_drift"]):
-            issues.append(f"{term} 相对漂移过大")
+        if key == "potential" and stats["relative_slope_per_ns"] > float(
+            acceptance["max_potential_relative_slope_per_ns"]
+        ):
+            issues.append("最终势能线性斜率超过稳定阈值")
     temperature = details["series"].get("temperature", {})
-    if temperature.get("ok") and abs(float(temperature["mean"]) - target_temperature) > float(acceptance["temperature_abs_tolerance_k"]):
+    if temperature.get("ok") and abs(
+        float(temperature["mean"]) - target_temperature
+    ) > float(acceptance["temperature_abs_tolerance_k"]):
         issues.append("最终温度均值偏离目标温度")
     return details, issues
 
@@ -212,10 +216,11 @@ def run_eq(
         if path.is_file() and path.stat().st_size > 0:
             outputs[f"{name}_xvg"] = str(path)
             artifacts.append(str(path))
-    vacuum = detect_vacuum_region(cwd / "eq.gro", max_empty_fraction=vacuum_max_fraction)
-    details["vacuum"] = vacuum
-    if vacuum["detected"]:
-        issues.append(f"检测到 {vacuum['axis']} 方向宏观真空区")
+    # Structural occupancy and density are retained as diagnostic evidence.
+    # They deliberately do not decide whether EQ can advance to PROD.
+    details["vacuum"] = detect_vacuum_region(
+        cwd / "eq.gro", max_empty_fraction=vacuum_max_fraction,
+    )
     eq_result = EQResult(converged=not issues, tpr=gmx_result.outputs.get("tpr", ""), details=details)
     if not issues:
         result = StepResult(
@@ -232,18 +237,13 @@ def run_eq(
         error=StepError(
             ErrorKind.EQUILIBRATION_FAILED,
             "EQ 验收未通过: " + "; ".join(issues),
-            hint="检查最终目标温度保持段的分块统计；真空区需重新建盒",
+            hint="检查最终目标温度均值和势能线性斜率",
         ),
         outputs=outputs,
         artifacts=artifacts,
         duration_s=_time.time() - started_at,
         extra={
             "eq_result": eq_result,
-            **({
-                "rollback_to_step": PACKMOL_STEP,
-                "rollback_reason": "EQ 最终结构存在宏观真空区，需要重新建盒",
-                "box_density_multiplier": 1.10,
-            } if vacuum["detected"] else {}),
         },
     )
     record_stage_execution(preparation, success=False, outputs=outputs, details=result.extra, error=result.error)

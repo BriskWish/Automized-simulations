@@ -10,6 +10,7 @@ run_eval.py —— 批量评估入口。
 """
 
 from __future__ import annotations
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -138,6 +139,53 @@ def print_report(results: list[EvalResult]):
     _print_insights(results)
 
 
+def public_report(results: list[EvalResult]) -> dict[str, object]:
+    """Return a bounded report without prompts, traces, tool arguments or logs."""
+    by_layer: dict[str, dict[str, object]] = {}
+    for layer in ("quantum", "topology", "simulation"):
+        grouped = [result for result in results if result.layer == layer]
+        if not grouped:
+            continue
+        by_layer[layer] = {
+            "total": len(grouped),
+            "passed": sum(1 for result in grouped if result.passed),
+            "average_score": round(sum(result.total for result in grouped) / len(grouped), 2),
+        }
+    return {
+        "schema_version": 1,
+        "mode": "mock",
+        "total": len(results),
+        "passed": sum(1 for result in results if result.passed),
+        "average_score": round(sum(result.total for result in results) / len(results), 2) if results else 0,
+        "layers": by_layer,
+        "scenarios": [
+            {
+                "scenario_id": result.scenario_id,
+                "layer": result.layer,
+                "passed": result.passed,
+                "score": result.total,
+                "breakdown": {
+                    "diagnosis": result.breakdown.diagnosis,
+                    "tool_choice": result.breakdown.tool_choice,
+                    "repair": result.breakdown.repair,
+                    "escalation": result.breakdown.escalation,
+                },
+            }
+            for result in results
+        ],
+    }
+
+
+def write_public_report(path: str | Path, results: list[EvalResult]) -> Path:
+    """Atomically write the summary used by release baselines."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(json.dumps(public_report(results), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(target)
+    return target
+
+
 def _print_trace(trace):
     """打印单场景的详细轨迹 (verbose 模式)。"""
     print(f"\n    [{trace.scenario_id}] LLM 调用 {trace.total_llm_calls} 次, "
@@ -197,6 +245,7 @@ def _print_insights(results: list[EvalResult]):
 if __name__ == "__main__":
     layer_filter = None
     verbose = False
+    json_output = None
 
     args = sys.argv[1:]
     i = 0
@@ -207,14 +256,19 @@ if __name__ == "__main__":
         elif args[i] == "--verbose":
             verbose = True
             i += 1
+        elif args[i] == "--json-output" and i + 1 < len(args):
+            json_output = args[i + 1]
+            i += 2
         elif args[i] == "--help":
-            print("用法: python3 -m tests.llm_eval.run_eval [--layer quantum|topology|simulation] [--verbose]")
+            print("用法: python3 -m tests.llm_eval.run_eval [--layer quantum|topology|simulation] [--verbose] [--json-output PATH]")
             sys.exit(0)
         else:
             i += 1
 
     results = run_all_scenarios(layer_filter=layer_filter, verbose=verbose)
     print_report(results)
+    if json_output:
+        write_public_report(json_output, results)
 
     # 返回码: 有未通过则 1
     failed = sum(1 for r in results if not r.passed)

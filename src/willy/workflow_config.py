@@ -17,6 +17,7 @@ import math
 from willy._paths import get_project_root
 from willy.config_schema import validate_config_schema
 from willy.config_store import replace_json_with_backup
+from willy.remote_registry import merge_execution_md_defaults, validate_execution_md
 from willy.simulation.protocol import (
     MDConfigError,
     adopt_migrated_config_file,
@@ -30,23 +31,24 @@ CONFIG_PATH = ROOT / "config.json"
 
 
 def _available_residues() -> dict[str, dict]:
-    """扫描 struct/ 下所有 .gjf，从 config.json 补充已知电荷/自旋/基组。"""
+    """扫描 struct/ 下可选后端原始输入，不把历史配置当作电荷来源。"""
     struct_dir = ROOT / "struct"
     residues = {}
     if struct_dir.exists():
-        for gjf in sorted(struct_dir.glob("*.gjf")):
-            name = gjf.stem
+        for input_path in sorted([*struct_dir.glob("*.gjf"), *struct_dir.glob("*.inp")]):
+            name = input_path.stem
             if name.endswith("_run"):
                 continue
-            residues[name] = {"charge": None, "spin": None, "basis": None}
+            residues.setdefault(name, {"charge": None, "spin": None, "basis": None, "input_suffixes": []})
+            residues[name]["input_suffixes"].append(input_path.suffix)
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
             existing = json.load(f)
         mols = existing.get("molecules", {})
         for name in residues:
-            if name in mols:
-                residues[name]["charge"] = mols[name].get("charge")
-                residues[name]["spin"] = mols[name].get("spin")
+            if isinstance(mols, Mapping) and isinstance(mols.get(name), Mapping):
+                # Basis is a user preference; charge/spin must be re-read from
+                # the selected backend's raw source before every proposal.
                 residues[name]["basis"] = mols[name].get("basis", "b3lyp/6-311+g(d,p)")
     return residues
 
@@ -81,9 +83,25 @@ def validate_config(config_dict: object) -> list[str]:
     molecules = config_dict.get("molecules", {})
     if not isinstance(molecules, Mapping):
         molecules = {}
+    defaults = config_dict.get("defaults", {})
+    if isinstance(defaults, Mapping) and "nproc" in defaults:
+        _validate_nproc(issues, "defaults.nproc", defaults.get("nproc"), nullable=False)
+    for name, molecule in molecules.items():
+        if isinstance(molecule, Mapping) and "nproc" in molecule:
+            _validate_nproc(issues, f"molecules.{name}.nproc", molecule.get("nproc"), nullable=True)
     for name in residues:
         if name not in molecules:
             issues.append(f"residues 中的 '{name}' 未在 molecules 中定义")
+            continue
+        molecule = molecules.get(name)
+        if not isinstance(molecule, Mapping):
+            continue
+        charge = molecule.get("charge")
+        spin = molecule.get("spin")
+        if isinstance(charge, bool) or not isinstance(charge, int):
+            issues.append(f"molecules.{name}.charge 必须是由原始输入审计得到的整数")
+        if isinstance(spin, bool) or not isinstance(spin, int) or spin < 1:
+            issues.append(f"molecules.{name}.spin 必须是由原始输入审计得到的正整数")
     md = config_dict.get("md", {})
     if isinstance(md, Mapping) and md:
         md_validation = validate_md_config(md)
@@ -127,7 +145,20 @@ def validate_config(config_dict: object) -> list[str]:
         from willy.topology.backends import normalize_topology_config
         _, topology_issues, _ = normalize_topology_config(topology)
         issues.extend(topology_issues)
+    execution = config_dict.get("execution")
+    if execution is None:
+        issues.extend(validate_execution_md(None))
+    elif isinstance(execution, Mapping):
+        issues.extend(validate_execution_md(execution.get("md")))
     return issues
+
+
+def _validate_nproc(issues: list[str], field: str, value: object, *, nullable: bool) -> None:
+    if value is None and nullable:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4096:
+        suffix = "正整数（1-4096）或 null" if nullable else "正整数（1-4096）"
+        issues.append(f"{field} 必须是{suffix}")
 
 
 def apply_config(config_dict: dict, backup: bool = True) -> Path:
@@ -157,26 +188,23 @@ def _apply_defaults(config_dict: dict) -> dict:
     out.setdefault("defaults", {"mem": "5GB", "nproc": 8})
     out["defaults"].setdefault("mem", "5GB")
     out["defaults"].setdefault("nproc", 8)
-    available = _available_residues()
     residues = out.get("residues", {})
     molecules = out.setdefault("molecules", {})
     for name in residues:
         if name not in molecules:
-            info = available.get(name, {})
             molecules[name] = {
-                "charge": info.get("charge", 0),
-                "spin": info.get("spin", 1),
-                "basis": info.get("basis", "b3lyp/6-311+g(d,p)"),
+                "charge": None,
+                "spin": None,
+                "basis": "b3lyp/6-311+g(d,p)",
                 "solvent": "acetone",
                 "mem": "",
                 "nproc": None,
             }
-        molecules[name].setdefault("charge", 0)
-        molecules[name].setdefault("spin", 1)
-        molecules[name].setdefault("basis", "b3lyp/6-311+g(d,p)")
-        molecules[name].setdefault("mem", "")
-        molecules[name].setdefault("nproc", None)
-        molecules[name].setdefault("solvent", "acetone")
+        if isinstance(molecules[name], Mapping):
+            molecules[name].setdefault("basis", "b3lyp/6-311+g(d,p)")
+            molecules[name].setdefault("mem", "")
+            molecules[name].setdefault("nproc", None)
+            molecules[name].setdefault("solvent", "acetone")
     try:
         out["md"] = merge_v2_defaults(out.get("md", {}))
     except MDConfigError:
@@ -200,7 +228,10 @@ def _apply_defaults(config_dict: dict) -> dict:
     # Preserve an existing number-density snapshot for reproducibility. New
     # configurations receive the mass-density default used by Packmol.
     if "target_mass_density_g_cm3" not in box and "packing_number_density_nm3" not in box:
-        box["target_mass_density_g_cm3"] = 1.5
+        box["target_mass_density_g_cm3"] = 0.7
+    out.setdefault("execution", {})
+    execution = out["execution"]
+    execution["md"] = merge_execution_md_defaults(execution.get("md"))
     return out
 
 

@@ -10,6 +10,26 @@ startup_audit.json
 status.json
 md_run/
 config.json.bak
+.config.json.lock
+.config.json.bak.lock
 *:Zone.Identifier
 vendor/sobtop/.willy-sobtop.lock
 prompt.txt
+
+# Gateway deployment-only credentials and runtime state. Source code under
+# src/willy_gateway/ is versioned; keys, certificates, databases, local
+# profiles, and machine identities belong only on their deployment machine.
+managed_gateway.json
+managed_gateway_identity.json
+gateway.env
+.gateway/
+gateway-data/
+gateway-state/
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt

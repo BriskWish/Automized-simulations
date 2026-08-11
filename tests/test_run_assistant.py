@@ -7,12 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 import json
 import os
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 import pytest
 
 from willy.errors import ErrorKind, StepError, StepResult
 from willy.pipeline_state import PipelineStateMachine, State
 from willy.run_registry import RunRegistry, RunRegistryError
+from willy.run_metadata import RUN_MANIFEST_FILENAME, load_run_manifest, update_run_manifest_section
 from willy.simulation.mdrun_eta import MDRUN_ETA_FILENAME
 from willy.toolist_run import RUN_TOOLS, TOOL_META, handle_run_tool_call
 from willy.simulation.protocol import default_md_config
@@ -42,7 +44,37 @@ def _status() -> dict:
     }
 
 
+def _registry_facts(run_dir: Path) -> dict:
+    return load_run_manifest(run_dir)["sections"]["registry"]["data"]
+
+
 class TestRunRegistry:
+    def test_v2_registry_section_owns_registration_and_artifacts(self, tmp_path):
+        run_dir = tmp_path / "md_run" / "md_unified_202608090001"
+        run_dir.mkdir(parents=True)
+        config = run_dir / "config.json"
+        config.write_text(json.dumps({"backend": "g16", "run_seed": 1}), encoding="utf-8")
+        registry = RunRegistry(tmp_path)
+
+        registry.register_run(run_dir, backend="g16", total_steps=10)
+        output = run_dir / "Li.mol2"
+        output.write_text("@<TRIPOS>MOLECULE\nLi\n", encoding="utf-8")
+        registry.record_step_result(
+            run_dir,
+            StepResult("sp_g16", 2, True, outputs={"mol2": str(output)}),
+            label="SP + mol2",
+        )
+        config.write_text(json.dumps({"backend": "g16", "run_seed": 2}), encoding="utf-8")
+        registry.refresh_config_fingerprint(run_dir)
+
+        facts = _registry_facts(run_dir)
+        assert (run_dir / RUN_MANIFEST_FILENAME).is_file()
+        assert not (run_dir / "manifest.json").exists()
+        assert facts["run_id"] == run_dir.name
+        assert facts["config_sha256"] == sha256(config.read_bytes()).hexdigest()
+        assert facts["artifacts"][0]["path"] == "Li.mol2"
+        assert registry.list_artifacts(run_dir.name)[0]["exists"] is True
+
     def test_register_run_hashes_reused_quantum_intermediate(self, tmp_path):
         run_dir = tmp_path / "md_run" / "md_reuse_202608010001"
         run_dir.mkdir(parents=True)
@@ -52,10 +84,24 @@ class TestRunRegistry:
         registry = RunRegistry(tmp_path)
         registry.register_run(run_dir, backend="g16", total_steps=10)
 
-        manifest = json.loads((run_dir / "manifest.json").read_text())
+        manifest = _registry_facts(run_dir)
         assert manifest["input_files"] == [
             {"path": "Li.fchk", "sha256": manifest["input_files"][0]["sha256"]},
         ]
+
+    def test_refresh_config_fingerprint_tracks_final_snapshot(self, tmp_path):
+        run_dir = tmp_path / "md_run" / "md_refresh_202608090001"
+        run_dir.mkdir(parents=True)
+        config_path = run_dir / "config.json"
+        config_path.write_text(json.dumps({"backend": "g16", "run_seed": 1}))
+        registry = RunRegistry(tmp_path)
+        registry.register_run(run_dir, backend="g16", total_steps=10)
+        initial = _registry_facts(run_dir)["config_sha256"]
+
+        config_path.write_text(json.dumps({"backend": "g16", "run_seed": 2}))
+        refreshed = registry.refresh_config_fingerprint(run_dir)
+        assert refreshed["config_sha256"] != initial
+        assert refreshed["config_sha256"] == sha256(config_path.read_bytes()).hexdigest()
 
     def test_register_status_result_and_artifact_contract(self, tmp_path):
         registry, run_dir = _make_run(tmp_path)
@@ -69,7 +115,7 @@ class TestRunRegistry:
             label="SP + mol2",
         )
 
-        manifest = json.loads((run_dir / "manifest.json").read_text())
+        manifest = _registry_facts(run_dir)
         assert manifest["run_id"] == run_dir.name
         assert manifest["config_sha256"]
         assert manifest["input_files"] == [{"path": "Li.gjf", "sha256": manifest["input_files"][0]["sha256"]}]
@@ -94,7 +140,7 @@ class TestRunRegistry:
 
     def test_box_parameters_expose_only_audited_geometry(self, tmp_path):
         registry, run_dir = _make_run(tmp_path)
-        (run_dir / "md_manifest.json").write_text(json.dumps({
+        update_run_manifest_section(run_dir, "simulation", {
             "box_attempts": [{
                 "time": "2026-08-04T00:00:00+00:00",
                 "box_strategy": "target_mass_density",
@@ -104,7 +150,7 @@ class TestRunRegistry:
                 "actual_mass_density_g_cm3": 1.0,
                 "private_path": "/not/exposed",
             }],
-        }))
+        })
 
         record = registry.get_box_parameters(run_dir.name)
 
@@ -166,10 +212,10 @@ class TestRunRegistry:
         registry, run_dir = _make_run(tmp_path)
         eq_log = run_dir / "eq.log"
         eq_log.write_text("EQ is still running\n")
-        (run_dir / "md_manifest.json").write_text(json.dumps({
+        update_run_manifest_section(run_dir, "simulation", {
             "schema_version": 1,
             "stages": {"eq": {"status": "running", "attempt": 2}},
-        }))
+        })
         registry.record_status(run_dir, {
             **_status(),
             "state": "retrying",
@@ -205,10 +251,10 @@ class TestRunRegistry:
         eq_log.write_text("old EQ output\n")
         stale = (datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp()
         os.utime(eq_log, (stale, stale))
-        (run_dir / "md_manifest.json").write_text(json.dumps({
+        update_run_manifest_section(run_dir, "simulation", {
             "schema_version": 1,
             "stages": {"eq": {"status": "running", "attempt": 2}},
-        }))
+        })
         registry.record_status(run_dir, {
             **_status(),
             "state": "retrying",
@@ -241,12 +287,13 @@ class TestRunTools:
 
     def test_environment_tool_returns_only_redacted_capabilities(self, tmp_path):
         registry, run_dir = _make_run(tmp_path)
-        registry.record_environment_report(run_dir, {
+        capability_snapshot = {
             "gmx": {
                 "tool_id": "gmx", "label": "GROMACS", "status": "available",
                 "source": "willy_env", "reason": "", "version": None,
             },
-        })
+        }
+        update_run_manifest_section(run_dir, "provenance", {"capabilities": capability_snapshot})
 
         response = json.loads(handle_run_tool_call(
             "tools_get_environment_run", {}, selected_run_id=run_dir.name, registry=registry,
@@ -260,14 +307,24 @@ class TestRunTools:
             },
         }
 
+        # Historical runs retain a read-only fallback even though new runs
+        # publish capabilities through the v2 provenance section.
+        legacy_dir = tmp_path / "md_run" / "md_legacy_environment"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "manifest.json").write_text(json.dumps({"run_id": legacy_dir.name}))
+        (legacy_dir / "environment_report.json").write_text(json.dumps({"capabilities": capability_snapshot}))
+        assert registry.get_environment_report(legacy_dir.name)["capabilities"] == {
+            "gmx": {"status": "available", "source": "willy_env"},
+        }
+
     def test_box_tool_returns_audited_geometry(self, tmp_path):
         registry, run_dir = _make_run(tmp_path)
-        (run_dir / "md_manifest.json").write_text(json.dumps({
+        update_run_manifest_section(run_dir, "simulation", {
             "box_attempts": [{
                 "actual_box_vectors_angstrom": [20.0, 20.0, 20.0],
                 "actual_mass_density_g_cm3": 1.0,
             }],
-        }))
+        })
 
         response = json.loads(handle_run_tool_call(
             "tools_get_box_parameters_run", {}, selected_run_id=run_dir.name, registry=registry,
@@ -481,9 +538,9 @@ class TestOrchestratorRunRegistration:
 
         root = tmp_path / "project"
         (root / "struct").mkdir(parents=True)
-        (root / "struct" / "Li.gjf").write_text("geometry")
+        (root / "struct" / "Li.gjf").write_text("#p b3lyp/6-31g\n\nLi\n\n0 1\nLi 0 0 0\n")
         (root / "config.json").write_text(json.dumps({
-            "molecules": {"Li": {"charge": 0}},
+            "molecules": {"Li": {"charge": 0, "spin": 1}},
             "residues": {"Li": 1},
             "md": default_md_config(),
         }))
@@ -494,10 +551,11 @@ class TestOrchestratorRunRegistration:
         run_dir = root / "md_run" / "md_demo_202607310002"
         orchestrator._prepare_run_directory(run_dir)
 
-        assert (run_dir / "manifest.json").is_file()
-        environment = json.loads((run_dir / "environment_report.json").read_text())
-        assert environment["schema_version"] == 1
-        assert "executable" not in json.dumps(environment)
+        assert (run_dir / RUN_MANIFEST_FILENAME).is_file()
+        assert not (run_dir / "manifest.json").exists()
+        assert not (run_dir / "environment_report.json").exists()
+        provenance = load_run_manifest(run_dir)["sections"]["provenance"]["data"]
+        assert "executable" not in json.dumps(provenance["capabilities"])
         status = json.loads((run_dir / "status.json").read_text())
         assert status["run_id"] == run_dir.name
         assert json.loads((root / "md_run" / "index.json").read_text())["runs"][0]["run_id"] == run_dir.name

@@ -21,6 +21,7 @@ from willy.topology.manifest import (
     load_manifest,
     write_manifest,
 )
+from willy.run_metadata import RunMetadataError, create_run_manifest, load_run_manifest
 from willy.topology.topo_opls import LigParGenInput, make_itp_gro_opls
 from willy.topology.top_assembly import build
 from willy.topology.topo_gaff import SobtopInput, SobtopInputBuilder, make_itp_gro
@@ -42,6 +43,20 @@ def _write_itp(path: Path, atomtype: str = "CT", atomtype_params: str = "6 12.01
 def _write_gro(path: Path, atom_count: int = 1) -> None:
     atoms = [f"    1MOL     C{i:1d}{i:5d}   0.000   0.000   0.000\n" for i in range(1, atom_count + 1)]
     path.write_text("test\n" + str(atom_count) + "\n" + "".join(atoms) + "   1.00000   1.00000   1.00000\n")
+
+
+def _write_ligpargen_gro(path: Path, temporary_prefix: str, atom_count: int = 1) -> None:
+    atoms = [
+        f"    1{temporary_prefix}  C{i:02d}{i:5d}   0.000   0.000   0.000\n"
+        for i in range(1, atom_count + 1)
+    ]
+    path.write_text(
+        "LIGPARGEN GENERATED GRO FILE\n"
+        + str(atom_count)
+        + "\n"
+        + "".join(atoms)
+        + "   1.00000   1.00000   1.00000\n"
+    )
 
 
 def _result_for(itp: Path, gro: Path, name: str = "topology") -> StepResult:
@@ -70,6 +85,96 @@ def _write_manifest_for(tmp_path: Path, backend: str, family: str, names: list[s
             backend=backend, forcefield_family=family, success=valid, validated=valid,
         ))
     write_manifest(tmp_path, backend=backend, forcefield_family=family, components=components)
+
+
+class TestUnifiedTopologyManifest:
+    def test_write_uses_private_topology_section_when_unified_manifest_exists(self, tmp_path):
+        create_run_manifest(tmp_path)
+        component = TopologyManifestComponent(
+            molecule_id="SOL", residue_name="SOL", quantity=2,
+            mol2=str(tmp_path / "SOL.mol2"), chg=None, charge=0, spin=1,
+            smiles=None, backend="oplsaa", forcefield_family="oplsaa",
+            success=True, validated=True,
+        )
+
+        written = write_manifest(
+            tmp_path,
+            backend="oplsaa",
+            forcefield_family="oplsaa",
+            components=[component],
+        )
+
+        unified = load_run_manifest(tmp_path)
+        topology = unified["sections"]["topology"]
+        assert written == tmp_path / "run_manifest.json"
+        assert not (tmp_path / "topology_manifest.json").exists()
+        assert topology["visibility"] == "private"
+        assert topology["revision"] == 1
+        assert topology["data"]["backend"] == "oplsaa"
+        assert load_manifest(tmp_path)["components"][0]["residue_name"] == "SOL"
+
+    def test_legacy_topology_manifest_is_read_when_unified_manifest_is_absent(self, tmp_path):
+        component = TopologyManifestComponent(
+            molecule_id="A", residue_name="A", quantity=1,
+            mol2=str(tmp_path / "A.mol2"), chg=str(tmp_path / "A.chg"),
+            charge=0, spin=1, smiles=None, backend="sobtop", forcefield_family="gaff_uff",
+        )
+        write_manifest(
+            tmp_path,
+            backend="sobtop",
+            forcefield_family="gaff_uff",
+            components=[component],
+        )
+
+        manifest = load_manifest(tmp_path)
+
+        assert manifest["backend"] == "sobtop"
+        assert manifest["components"][0]["molecule_id"] == "A"
+
+    def test_invalid_unified_manifest_never_falls_back_to_legacy_topology_data(self, tmp_path):
+        component = TopologyManifestComponent(
+            molecule_id="A", residue_name="A", quantity=1,
+            mol2=str(tmp_path / "A.mol2"), chg=str(tmp_path / "A.chg"),
+            charge=0, spin=1, smiles=None, backend="sobtop", forcefield_family="gaff_uff",
+        )
+        write_manifest(
+            tmp_path,
+            backend="sobtop",
+            forcefield_family="gaff_uff",
+            components=[component],
+        )
+        (tmp_path / "run_manifest.json").write_text("{}")
+
+        with pytest.raises(RunMetadataError):
+            load_manifest(tmp_path)
+
+    def test_topology_assembly_reads_and_updates_unified_section(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(_config("sobtop", "gaff_uff", {"SOL": 2})))
+        itp = tmp_path / "SOL.itp"
+        gro = tmp_path / "SOL.gro"
+        _write_itp(itp, atomtype="SOL")
+        _write_gro(gro)
+        create_run_manifest(tmp_path)
+        write_manifest(
+            tmp_path,
+            backend="sobtop",
+            forcefield_family="gaff_uff",
+            components=[TopologyManifestComponent(
+                molecule_id="SOL", residue_name="SOL", quantity=2,
+                mol2=str(tmp_path / "SOL.mol2"), chg=str(tmp_path / "SOL.chg"),
+                charge=0, spin=1, smiles=None, backend="sobtop", forcefield_family="gaff_uff",
+                itp=str(itp), gro=str(gro), success=True, validated=True,
+            )],
+        )
+
+        result = build(config_path=str(config_path), topo_dir=str(tmp_path))
+
+        topology = load_run_manifest(tmp_path)["sections"]["topology"]
+        assert result.success is True
+        assert topology["revision"] == 2
+        assert topology["data"]["components"][0]["assembly_itp"] == str(tmp_path / ".assembly_itp" / "SOL.itp")
+        assert (tmp_path / "topol.top").is_file()
 
 
 class TestTopologyConfig:
@@ -368,6 +473,17 @@ class TestOplsExecutor:
         tmp_root.mkdir()
         monkeypatch.setattr(topo_opls, "LIGPARGEN_TMP_DIR", tmp_root)
         monkeypatch.setattr(topo_opls, "check_ligpargen_ready", lambda: [])
+        executables = {
+            "ligpargen": tmp_root / "LigParGen",
+            "obabel": tmp_root / "obabel",
+            "csh": tmp_root / "csh",
+        }
+        monkeypatch.setattr(
+            topo_opls,
+            "require_tool",
+            lambda tool_id: SimpleNamespace(executable=executables[tool_id]),
+        )
+        monkeypatch.setattr(topo_opls, "build_tool_env", lambda tool_id: {"PATH": "/usr/bin"})
         return topo_opls, tmp_root
 
     def test_same_residue_concurrent_runs_are_isolated(self, tmp_path, monkeypatch):
@@ -401,6 +517,66 @@ class TestOplsExecutor:
         assert len(set(prefixes)) == 2
         assert all("SOL 3" in Path(result.outputs["itp"]).read_text() for result in results)
         assert list(tmp_root.iterdir()) == []
+
+    def test_ligpargen_gro_restores_five_column_residue_name(self, tmp_path, monkeypatch):
+        topo_opls, tmp_root = self._patch_ligpargen(tmp_path, monkeypatch)
+        observed = {}
+
+        def fake_run(cmd, **kwargs):
+            prefix = cmd[cmd.index("-r") + 1]
+            observed["prefix"] = prefix
+            _write_itp(tmp_root / f"{prefix}.itp")
+            _write_ligpargen_gro(tmp_root / f"{prefix}.gro", prefix)
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(topo_opls, "run_managed_command", fake_run)
+
+        result = make_itp_gro_opls(
+            LigParGenInput(smiles="CC", output_name="LONGER"), str(tmp_path / "run"),
+        )
+
+        assert result.success is True
+        atom_line = Path(result.outputs["gro"]).read_text().splitlines()[2]
+        assert atom_line[:5] == "    1"
+        assert atom_line[5:10] == "LONGE"
+        assert observed["prefix"] not in atom_line
+        assert atom_line[10:] == "  C01    1   0.000   0.000   0.000"
+        assert result.extra["gro_residue_name"] == "LONGE"
+
+    def test_ligpargen_gets_a_private_legacy_babel_compatibility_entry(self, tmp_path, monkeypatch):
+        topo_opls, tmp_root = self._patch_ligpargen(tmp_path, monkeypatch)
+        observed = {}
+
+        def fake_run(cmd, **kwargs):
+            observed["path"] = kwargs["env"]["PATH"]
+            observed["pythonpath"] = kwargs["env"]["PYTHONPATH"]
+            compat_dir = Path(observed["path"].split(":", 1)[0])
+            observed["babel_wrapper"] = (compat_dir / "babel").read_text()
+            observed["networkx_compat"] = (compat_dir / "sitecustomize.py").read_text()
+            observed["csh_target"] = (compat_dir / "csh").readlink()
+            prefix = cmd[cmd.index("-r") + 1]
+            _write_itp(tmp_root / f"{prefix}.itp")
+            _write_gro(tmp_root / f"{prefix}.gro")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(topo_opls, "run_managed_command", fake_run)
+
+        result = make_itp_gro_opls(
+            LigParGenInput(smiles="CC", output_name="SOL"),
+            str(tmp_path / "run"),
+        )
+
+        assert result.success is True
+        assert str(tmp_root / "obabel") in observed["babel_wrapper"]
+        assert "'-omol'" in observed["babel_wrapper"]
+        assert "'-O'" in observed["babel_wrapper"]
+        assert "DiGraph.node" in observed["networkx_compat"]
+        assert "DataFrame.ix" in observed["networkx_compat"]
+        assert "join_axes" in observed["networkx_compat"]
+        assert "_legacy_drop" in observed["networkx_compat"]
+        assert observed["csh_target"] == tmp_root / "csh"
+        assert observed["path"].split(":", 1)[0] == observed["pythonpath"].split(":", 1)[0]
+        assert not Path(observed["path"].split(":", 1)[0]).exists()
 
     def test_startup_oserror_is_a_dependency_step_result(self, tmp_path, monkeypatch):
         topo_opls, _ = self._patch_ligpargen(tmp_path, monkeypatch)

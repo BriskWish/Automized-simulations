@@ -21,18 +21,29 @@ from willy._paths import get_project_root
 from willy.errors import StepResult, public_error_summary
 from willy.pipeline_state import StateTransitionError, validate_state_transition
 from willy.simulation.mdrun_eta import MDRUN_ETA_FILENAME, MDRUN_HEARTBEAT_INTERVAL_S
+from willy.run_metadata import (
+    RUN_MANIFEST_FILENAME,
+    RunManifestRevisionConflict,
+    RunMetadataError,
+    create_run_manifest,
+    load_run_metadata_section,
+    load_run_manifest,
+    update_run_manifest_section,
+)
 from willy.run_store import run_transaction
+from willy.run_provenance import RUN_PROVENANCE_FILENAME
 from willy.step_registry import EQ_STEP, STEP_REGISTRY
 
 
 RUNS_DIRNAME = "md_run"
 INDEX_FILENAME = "index.json"
 MANIFEST_FILENAME = "manifest.json"
+_QUANTUM_INPUT_SUFFIXES = frozenset({".gjf", ".inp", ".fchk", ".molden"})
 STATUS_FILENAME = "status.json"
 STATUS_LOCK_FILENAME = ".status.lock"
 EVENTS_FILENAME = "events.jsonl"
 DECISION_TRACE_FILENAME = "decision_trace.jsonl"
-ENVIRONMENT_REPORT_FILENAME = "environment_report.json"
+LEGACY_ENVIRONMENT_REPORT_FILENAME = "environment_report.json"
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _LOG_SUFFIXES = {".err", ".log", ".out", ".txt"}
 _MD_STAGE_STEPS = {
@@ -108,14 +119,14 @@ class RunRegistry:
         manifest_file = directory / MANIFEST_FILENAME
         with run_transaction(directory) as store:
             store.recover_pending_bundle()
-        created = not manifest_file.exists()
+        unified = self._load_unified_manifest(directory)
+        is_fresh_v2_candidate = unified is None and not manifest_file.exists()
+        created = is_fresh_v2_candidate or (
+            unified is not None and not bool(unified["sections"]["registry"]["data"])
+        )
         if created:
             config_file = directory / "config.json"
-            input_files = [
-                {"path": path.name, "sha256": _file_sha256(path)}
-                for path in sorted(directory.iterdir())
-                if path.is_file() and path.suffix in {".gjf", ".fchk", ".molden"}
-            ]
+            input_files = self._input_files(directory)
             manifest = {
                 "schema_version": 1,
                 "run_id": run_id,
@@ -132,17 +143,146 @@ class RunRegistry:
                 "artifacts": [],
                 "status_path": STATUS_FILENAME,
             }
-            _atomic_write(manifest_file, manifest)
+            if is_fresh_v2_candidate:
+                try:
+                    unified = create_run_manifest(directory, sections={"registry": manifest})
+                except RunMetadataError as exc:
+                    raise RunRegistryError(f"无法创建运行 metadata: {exc}") from exc
+            else:
+                self._write_registry_manifest(directory, manifest, unified=unified)
             self.append_event(directory, "run_created", {
                 "backend": backend,
                 "total_steps": total_steps,
                 "parent_run_id": parent_run_id,
             })
         else:
-            manifest = self._read_json(manifest_file, "运行 manifest")
+            manifest = self._read_registry_manifest(directory, unified=unified)
             self.append_event(directory, "run_reopened", {"backend": backend})
         self._update_index(directory, manifest)
         return manifest
+
+    def refresh_input_files(self, run_dir: str | Path) -> dict[str, Any]:
+        """Refresh only the manifest's frozen quantum-input fingerprints.
+
+        The workspace is registered before status persistence is bound, while
+        raw inputs are copied later in the same setup transaction.  Updating
+        this constrained field afterwards keeps the public audit accurate
+        without reopening or changing the run's execution state.
+        """
+        directory = self._validate_run_directory(run_dir)
+        with self._status_lock(directory):
+            unified = self._load_unified_manifest(directory)
+            manifest = self._read_registry_manifest(directory, unified=unified)
+            manifest["input_files"] = self._input_files(directory)
+            manifest["updated_at"] = _now()
+            self._write_registry_manifest(directory, manifest, unified=unified)
+        self._update_index(directory, manifest)
+        return manifest
+
+    def refresh_config_fingerprint(self, run_dir: str | Path) -> dict[str, Any]:
+        """Refresh the registry manifest's hash for the final run config.
+
+        Registration happens before the orchestrator applies audited fields and
+        the per-run seed.  This explicit refresh keeps the top-level registry
+        fingerprint aligned with the immutable config snapshot written during
+        setup, without changing status or execution state.
+        """
+        directory = self._validate_run_directory(run_dir)
+        config_file = directory / "config.json"
+        if not config_file.is_file():
+            raise RunRegistryError("运行目录缺少 config.json，无法刷新配置指纹")
+        config_hash = _file_sha256(config_file)
+        with self._status_lock(directory):
+            unified = self._load_unified_manifest(directory)
+            manifest = self._read_registry_manifest(directory, unified=unified)
+            manifest["config_sha256"] = config_hash
+            manifest["updated_at"] = _now()
+            self._write_registry_manifest(directory, manifest, unified=unified)
+        self._update_index(directory, manifest)
+        return manifest
+
+    @staticmethod
+    def _load_unified_manifest(directory: Path) -> dict[str, Any] | None:
+        """Return v2 metadata only when this run has opted into it.
+
+        A malformed v2 record is not silently replaced by legacy files.  Once
+        a run owns ``run_manifest.json``, that document is its source of truth
+        and a corrupted section must remain visible to the caller.
+        """
+        if not (directory / RUN_MANIFEST_FILENAME).is_file():
+            return None
+        try:
+            return load_run_manifest(directory)
+        except RunMetadataError as exc:
+            raise RunRegistryError(f"运行 metadata 不可读取: {exc}") from exc
+
+    def _read_registry_manifest(
+        self,
+        directory: Path,
+        *,
+        unified: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Read the v2 registry section, with legacy fallback per run."""
+        record = unified if unified is not None else self._load_unified_manifest(directory)
+        if record is None:
+            return self._read_json(directory / MANIFEST_FILENAME, "运行 manifest")
+        try:
+            payload = record["sections"]["registry"]["data"]
+        except (KeyError, TypeError) as exc:
+            raise RunRegistryError("运行 metadata 缺少 registry section") from exc
+        if not isinstance(payload, Mapping):
+            raise RunRegistryError("运行 metadata registry section 格式无效")
+        return dict(payload)
+
+    def _write_registry_manifest(
+        self,
+        directory: Path,
+        payload: Mapping[str, Any],
+        *,
+        unified: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Write registry facts to v2 or the legacy manifest for this run."""
+        clean = dict(payload)
+        record = unified if unified is not None else self._load_unified_manifest(directory)
+        if record is None:
+            _atomic_write(directory / MANIFEST_FILENAME, clean)
+            return clean
+        try:
+            expected_section_revision = record["sections"]["registry"]["revision"]
+            for _ in range(2):
+                try:
+                    updated = update_run_manifest_section(
+                        directory,
+                        "registry",
+                        clean,
+                        expected_revision=record["revision"],
+                        expected_section_revision=expected_section_revision,
+                    )
+                    break
+                except RunManifestRevisionConflict:
+                    # A different v2 section may have been refreshed between
+                    # this read and write.  Retry only when registry itself is
+                    # untouched; otherwise preserving the competing registry
+                    # update is safer than overwriting its artifact audit.
+                    record = self._load_unified_manifest(directory)
+                    if record is None or record["sections"]["registry"]["revision"] != expected_section_revision:
+                        raise
+            else:
+                raise RunManifestRevisionConflict("运行 metadata 已并发更新")
+            value = updated["sections"]["registry"]["data"]
+        except (KeyError, TypeError, RunMetadataError) as exc:
+            raise RunRegistryError(f"无法更新运行 metadata registry section: {exc}") from exc
+        if not isinstance(value, Mapping):
+            raise RunRegistryError("运行 metadata registry section 格式无效")
+        return dict(value)
+
+    @staticmethod
+    def _input_files(directory: Path) -> list[dict[str, str]]:
+        return [
+            {"path": path.name, "sha256": _file_sha256(path)}
+            for path in sorted(directory.iterdir())
+            if path.is_file() and path.suffix.lower() in _QUANTUM_INPUT_SUFFIXES
+        ]
 
     def record_status(self, run_dir: str | Path, status: Mapping[str, Any], event_type: str) -> None:
         """Persist the latest state and a concise event without interrupting a run."""
@@ -166,7 +306,7 @@ class RunRegistry:
                     },
                 )
         try:
-            manifest = self._read_json(directory / MANIFEST_FILENAME, "运行 manifest")
+            manifest = self._read_registry_manifest(directory)
             self._update_index(directory, manifest, status=payload)
         except (OSError, RunRegistryError):
             # The state snapshot is the primary record; an index refresh can be retried later.
@@ -179,6 +319,7 @@ class RunRegistry:
         expected_revision: int,
         status: Mapping[str, Any],
         event_type: str,
+        event_details: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically persist one legal control transition from a known revision."""
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
@@ -198,6 +339,16 @@ class RunRegistry:
                 raise RunRegistryError(str(exc)) from exc
             payload = self._public_status_payload(status, directory.name)
             payload["state_revision"] = actual_revision + 1
+            details = self._status_summary(payload)
+            if event_details:
+                details["audit"] = {
+                    str(key): value
+                    for key, value in event_details.items()
+                    if isinstance(key, str) and key in {
+                        "source", "reason", "stage", "evidence_source",
+                        "evidence_age_s", "checked_revision", "grace_s",
+                    }
+                }
             with run_transaction(directory) as store:
                 store.commit_bundle(
                     operation="compare_and_swap_status",
@@ -207,12 +358,12 @@ class RunRegistry:
                             "timestamp": _now(),
                             "event_type": event_type,
                             "run_id": directory.name,
-                            "details": self._status_summary(payload),
+                            "details": details,
                         }],
                     },
                 )
         try:
-            manifest = self._read_json(directory / MANIFEST_FILENAME, "运行 manifest")
+            manifest = self._read_registry_manifest(directory)
             self._update_index(directory, manifest, status=payload)
         except (OSError, RunRegistryError):
             pass
@@ -222,17 +373,41 @@ class RunRegistry:
         """Persist a checkpoint-first user stop request for one active run."""
         return self._write_stop_state(run_id, state="stopping", event_type="run_stop_requested")
 
-    def mark_aborted(self, run_id: str, *, event_type: str = "run_aborted") -> dict[str, Any]:
+    def mark_aborted(
+        self,
+        run_id: str,
+        *,
+        event_type: str = "run_aborted",
+        expected_revision: int | None = None,
+        event_details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Persist a terminal user/interrupted-run outcome without engine details."""
-        return self._write_stop_state(run_id, state="aborted", event_type=event_type)
+        return self._write_stop_state(
+            run_id,
+            state="aborted",
+            event_type=event_type,
+            expected_revision=expected_revision,
+            event_details=event_details,
+        )
 
-    def _write_stop_state(self, run_id: str, *, state: str, event_type: str) -> dict[str, Any]:
+    def _write_stop_state(
+        self,
+        run_id: str,
+        *,
+        state: str,
+        event_type: str,
+        expected_revision: int | None = None,
+        event_details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if state not in {"stopping", "aborted"}:
             raise ValueError("无效的运行停止状态")
         directory = self.resolve_run_id(run_id)
-        current = self.get_run_status(run_id)
+        current = self.get_run_status(run_id, reconcile=False)
         if current.get("state") in {"done", "escalated", "aborted"}:
             return current
+        current_revision = _state_revision(current.get("state_revision"))
+        if expected_revision is not None and expected_revision != current_revision:
+            raise RunStateConflict("运行状态已更新，请刷新后重试")
         updated = dict(current)
         updated.update({
             "state": state,
@@ -243,57 +418,37 @@ class RunRegistry:
         })
         updated = self.compare_and_swap_status(
             directory,
-            expected_revision=_state_revision(current.get("state_revision")),
+            expected_revision=current_revision,
             status=updated,
             event_type=event_type,
+            event_details=event_details,
         )
-        return self.get_run_status(run_id)
-
-    def record_environment_report(
-        self,
-        run_dir: str | Path,
-        capabilities: Mapping[str, Mapping[str, Any]],
-    ) -> None:
-        """Store a redacted external-tool discovery snapshot for one run."""
-        directory = self._validate_run_directory(run_dir)
-        safe: dict[str, dict[str, Any]] = {}
-        for tool_id, value in capabilities.items():
-            if not isinstance(tool_id, str) or not isinstance(value, Mapping):
-                continue
-            version = value.get("version")
-            safe[tool_id] = {
-                "tool_id": str(value.get("tool_id", tool_id)),
-                "label": str(value.get("label", tool_id)),
-                "status": str(value.get("status", "unknown")),
-                "source": str(value.get("source", "")),
-                "reason": str(value.get("reason", "")),
-                "version": None if version is None else str(version),
-            }
-        unavailable = sorted(tool_id for tool_id, value in safe.items() if value["status"] != "available")
-        with run_transaction(directory) as store:
-            store.commit_bundle(
-                operation="record_environment_report",
-                json_writes={ENVIRONMENT_REPORT_FILENAME: {
-                    "schema_version": 1,
-                    "capabilities": safe,
-                }},
-                jsonl_appends={EVENTS_FILENAME: [{
-                    "timestamp": _now(),
-                    "event_type": "environment_discovered",
-                    "run_id": directory.name,
-                    "details": {
-                        "available_count": len(safe) - len(unavailable),
-                        "unavailable_tools": unavailable,
-                    },
-                }]},
-            )
+        return self.get_run_status(run_id, reconcile=False)
 
     def get_environment_report(self, run_id: str) -> dict[str, Any]:
-        """Read a run's redacted capability report with an injection-safe schema."""
-        payload = self._read_json(
-            self.resolve_run_id(run_id) / ENVIRONMENT_REPORT_FILENAME,
-            "运行环境报告",
-        )
+        """Read the redacted capability snapshot from run provenance.
+
+        ``environment_report.json`` was a duplicate of this snapshot.  It is
+        accepted only as a read fallback for historical runs created before
+        the consolidation, never written for new runs.
+        """
+        directory = self.resolve_run_id(run_id)
+        unified = self._load_unified_manifest(directory)
+        if unified is not None:
+            try:
+                payload = unified["sections"]["provenance"]["data"]
+            except (KeyError, TypeError) as exc:
+                raise RunRegistryError("运行 metadata 缺少 provenance section") from exc
+            if not isinstance(payload, Mapping):
+                raise RunRegistryError("运行 metadata provenance section 格式无效")
+        else:
+            try:
+                payload = self._read_json(directory / RUN_PROVENANCE_FILENAME, "运行 provenance")
+            except RunRegistryError:
+                payload = self._read_json(
+                    directory / LEGACY_ENVIRONMENT_REPORT_FILENAME,
+                    "运行环境报告",
+                )
         raw_capabilities = payload.get("capabilities", {})
         if not isinstance(raw_capabilities, Mapping):
             raise RunRegistryError("运行环境报告格式无效")
@@ -417,10 +572,9 @@ class RunRegistry:
             "error_kind": result.error.kind.value if result.error else "",
             "error": error_summary,
         }
-        with run_transaction(directory) as store:
-            manifest = store.read_json(MANIFEST_FILENAME)
-            if not isinstance(manifest, dict):
-                raise RunRegistryError("运行 manifest 不可读取")
+        unified = self._load_unified_manifest(directory)
+        if unified is not None:
+            manifest = self._read_registry_manifest(directory, unified=unified)
             artifacts = manifest.setdefault("artifacts", [])
             known = {(item.get("path"), item.get("step_id"), item.get("kind")) for item in artifacts}
             for kind, relative_path in outputs.items():
@@ -438,16 +592,40 @@ class RunRegistry:
                     artifacts.append(item)
                     known.add(key)
             manifest["updated_at"] = _now()
-            store.commit_bundle(
-                operation="record_step_result",
-                json_writes={MANIFEST_FILENAME: manifest},
-                jsonl_appends={EVENTS_FILENAME: [{
-                    "timestamp": _now(),
-                    "event_type": "step_result",
-                    "run_id": directory.name,
-                    "details": event,
-                }]},
-            )
+            self._write_registry_manifest(directory, manifest, unified=unified)
+            self.append_event(directory, "step_result", event)
+        else:
+            with run_transaction(directory) as store:
+                manifest = store.read_json(MANIFEST_FILENAME)
+                if not isinstance(manifest, dict):
+                    raise RunRegistryError("运行 manifest 不可读取")
+                artifacts = manifest.setdefault("artifacts", [])
+                known = {(item.get("path"), item.get("step_id"), item.get("kind")) for item in artifacts}
+                for kind, relative_path in outputs.items():
+                    path = directory / relative_path
+                    item = {
+                        "path": relative_path,
+                        "kind": kind,
+                        "step_id": result.step_index,
+                        "step_name": result.step_name,
+                        "artifact_contract": artifact_contract,
+                        "size_bytes": path.stat().st_size if path.is_file() else None,
+                    }
+                    key = (item["path"], item["step_id"], item["kind"])
+                    if key not in known:
+                        artifacts.append(item)
+                        known.add(key)
+                manifest["updated_at"] = _now()
+                store.commit_bundle(
+                    operation="record_step_result",
+                    json_writes={MANIFEST_FILENAME: manifest},
+                    jsonl_appends={EVENTS_FILENAME: [{
+                        "timestamp": _now(),
+                        "event_type": "step_result",
+                        "run_id": directory.name,
+                        "details": event,
+                    }]},
+                )
         self._update_index(directory, manifest)
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -468,17 +646,128 @@ class RunRegistry:
             reverse=True,
         )[:limit]
 
-    def get_run_status(self, run_id: str) -> dict[str, Any]:
+    def get_run_status(self, run_id: str, *, reconcile: bool = True) -> dict[str, Any]:
         directory = self.resolve_run_id(run_id)
         status_file = directory / STATUS_FILENAME
         if not status_file.is_file():
             return {"run_id": run_id, "state": "unknown", "message": "该 run 尚未写入状态快照"}
         status = self._read_json(status_file, "运行状态")
-        status = self._reconcile_active_simulation_stage(directory, status)
+        if reconcile:
+            status = self._reconcile_active_simulation_stage(directory, status)
         status["run_id"] = run_id
         self._add_local_timestamp(status, "started_at")
         self._add_local_timestamp(status, "updated_at")
         return status
+
+    def get_live_stage_evidence(
+        self,
+        run_id: str,
+        status: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded, read-only evidence that a run-local MD stage is alive.
+
+        This is intentionally separate from ``get_run_status`` so a liveness
+        decision can be made without triggering any status repair.  The result
+        contains no paths, commands, or raw engine output.
+        """
+        directory = self.resolve_run_id(run_id)
+        snapshot = dict(status) if isinstance(status, Mapping) else self.get_run_status(run_id, reconcile=False)
+        stage = self._status_stage(snapshot)
+        if stage is None:
+            stage = self._manifest_running_stage(directory)
+        if stage is None:
+            return {"active": False, "stage": None, "source": "none"}
+
+        freshness_s = max(60.0, MDRUN_HEARTBEAT_INTERVAL_S * 3.0)
+        now = datetime.now(timezone.utc)
+        eta_file = directory / MDRUN_ETA_FILENAME
+        if eta_file.is_file():
+            try:
+                eta = self._read_json(eta_file, "GROMACS ETA 快照")
+            except RunRegistryError:
+                eta = {}
+            if eta.get("stage") == stage and eta.get("process_alive") is True:
+                observed = self._public_timestamp(eta.get("observed_at"))
+                age_s = self._timestamp_age_seconds(observed, now)
+                if age_s is not None and age_s <= freshness_s:
+                    return {
+                        "active": True,
+                        "stage": stage,
+                        "source": "mdrun_eta",
+                        "evidence_age_s": round(age_s, 3),
+                        "observed_at": observed,
+                    }
+
+        for suffix in ("log", "edr", "xtc", "cpt"):
+            try:
+                modified = datetime.fromtimestamp(
+                    (directory / f"{stage}.{suffix}").stat().st_mtime,
+                    timezone.utc,
+                )
+            except OSError:
+                continue
+            age_s = max(0.0, (now - modified).total_seconds())
+            if age_s <= freshness_s:
+                return {
+                    "active": True,
+                    "stage": stage,
+                    "source": f"stage_output:{suffix}",
+                    "evidence_age_s": round(age_s, 3),
+                }
+
+        updated = self._public_timestamp(snapshot.get("updated_at"))
+        age_s = self._timestamp_age_seconds(updated, now)
+        if age_s is not None and age_s <= freshness_s and snapshot.get("state") in {
+            "running", "retrying", "stopping",
+        }:
+            return {
+                "active": True,
+                "stage": stage,
+                "source": "status_heartbeat",
+                "evidence_age_s": round(age_s, 3),
+                "observed_at": updated,
+            }
+        return {"active": False, "stage": stage, "source": "stale"}
+
+    @staticmethod
+    def _timestamp_age_seconds(value: str | None, now: datetime) -> float | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return max(0.0, (now - parsed.astimezone(timezone.utc)).total_seconds())
+
+    @staticmethod
+    def _status_stage(status: Mapping[str, Any]) -> str | None:
+        activity = status.get("activity")
+        if isinstance(activity, Mapping):
+            stage = activity.get("target")
+            if stage in {"em", "eq", "prod"}:
+                return str(stage)
+        return None
+
+    def _manifest_running_stage(self, directory: Path) -> str | None:
+        try:
+            manifest = self._read_simulation_manifest(directory)
+        except (RunRegistryError, RunMetadataError):
+            return None
+        if manifest is None:
+            return None
+        stages = manifest.get("stages", {})
+        if not isinstance(stages, Mapping):
+            return None
+        return next(
+            (
+                stage for stage in ("em", "eq", "prod")
+                if isinstance(stages.get(stage), Mapping)
+                and stages[stage].get("status") == "running"
+            ),
+            None,
+        )
 
     def _reconcile_active_simulation_stage(
         self,
@@ -494,12 +783,11 @@ class RunRegistry:
         """
         if status.get("state") in {"stopping", "aborted"}:
             return status
-        manifest_file = directory / "md_manifest.json"
-        if not manifest_file.is_file():
-            return status
         try:
-            manifest = self._read_json(manifest_file, "MD manifest")
-        except RunRegistryError:
+            manifest = self._read_simulation_manifest(directory)
+        except (RunRegistryError, RunMetadataError):
+            return status
+        if manifest is None:
             return status
         stages = manifest.get("stages", {})
         if not isinstance(stages, Mapping):
@@ -578,33 +866,11 @@ class RunRegistry:
         the ``process_alive`` ETA field; for those, the bounded fallback is a
         fresh write to a standard stage output.
         """
-        freshness_s = max(60.0, MDRUN_HEARTBEAT_INTERVAL_S * 3.0)
-        now = datetime.now(timezone.utc)
-
-        eta_file = directory / MDRUN_ETA_FILENAME
-        if eta_file.is_file():
-            try:
-                eta = self._read_json(eta_file, "GROMACS ETA 快照")
-            except RunRegistryError:
-                eta = {}
-            if eta.get("stage") == stage and eta.get("process_alive") is True:
-                observed = self._public_timestamp(eta.get("observed_at"))
-                if observed is not None:
-                    observed_at = datetime.fromisoformat(observed)
-                    if (now - observed_at).total_seconds() <= freshness_s:
-                        return True
-
-        for suffix in ("log", "edr", "xtc", "cpt"):
-            try:
-                modified = datetime.fromtimestamp(
-                    (directory / f"{stage}.{suffix}").stat().st_mtime,
-                    timezone.utc,
-                )
-            except OSError:
-                continue
-            if (now - modified).total_seconds() <= freshness_s:
-                return True
-        return False
+        evidence = self.get_live_stage_evidence(
+            directory.name,
+            {"activity": {"target": stage}, "state": "running"},
+        )
+        return bool(evidence.get("active"))
 
     def get_run_config(self, run_id: str) -> dict[str, Any]:
         directory = self.resolve_run_id(run_id)
@@ -619,7 +885,7 @@ class RunRegistry:
             if event.get("event_type") == "step_result"
             and event.get("details", {}).get("step_id") == step_id
         ]
-        status = self.get_run_status(run_id)
+        status = self.get_run_status(run_id, reconcile=False)
         latest = events[-1].get("details", {}) if events else {}
         activity = latest.get("activity", {})
         if not activity and status.get("step") == step_id:
@@ -637,7 +903,7 @@ class RunRegistry:
 
     def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
         directory = self.resolve_run_id(run_id)
-        manifest = self._read_json(directory / MANIFEST_FILENAME, "运行 manifest")
+        manifest = self._read_registry_manifest(directory)
         result = []
         for item in manifest.get("artifacts", []):
             relative = item.get("path", "")
@@ -651,10 +917,12 @@ class RunRegistry:
     def get_box_parameters(self, run_id: str) -> dict[str, Any]:
         """Return the latest audited Packmol geometry without exposing paths."""
         directory = self.resolve_run_id(run_id)
-        path = directory / "md_manifest.json"
-        if not path.is_file():
+        try:
+            payload = self._read_simulation_manifest(directory)
+        except (RunRegistryError, RunMetadataError):
+            payload = None
+        if payload is None:
             return {"run_id": run_id, "status": "unavailable", "reason": "尚未创建 MD 建盒记录"}
-        payload = self._read_json(path, "MD manifest")
         attempts = payload.get("box_attempts", [])
         if not isinstance(attempts, list) or not attempts:
             return {"run_id": run_id, "status": "unavailable", "reason": "本次运行尚未完成 Packmol 建盒"}
@@ -674,6 +942,22 @@ class RunRegistry:
             "status": "available",
             "box": {key: latest[key] for key in allowed if key in latest},
         }
+
+    @staticmethod
+    def _read_simulation_manifest(directory: Path) -> dict[str, Any] | None:
+        """Read private MD evidence from v2, or the legacy MD file."""
+        if (directory / RUN_MANIFEST_FILENAME).is_file():
+            return load_run_metadata_section(directory, "simulation")
+        path = directory / "md_manifest.json"
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunRegistryError(f"MD manifest 格式无效: {exc}") from exc
+        if not isinstance(payload, Mapping):
+            raise RunRegistryError("MD manifest 格式无效")
+        return dict(payload)
 
     def tail_log(self, run_id: str, log_name: str, max_chars: int = 4000) -> dict[str, Any]:
         directory = self.resolve_run_id(run_id)
@@ -696,7 +980,7 @@ class RunRegistry:
         return {"run_id": run_id, "log_name": log_name, "content": self._redact(text), "truncated": path.stat().st_size > len(text.encode())}
 
     def explain_error(self, run_id: str) -> dict[str, Any]:
-        status = self.get_run_status(run_id)
+        status = self.get_run_status(run_id, reconcile=False)
         return {
             "run_id": run_id,
             "state": status.get("state", "unknown"),
@@ -837,6 +1121,9 @@ class RunRegistry:
         pending_action = self._public_pending_action(status.get("extra", {}))
         if pending_action:
             summary["pending_action"] = pending_action
+        completion_scope = self._public_completion_scope(status.get("extra", {}))
+        if completion_scope:
+            summary["completion_scope"] = completion_scope
         return summary
 
     @staticmethod
@@ -868,6 +1155,9 @@ class RunRegistry:
         pending_action = self._public_pending_action(status.get("extra", {}))
         if pending_action:
             extra["pending_action"] = pending_action
+        completion_scope = self._public_completion_scope(status.get("extra", {}))
+        if completion_scope:
+            extra["completion_scope"] = completion_scope
         return {
             "run_id": run_id,
             "state": status.get("state", "unknown"),
@@ -901,6 +1191,31 @@ class RunRegistry:
                 return ""
             return text[:limit]
 
+        def knowledge_source(value: object) -> dict[str, Any]:
+            if not isinstance(value, Mapping):
+                return {}
+            status = value.get("knowledge_status")
+            source = value.get("advice_source")
+            if status not in {"retrieved", "not_matched", "unavailable"} or source not in {"knowledge_base", "llm_unverified"}:
+                return {}
+            entries = []
+            for item in value.get("knowledge_entries", []) if isinstance(value.get("knowledge_entries"), list) else []:
+                if len(entries) >= 3 or not isinstance(item, Mapping) or isinstance(item.get("number"), bool):
+                    continue
+                try:
+                    number = int(item.get("number"))
+                except (TypeError, ValueError):
+                    continue
+                name = clean(item.get("name"), 180)
+                if name:
+                    entries.append({"number": number, "name": name})
+            return {
+                "knowledge_status": status,
+                "knowledge_entries": entries,
+                "advice_source": source,
+                "compatibility_notice": clean(value.get("compatibility_notice"), 300),
+            }
+
         action_id = clean(raw.get("action_id"), 80)
         step_label = clean(raw.get("step_label"), 80)
         summary = clean(raw.get("summary"), 240)
@@ -928,7 +1243,7 @@ class RunRegistry:
             if purpose:
                 adjustment["purpose"] = purpose
             adjustments.append(adjustment)
-        return {
+        public = {
             "action_id": action_id,
             "state": "pending",
             "step_label": step_label,
@@ -936,6 +1251,76 @@ class RunRegistry:
             "summary": summary,
             "adjustments": adjustments,
         }
+        public.update(knowledge_source(raw))
+        if isinstance(raw.get("selected_option_id"), str):
+            public["selected_option_id"] = raw["selected_option_id"]
+        public["selection_required"] = bool(raw.get("selection_required", False))
+        options = []
+        for ordinal, option in enumerate(raw.get("options", []) if isinstance(raw.get("options"), list) else [], 1):
+            if not isinstance(option, Mapping) or len(options) >= 3:
+                continue
+            option_summary = clean(option.get("summary"), 240)
+            option_restart = option.get("restart_step")
+            if not option_summary or not isinstance(option_restart, int) or not STEP_REGISTRY.controlled_restart_allowed(EQ_STEP, option_restart):
+                continue
+            option_adjustments = []
+            for item in option.get("adjustments", []) if isinstance(option.get("adjustments"), list) else []:
+                if not isinstance(item, Mapping) or len(option_adjustments) >= 8:
+                    continue
+                name = clean(item.get("name"), 80)
+                before = clean(item.get("before"), 80)
+                after = clean(item.get("after"), 80)
+                if name and before and after:
+                    entry = {"name": name, "before": before, "after": after}
+                    purpose = clean(item.get("purpose") or item.get("reason"), 120)
+                    if purpose:
+                        entry["purpose"] = purpose
+                    option_adjustments.append(entry)
+            safe_editable = []
+            for raw_editable in option.get("editable_parameters", []) if isinstance(option.get("editable_parameters"), list) else []:
+                if not isinstance(raw_editable, Mapping) or len(safe_editable) >= 8:
+                    continue
+                editable_entry = {
+                    key: clean(raw_editable.get(key), 80)
+                    for key in ("name", "current", "range")
+                }
+                if all(editable_entry.values()):
+                    purpose = clean(raw_editable.get("purpose"), 120)
+                    if purpose:
+                        editable_entry["purpose"] = purpose
+                    safe_editable.append(editable_entry)
+            option_public = {
+                "option_id": clean(option.get("option_id"), 80) or f"option_{ordinal}",
+                "ordinal": ordinal,
+                "title": clean(option.get("title"), 120) or f"方案{ordinal}",
+                "cause": clean(option.get("cause"), 240),
+                "evidence": clean(option.get("evidence"), 300),
+                "summary": option_summary,
+                "restart_step": option_restart,
+                "adjustments": option_adjustments,
+                "editable_parameters": safe_editable,
+            }
+            option_public.update(knowledge_source(option))
+            options.append(option_public)
+        if len(options) > 1:
+            public["options"] = options
+        return public
+
+    @staticmethod
+    def _public_completion_scope(extra: object) -> dict[str, Any]:
+        """Keep the single non-executable EQ-only acceptance scope public."""
+        if not isinstance(extra, Mapping):
+            return {}
+        raw = extra.get("completion_scope")
+        if not isinstance(raw, Mapping):
+            return {}
+        if (
+            raw.get("mode") == "through_eq"
+            and raw.get("stage") == "eq"
+            and raw.get("step") == EQ_STEP
+        ):
+            return {"mode": "through_eq", "step": EQ_STEP, "stage": "eq"}
+        return {}
 
     @staticmethod
     def _public_repair(status: Mapping[str, Any]) -> dict[str, Any]:
@@ -1078,10 +1463,11 @@ class RunRegistry:
             if not directory.is_dir() or not _RUN_ID_RE.fullmatch(directory.name):
                 continue
             manifest_file = directory / MANIFEST_FILENAME
-            if not manifest_file.is_file():
+            unified_file = directory / RUN_MANIFEST_FILENAME
+            if not manifest_file.is_file() and not unified_file.is_file():
                 continue
             try:
-                manifest = self._read_json(manifest_file, "运行 manifest")
+                manifest = self._read_registry_manifest(directory)
                 status = self._read_json(directory / STATUS_FILENAME, "运行状态") if (directory / STATUS_FILENAME).is_file() else {}
             except RunRegistryError:
                 continue

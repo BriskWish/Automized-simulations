@@ -1,9 +1,9 @@
 """
 fchk_mol2.py
 ============
-统一的 fchk → mol2 转换 (G16 + ORCA 共用)。
+统一的 fchk → mol2 转换 (G16 + G09 + ORCA 共用)。
 
-输入: *_opt.fchk (G16 或 ORCA 的 TZ SP 结果)
+输入: *_opt.fchk (G16、G09 或 ORCA 的 TZ SP 结果)
 输出: {name}.mol2
 
 纯 Python 解析，零外部依赖。

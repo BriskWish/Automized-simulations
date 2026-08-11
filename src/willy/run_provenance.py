@@ -13,6 +13,13 @@ import subprocess
 import sys
 
 from willy.config_store import write_json
+from willy.run_metadata import (
+    RUN_MANIFEST_FILENAME,
+    RunManifestRevisionConflict,
+    RunMetadataError,
+    load_run_manifest,
+    update_run_manifest_section,
+)
 
 
 RUN_PROVENANCE_FILENAME = "provenance.json"
@@ -65,7 +72,7 @@ def _runtime() -> dict[str, str]:
 
 
 def _input_fingerprints(run_dir: Path) -> list[dict[str, Any]]:
-    suffixes = {".gjf", ".fchk", ".molden", ".mol2", ".chg", ".itp", ".gro", ".top", ".mdp", ".pdb"}
+    suffixes = {".gjf", ".inp", ".fchk", ".molden", ".mol2", ".chg", ".itp", ".gro", ".top", ".mdp", ".pdb"}
     records = []
     for path in sorted(run_dir.iterdir()):
         if path.is_file() and path.suffix.lower() in suffixes:
@@ -79,6 +86,63 @@ def _safe_capabilities(capabilities: Mapping[str, Mapping[str, object]]) -> dict
         str(tool_id): {key: value for key, value in value.items() if key in allowed}
         for tool_id, value in capabilities.items()
         if isinstance(tool_id, str) and isinstance(value, Mapping)
+    }
+
+
+def _read_existing_provenance(directory: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read provenance from v2 when present, otherwise its legacy file."""
+    if (directory / RUN_MANIFEST_FILENAME).is_file():
+        try:
+            unified = load_run_manifest(directory)
+            payload = unified["sections"]["provenance"]["data"]
+        except (KeyError, TypeError, RunMetadataError) as exc:
+            raise ValueError(f"run_manifest provenance section 不可读取: {exc}") from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError("run_manifest provenance section 格式无效")
+        return dict(payload), unified
+    path = directory / RUN_PROVENANCE_FILENAME
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and raw.get("schema_version") == RUN_PROVENANCE_SCHEMA_VERSION:
+            return raw, None
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}, None
+
+
+def _build_provenance_payload(
+    *,
+    existing: Mapping[str, Any],
+    directory: Path,
+    root: Path,
+    backend: str,
+    config: Path,
+    random_seed: int,
+    capabilities: Mapping[str, Mapping[str, object]],
+    llm_model: str | None,
+    prompt_versions: Mapping[str, str],
+) -> dict[str, Any]:
+    config_fp = _file_fingerprint(config, directory)
+    revisions = [item for item in existing.get("config_revisions", []) if isinstance(item, dict)]
+    if not any(item.get("sha256") == config_fp["sha256"] for item in revisions):
+        revisions.append({"recorded_at": _now(), **config_fp})
+    return {
+        "schema_version": RUN_PROVENANCE_SCHEMA_VERSION,
+        "run_id": directory.name,
+        "created_at": existing.get("created_at", _now()),
+        "updated_at": _now(),
+        "backend": backend,
+        "source_revision": _source_revision(root),
+        "runtime": _runtime(),
+        "config": config_fp,
+        "config_revisions": revisions,
+        "input_fingerprints": _input_fingerprints(directory),
+        "random_seed": int(random_seed),
+        "capabilities": _safe_capabilities(capabilities),
+        "llm": {
+            "model": str(llm_model or ""),
+            "prompt_versions": {str(key): str(value) for key, value in prompt_versions.items()},
+        },
     }
 
 
@@ -101,35 +165,51 @@ def create_or_refresh_provenance(
         raise ValueError("provenance 只能引用当前 run 的 config.json")
     if not config.is_file():
         raise ValueError("provenance 缺少运行配置快照")
-    path = directory / RUN_PROVENANCE_FILENAME
-    existing: dict[str, Any] = {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict) and raw.get("schema_version") == RUN_PROVENANCE_SCHEMA_VERSION:
-            existing = raw
-    except (OSError, json.JSONDecodeError):
-        pass
-    config_fp = _file_fingerprint(config, directory)
-    revisions = [item for item in existing.get("config_revisions", []) if isinstance(item, dict)]
-    if not any(item.get("sha256") == config_fp["sha256"] for item in revisions):
-        revisions.append({"recorded_at": _now(), **config_fp})
-    payload = {
-        "schema_version": RUN_PROVENANCE_SCHEMA_VERSION,
-        "run_id": directory.name,
-        "created_at": existing.get("created_at", _now()),
-        "updated_at": _now(),
-        "backend": backend,
-        "source_revision": _source_revision(root),
-        "runtime": _runtime(),
-        "config": config_fp,
-        "config_revisions": revisions,
-        "input_fingerprints": _input_fingerprints(directory),
-        "random_seed": int(random_seed),
-        "capabilities": _safe_capabilities(capabilities),
-        "llm": {
-            "model": str(llm_model or ""),
-            "prompt_versions": {str(key): str(value) for key, value in prompt_versions.items()},
-        },
-    }
-    write_json(path, payload)
-    return payload
+    existing, unified = _read_existing_provenance(directory)
+    payload = _build_provenance_payload(
+        existing=existing,
+        directory=directory,
+        root=root,
+        backend=backend,
+        config=config,
+        random_seed=random_seed,
+        capabilities=capabilities,
+        llm_model=llm_model,
+        prompt_versions=prompt_versions,
+    )
+    if unified is None:
+        write_json(directory / RUN_PROVENANCE_FILENAME, payload)
+        return payload
+
+    # Registry, topology and simulation writers can advance the unified root
+    # revision independently.  Rebuild once from the new provenance section so
+    # config revision history is never overwritten by a concurrent refresh.
+    for _ in range(2):
+        try:
+            updated = update_run_manifest_section(
+                directory,
+                "provenance",
+                payload,
+                expected_revision=unified["revision"],
+                expected_section_revision=unified["sections"]["provenance"]["revision"],
+            )
+            value = updated["sections"]["provenance"]["data"]
+            return dict(value)
+        except RunManifestRevisionConflict:
+            existing, unified = _read_existing_provenance(directory)
+            if unified is None:
+                raise ValueError("run_manifest 在 provenance 更新期间被移除")
+            payload = _build_provenance_payload(
+                existing=existing,
+                directory=directory,
+                root=root,
+                backend=backend,
+                config=config,
+                random_seed=random_seed,
+                capabilities=capabilities,
+                llm_model=llm_model,
+                prompt_versions=prompt_versions,
+            )
+        except (KeyError, TypeError, RunMetadataError) as exc:
+            raise ValueError(f"无法更新 run_manifest provenance section: {exc}") from exc
+    raise ValueError("run_manifest provenance section 并发更新，请重试")

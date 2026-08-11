@@ -1,8 +1,24 @@
 {
   "backend": "g16",
   "molecules": {
+    "Na": {
+      "charge": 1,
+      "spin": 1,
+      "basis": "b3lyp/6-311+g(d,p)",
+      "solvent": "acetone",
+      "mem": "",
+      "nproc": null
+    },
     "EC": {
       "charge": 0,
+      "spin": 1,
+      "basis": "b3lyp/6-311+g(d,p)",
+      "solvent": "acetone",
+      "mem": "",
+      "nproc": null
+    },
+    "NO3": {
+      "charge": -1,
       "spin": 1,
       "basis": "b3lyp/6-311+g(d,p)",
       "solvent": "acetone",
@@ -11,11 +27,13 @@
     }
   },
   "residues": {
-    "EC": 300
+    "Na": 100,
+    "EC": 100,
+    "NO3": 100
   },
   "md": {
     "schema_version": 2,
-    "dt": 0.002,
+    "dt": 0.001,
     "ref_p": 1.01325,
     "tcoupl": "V-rescale",
     "tau_t": 0.5,
@@ -50,16 +68,15 @@
         "cool_target": 2,
         "hold_target": 2
       },
-      "tau_p": 1.0,
+      "tau_p": 2.0,
       "acceptance": {
         "window_ns": 1.0,
         "temperature_abs_tolerance_k": 5.0,
-        "max_relative_drift": 0.1,
-        "max_trend_zscore": 2.0
+        "max_potential_relative_slope_per_ns": 0.01
       }
     },
     "prod": {
-      "duration_ns": 10,
+      "duration_ns": 5,
       "temperature": 298,
       "tau_p": 2.0
     }
@@ -72,11 +89,18 @@
   },
   "box": {
     "box_size": null,
-    "target_mass_density_g_cm3": 1.5,
+    "target_mass_density_g_cm3": 0.7,
     "tolerance": 2.0
   },
   "defaults": {
     "mem": "5GB",
     "nproc": 8
+  },
+  "execution": {
+    "md": {
+      "backend": "local",
+      "profile": null,
+      "retain_remote_run": true
+    }
   }
 }

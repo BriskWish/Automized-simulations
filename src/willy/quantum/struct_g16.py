@@ -19,6 +19,7 @@ import json
 import re
 
 from willy._paths import get_project_root
+from willy.execution_resources import resolve_nproc
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.errors import StepResult, StepError, ErrorKind
 from willy.process_lifecycle import run_managed_command
@@ -218,7 +219,7 @@ def run_one(name: str, cfg: dict, defaults: dict,
         cfg = {**cfg, **{k: v for k, v in cfg_overrides.items() if v is not None}}
     basis = cfg.get("basis", "b3lyp/6-311+g(d,p)")
     mem = cfg.get("mem") or defaults.get("mem", DEFAULT_MEM)
-    nproc = cfg.get("nproc") or defaults.get("nproc", DEFAULT_NPROC)
+    nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc", DEFAULT_NPROC), DEFAULT_NPROC)
 
     print(f"[struct_maker] {name}: basis={basis}  mem={mem}  nproc={nproc}")
     if scf_options:

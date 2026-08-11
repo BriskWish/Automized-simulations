@@ -150,6 +150,27 @@ class TestPipelineStateMachine:
         with pytest.raises(StateTransitionError, match="done -> running"):
             sm.transition(State.RUNNING)
 
+    def test_scoped_done_preserves_the_last_completed_step(self, sm):
+        sm.transition(State.RUNNING)
+        sm.set_extra(completion_scope={
+            "mode": "through_eq", "step": 9, "stage": "eq",
+        })
+        sm.transition(State.DONE, step=9, step_label="EQ", layer="simulation")
+
+        assert sm._status.step == 9
+        assert sm._status.step_label == "EQ"
+        public_status = json.loads(sm._path.read_text())
+        assert public_status["extra"]["completion_scope"] == {
+            "mode": "through_eq", "step": 9, "stage": "eq",
+        }
+
+    def test_public_status_rejects_an_unrecognized_completion_scope(self, sm):
+        sm._status.extra["completion_scope"] = {
+            "mode": "through_prod", "step": 10, "stage": "prod",
+        }
+
+        assert "completion_scope" not in sm._public_payload()["extra"]
+
     def test_state_revision_is_monotonic_and_persisted(self, sm, tmp_path):
         initial_revision = sm._status.state_revision
         sm.transition(State.RUNNING)

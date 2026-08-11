@@ -4,14 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "willy"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI-driven MD simulation automation pipeline"
 requires-python = ">=3.10"
-dependencies = ["gradio", "openai", "py3Dmol", "scikit-learn"]
+dependencies = [
+    "cryptography>=42",
+    "fastapi>=0.115",
+    "gradio",
+    "httpx>=0.27",
+    "openai",
+    "py3Dmol",
+    "scikit-learn",
+    "uvicorn>=0.30",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
 dev = ["pytest>=8"]
+e2e = ["pytest>=8", "playwright>=1.48"]
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -29,5 +39,7 @@ markers = [
     "external: real external-tool smoke tests; require --run-external",
     "llm_connection: real LLM connectivity test; requires --run-llm-connection",
     "llm_eval: deterministic LLM behavior evaluation cases",
+    "e2e: browser acceptance tests; require --run-e2e and a Playwright browser runtime",
+    "gateway_acceptance: offline managed-gateway acceptance using ASGI and scripted fake upstreams",
     "slow: tests unsuitable for the normal quick-feedback loop",
 ]

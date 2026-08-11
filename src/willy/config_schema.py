@@ -36,7 +36,7 @@ class WorkflowConfigSchema:
     schema_version: int = WORKFLOW_CONFIG_SCHEMA_VERSION
     known_top_level_fields: frozenset[str] = frozenset({
         "backend", "defaults", "molecules", "residues", "md", "topology", "box",
-        "ion_compensation", "non_neutral_confirmed", "error", "warnings",
+        "ion_compensation", "non_neutral_confirmed", "execution", "error", "warnings",
     })
     mapping_fields: frozenset[str] = frozenset({
         "defaults", "molecules", "residues", "md", "topology", "ion_compensation",
@@ -62,9 +62,12 @@ class WorkflowConfigSchema:
         backend = payload.get("backend")
         if backend is not None and (not isinstance(backend, str) or not backend.strip()):
             issues.append("backend 必须是非空字符串")
+        elif isinstance(backend, str) and backend.strip().lower() not in {"g16", "g09", "orca"}:
+            issues.append("backend 必须为 g16、g09 或 orca")
         confirmed = payload.get("non_neutral_confirmed")
         if confirmed is not None and not isinstance(confirmed, bool):
             issues.append("non_neutral_confirmed 必须是布尔值")
+        issues.extend(_execution_shape_issues(payload.get("execution")))
 
         molecules = payload.get("molecules")
         if isinstance(molecules, Mapping):
@@ -93,3 +96,36 @@ WORKFLOW_CONFIG_SCHEMA = WorkflowConfigSchema()
 def validate_config_schema(payload: object) -> ConfigSchemaValidation:
     """Validate only the workflow document shape, never mutate or migrate it."""
     return WORKFLOW_CONFIG_SCHEMA.validate(payload)
+
+
+def _execution_shape_issues(payload: object) -> list[str]:
+    """Reject private connection details from the frozen public workflow config."""
+    if payload is None:
+        return []
+    if not isinstance(payload, Mapping):
+        return ["execution 必须是对象"]
+    issues: list[str] = []
+    unexpected_execution = sorted(set(payload) - {"md", "stop_after_stage"})
+    if unexpected_execution:
+        issues.append("execution 仅允许 md、stop_after_stage 字段")
+    stop_after_stage = payload.get("stop_after_stage")
+    if stop_after_stage is not None and stop_after_stage != "eq":
+        issues.append("execution.stop_after_stage 仅允许 eq 或 null")
+    if "md" not in payload:
+        return issues
+    md = payload["md"]
+    if not isinstance(md, Mapping):
+        return [*issues, "execution.md 必须是对象"]
+    unexpected_md = sorted(set(md) - {"backend", "profile", "retain_remote_run"})
+    if unexpected_md:
+        issues.append("execution.md 包含不允许的字段")
+    backend = md.get("backend")
+    if backend is not None and not isinstance(backend, str):
+        issues.append("execution.md.backend 必须是字符串")
+    profile = md.get("profile")
+    if profile is not None and (not isinstance(profile, str) or not profile.strip()):
+        issues.append("execution.md.profile 必须是非空字符串或 null")
+    retain = md.get("retain_remote_run")
+    if retain is not None and not isinstance(retain, bool):
+        issues.append("execution.md.retain_remote_run 必须是布尔值")
+    return issues

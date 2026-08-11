@@ -217,7 +217,10 @@ class PipelineStateMachine:
         for k, v in kwargs.items():
             if hasattr(self._status, k):
                 setattr(self._status, k, v)
-        if state == State.DONE:
+        # A deliberately scoped run (for example an EQ-only acceptance trial)
+        # carries its last completed step explicitly.  Normal full runs retain
+        # the historic terminal step ``total_steps + 1``.
+        if state == State.DONE and "step" not in kwargs:
             self._status.step = self._total + 1
         event_type = {
             State.DONE: "run_finished",
@@ -504,6 +507,9 @@ class PipelineStateMachine:
         pending_action = _safe_pending_action(status.extra.get("pending_action"))
         if pending_action:
             extra["pending_action"] = pending_action
+        completion_scope = _safe_completion_scope(status.extra.get("completion_scope"))
+        if completion_scope:
+            extra["completion_scope"] = completion_scope
         return {
             "state": status.state,
             "step": status.step,
@@ -553,6 +559,45 @@ def _safe_adjustment_text(value: object) -> str:
     return text[:80]
 
 
+def _safe_knowledge_source(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    status = value.get("knowledge_status")
+    source = value.get("advice_source")
+    if status not in {"retrieved", "not_matched", "unavailable"} or source not in {"knowledge_base", "llm_unverified"}:
+        return {}
+    entries = []
+    for item in value.get("knowledge_entries", []) if isinstance(value.get("knowledge_entries"), list) else []:
+        if len(entries) >= 3 or not isinstance(item, dict) or isinstance(item.get("number"), bool):
+            continue
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError):
+            continue
+        name = _safe_adjustment_text(item.get("name"))
+        if name:
+            entries.append({"number": number, "name": name})
+    return {
+        "knowledge_status": status,
+        "knowledge_entries": entries,
+        "advice_source": source,
+        "compatibility_notice": _safe_adjustment_text(value.get("compatibility_notice"))[:300],
+    }
+
+
+def _safe_completion_scope(value: object) -> dict[str, object]:
+    """Expose only the fixed, non-executable EQ-only acceptance scope."""
+    if not isinstance(value, dict):
+        return {}
+    if (
+        value.get("mode") == "through_eq"
+        and value.get("stage") == "eq"
+        and value.get("step") == EQ_STEP
+    ):
+        return {"mode": "through_eq", "step": EQ_STEP, "stage": "eq"}
+    return {}
+
+
 def _safe_pending_action(value: object) -> dict:
     """Project the pending repair to a compact, UI-safe public contract."""
     if not isinstance(value, dict):
@@ -587,7 +632,7 @@ def _safe_pending_action(value: object) -> dict:
                 if purpose:
                     item["purpose"] = purpose
                 adjustments.append(item)
-    return {
+    public = {
         "action_id": action_id,
         "state": "pending",
         "step_label": step_label,
@@ -595,6 +640,67 @@ def _safe_pending_action(value: object) -> dict:
         "summary": summary,
         "adjustments": adjustments,
     }
+    public.update(_safe_knowledge_source(value))
+    if isinstance(value.get("selected_option_id"), str):
+        public["selected_option_id"] = value["selected_option_id"]
+    public["selection_required"] = bool(value.get("selection_required", False))
+    editable_parameters = []
+    for raw in value.get("editable_parameters", []) if isinstance(value.get("editable_parameters"), list) else []:
+        if not isinstance(raw, dict) or len(editable_parameters) >= 8:
+            continue
+        item = {key: _safe_adjustment_text(raw.get(key)) for key in ("name", "current", "range")}
+        purpose = _safe_adjustment_text(raw.get("purpose"))
+        if all(item.values()):
+            if purpose:
+                item["purpose"] = purpose
+            editable_parameters.append(item)
+    if editable_parameters:
+        public["editable_parameters"] = editable_parameters
+    options = []
+    for ordinal, option in enumerate(value.get("options", []) if isinstance(value.get("options"), list) else [], 1):
+        if not isinstance(option, dict) or len(options) >= 3:
+            continue
+        title = _safe_adjustment_text(option.get("title")) or f"方案{ordinal}"
+        cause = _safe_adjustment_text(option.get("cause"))
+        evidence = _safe_adjustment_text(option.get("evidence"))
+        option_summary = _safe_adjustment_text(option.get("summary"))
+        option_restart = option.get("restart_step")
+        if not option_summary or not isinstance(option_restart, int) or not STEP_REGISTRY.controlled_restart_allowed(EQ_STEP, option_restart):
+            continue
+        option_adjustments = []
+        for raw in option.get("adjustments", []) if isinstance(option.get("adjustments"), list) else []:
+            if not isinstance(raw, dict) or len(option_adjustments) >= 8:
+                continue
+            item = {key: _safe_adjustment_text(raw.get(key)) for key in ("name", "before", "after")}
+            purpose = _safe_adjustment_text(raw.get("purpose") or raw.get("reason"))
+            if all(item.values()):
+                if purpose:
+                    item["purpose"] = purpose
+                option_adjustments.append(item)
+        option_public = {
+            "option_id": _safe_adjustment_text(option.get("option_id")) or f"option_{ordinal}",
+            "ordinal": ordinal,
+            "title": title,
+            "cause": cause,
+            "evidence": evidence,
+            "summary": option_summary,
+            "restart_step": option_restart,
+            "adjustments": option_adjustments,
+            "editable_parameters": [
+                {
+                    **{key: _safe_adjustment_text(raw.get(key)) for key in ("name", "current", "range")},
+                    **({"purpose": _safe_adjustment_text(raw.get("purpose"))} if _safe_adjustment_text(raw.get("purpose")) else {}),
+                }
+                for raw in option.get("editable_parameters", [])[:8]
+                if isinstance(raw, dict)
+                and all(_safe_adjustment_text(raw.get(key)) for key in ("name", "current", "range"))
+            ],
+        }
+        option_public.update(_safe_knowledge_source(option))
+        options.append(option_public)
+    if len(options) > 1:
+        public["options"] = options
+    return public
 
 
 def _public_repair(status: PipelineStatus) -> dict:

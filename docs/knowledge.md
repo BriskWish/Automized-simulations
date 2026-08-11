@@ -10,16 +10,16 @@
 
 1. **正则解析下方表格**，提取每个分子的电荷、自旋、原子数、基组、力场、中文别名
 2. **基于别名构建 TF-IDF 向量索引**，供 LLM 通过 `lookup_molecule` 工具进行语义检索
-3. **扫描 `struct/` 目录下的 `.gjf` 文件**，自动注册未在表中出现的分子（默认参数：charge=0, spin=1, basis=b3lyp/6-311+g(d,p), forcefield=GAFF）
+3. **扫描 `struct/` 目录下的 `.gjf` 文件**，补充未在表中出现的分子；这类条目的电荷和自旋保持未知，必须先经过原始输入审计
 
 **如何扩展分子库：**
 
-- **快速方式**：将 `.gjf` 文件放入 `struct/` 目录，系统自动识别（使用默认中性参数）
+- **快速方式**：将 `.gjf` 文件放入 `struct/` 目录，系统自动识别名称，但不会猜测电荷/自旋
 - **精确方式**：在下方表格新增一行，填写准确的电荷、自旋、基组等信息后，重启应用或调用 `refresh_structs` 工具
 
-> ⚠️ 自动注册的分子默认 charge=0（中性），若实际为离子，请务必在表格中手动注册，否则 RESP 电荷计算和力场分配可能出错。
+> ⚠️ 电荷和自旋不能由自动注册的默认值替代。带 `+`/`-` 的文件名必须在表中登记，并且 GJF 的 charge/multiplicity 行必须与之相符；Config Agent 仍需调用原始输入审计。
 
-**输入就绪性（2026-08-05 核验）**：注册表可识别 `Li`、`TFSI`、`NO3`、`PF6`、`FEC`、`DME`、`DMM`、`EC`、`EMC`、`TTE` 与 `DMAA`，但“可识别”不代表可启动。当前 `struct/` 已有 `.gjf` 的表内组分为 `Li`、`NO3`、`PF6`、`FEC`、`EC`、`EMC`、`DMAA`；`TFSI`、`DME`、`DMM`、`TTE` 在加入配置前仍须提供对应 `.gjf`（或所选后端可复用的 Step 1 中间产物）。`struct/` 中未列入表格的文件会被自动注册为中性默认条目，使用前应补充准确元数据。
+**输入就绪性（2026-08-10 核验）**：本次从 `D:\Work\Gaussian\GaussianField\WYQ-TEST\全量` 导入 47 个 GJF，形成 44 个新 canonical key；`DME`、`DMM`、`EMC` 的项目副本予以保留。所有 47 个源文件均已统一为可复制的 G16 优化输入，文件名电荷与 charge/multiplicity 行已审计。当前 `struct/` 的表内条目均可由 `tools_inspect_quantum_inputs` 进一步验证后进入配置。
 
 ---
 
@@ -30,6 +30,7 @@
 | 分子 | 电荷 | 自旋 | 原子数 | 基组 | 力场 | 中文别名 |
 |------|:---:|:---:|:---:|------|------|------|
 | Li | +1 | 1 | 1 | b3lyp/6-311+g(d,p) | UFF | 锂离子、锂盐、锂、Li⁺ |
+| Na | +1 | 1 | 1 | b3lyp/6-311+g(d,p) | UFF | 钠离子、钠、Na⁺、Na+ |
 
 ### 阴离子 (Anions)
 
@@ -38,6 +39,18 @@
 | TFSI | -1 | 1 | 15 | b3lyp/6-311+g(d,p) | GAFF | 双三氟甲磺酰亚胺、TFSI⁻ |
 | NO3 | -1 | 1 | 4 | b3lyp/6-311+g(d,p) | GAFF | 硝酸根、硝酸盐、硝酸、NO₃⁻ |
 | PF6 | -1 | 1 | 7 | b3lyp/6-311+g(d,p) | GAFF | 六氟磷酸根、PF₆⁻ |
+| AsF6 | -1 | 1 | 7 | b3lyp/6-311+g(d,p) | GAFF | 六氟砷酸根、AsF₆⁻、AsF6- |
+| BCN4 | -1 | 1 | 9 | b3lyp/6-311+g(d,p) | GAFF | 四氰基硼酸根、B(CN)₄⁻、B(CN)4- |
+| BF4 | -1 | 1 | 5 | b3lyp/6-311+g(d,p) | GAFF | 四氟硼酸根、BF₄⁻、BF4- |
+| BOB | -1 | 1 | 13 | b3lyp/6-311+g(d,p) | GAFF | 双草酸硼酸根、BOB⁻、BOB- |
+| CF3SO3 | -1 | 1 | 8 | b3lyp/6-311+g(d,p) | GAFF | 三氟甲基磺酸根、三氟甲磺酸根、OTf⁻、CF₃SO₃⁻、CF3SO3- |
+| ClO4 | -1 | 1 | 5 | b3lyp/6-311+g(d,p) | GAFF | 高氯酸根、ClO₄⁻、ClO4- |
+| DFOB | -1 | 1 | 9 | b3lyp/6-311+g(d,p) | GAFF | 二氟草酸硼酸根、DFOB⁻、DFOB- |
+| FSI | -1 | 1 | 9 | b3lyp/6-311+g(d,p) | GAFF | 双氟磺酰亚胺、FSI⁻、FSI- |
+| FTFSI | -1 | 2 | 13 | b3lyp/6-311+g(d,p) | GAFF | 氟磺酰（三氟甲磺酰）亚胺根、FTFSI⁻、FTFSI- |
+| PO2F2 | -1 | 1 | 5 | b3lyp/6-311+g(d,p) | GAFF | 二氟磷酸根、PO₂F₂⁻、PO2F2- |
+| TFOP | -1 | 1 | 11 | b3lyp/6-311+g(d,p) | GAFF | 四氟草酸磷酸根、TFOP⁻、TFOP- |
+| TFSM | -1 | 1 | 22 | b3lyp/6-311+g(d,p) | GAFF | 三（三氟甲磺酰）甲基负离子、TFSM⁻、TFSM- |
 
 ### 溶剂 (Solvents)
 
@@ -47,14 +60,45 @@
 | DME | 0 | 1 | 16 | b3lyp/6-311+g(d,p) | GAFF | 乙二醇二甲醚、二甲氧基乙烷 |
 | DMM | 0 | 1 | 13 | b3lyp/6-311+g(d,p) | GAFF | 二甲氧基甲烷 |
 | EC | 0 | 1 | 10 | b3lyp/6-311+g(d,p) | GAFF | 碳酸乙烯酯 |
-| EMC | 0 | 1 | 14 | b3lyp/6-311+g(d,p) | GAFF | 碳酸甲乙酯 |
+| EMC | 0 | 1 | 15 | b3lyp/6-311+g(d,p) | GAFF | 碳酸甲乙酯 |
 | TTE | 0 | 1 | 15 | b3lyp/6-311+g(d,p) | GAFF | 含氟醚 |
-| DMAA | 0 | 1 | 12 | b3lyp/6-311+g(d,p) | GAFF | 二甲基乙酰胺、DMAC |
+| ADN | 0 | 1 | 16 | b3lyp/6-311+g(d,p) | GAFF | 己二腈、ADN |
+| AN | 0 | 1 | 6 | b3lyp/6-311+g(d,p) | GAFF | 乙腈、AN |
+| BC | 0 | 1 | 16 | b3lyp/6-311+g(d,p) | GAFF | 碳酸丁烯酯、BC |
+| BTFE | 0 | 1 | 15 | b3lyp/6-311+g(d,p) | GAFF | 双（2,2,2-三氟乙基）醚、BTFE |
+| DEC | 0 | 1 | 18 | b3lyp/6-311+g(d,p) | GAFF | 碳酸二乙酯、DEC |
+| DFEA | 0 | 1 | 14 | b3lyp/6-311+g(d,p) | GAFF | 二氟乙酸乙酯、DFEA |
+| DFEC | 0 | 1 | 18 | b3lyp/6-311+g(d,p) | GAFF | 二氟碳酸乙烯酯、DFEC |
+| DGM | 0 | 1 | 23 | b3lyp/6-311+g(d,p) | GAFF | 二乙二醇二甲醚、DGM、diglyme |
+| DMC | 0 | 1 | 12 | b3lyp/6-311+g(d,p) | GAFF | 碳酸二甲酯、DMC |
+| DOL | 0 | 1 | 11 | b3lyp/6-311+g(d,p) | GAFF | 1,3-二氧戊环、DOL |
+| DXA | 0 | 1 | 14 | b3lyp/6-311+g(d,p) | GAFF | 二氧六环、DXA、1,4-二氧六环 |
+| EA | 0 | 1 | 14 | b3lyp/6-311+g(d,p) | GAFF | 乙酸乙酯、EA |
+| EB | 0 | 1 | 20 | b3lyp/6-311+g(d,p) | GAFF | 丁酸乙酯、EB |
+| EP | 0 | 1 | 17 | b3lyp/6-311+g(d,p) | GAFF | 丙酸乙酯、EP |
+| FEMC | 0 | 1 | 15 | b3lyp/6-311+g(d,p) | GAFF | 氟代碳酸甲乙酯、FEMC |
+| GVL | 0 | 1 | 15 | b3lyp/6-311+g(d,p) | GAFF | γ-戊内酯、γgama-戊内酯、GVL |
+| MA | 0 | 1 | 11 | b3lyp/6-311+g(d,p) | GAFF | 乙酸甲酯、MA |
+| MB | 0 | 1 | 17 | b3lyp/6-311+g(d,p) | GAFF | 丁酸甲酯、MB |
+| MPC | 0 | 1 | 18 | b3lyp/6-311+g(d,p) | GAFF | 碳酸甲丙酯、MPC |
+| MP | 0 | 1 | 14 | b3lyp/6-311+g(d,p) | GAFF | 丙酸甲酯、MP |
+| PA | 0 | 1 | 17 | b3lyp/6-311+g(d,p) | GAFF | 乙酸丙酯、PA |
+| PC | 0 | 1 | 13 | b3lyp/6-311+g(d,p) | GAFF | 碳酸丙烯酯、PC |
+| PFPN | 0 | 1 | 19 | b3lyp/6-311+g(d,p) | GAFF | 乙氧基（五氟）环三磷腈、PFPN |
+| PP | 0 | 1 | 20 | b3lyp/6-311+g(d,p) | GAFF | 丙酸丙酯、PP |
+| SN | 0 | 1 | 10 | b3lyp/6-311+g(d,p) | GAFF | 丁二腈、SN |
+| T3GM | 0 | 1 | 30 | b3lyp/6-311+g(d,p) | GAFF | 三乙二醇二甲醚、T3GM、triglyme |
+| T4GM | 0 | 1 | 37 | b3lyp/6-311+g(d,p) | GAFF | 四乙二醇二甲醚、T4GM、tetraglyme |
+| TEP | 0 | 1 | 26 | b3lyp/6-311+g(d,p) | GAFF | 磷酸三乙酯、TEP |
+| THF | 0 | 1 | 13 | b3lyp/6-311+g(d,p) | GAFF | 四氢呋喃、THF |
+| TMC | 0 | 1 | 13 | b3lyp/6-311+g(d,p) | GAFF | 三亚甲基碳酸酯、TMC |
+| TMP | 0 | 1 | 17 | b3lyp/6-311+g(d,p) | GAFF | 磷酸三甲酯、TMP |
 
 ### JSON 映射规则（LLM 必须遵守）
 
 用户说以下任何词 → 映射为 `molecules` 和 `residues` 的 key：
 - "锂离子""锂盐""锂""Li""Li+" → **Li** (charge=1)
+- "钠离子""钠""Na""Na+" → **Na** (charge=1；注意 `NA` 是已有的中性萘结构，大小写有意义)
 - "TFSI""TFSI-""双三氟甲磺酰亚胺" → **TFSI** (charge=-1)
 - "硝酸根""硝酸盐""硝酸""NO3""NO3-" → **NO3** (charge=-1)
 - "PF6""PF6-""六氟磷酸根" → **PF6** (charge=-1)
@@ -64,7 +108,8 @@
 - "EC""碳酸乙烯酯" → **EC** (charge=0)
 - "EMC""碳酸甲乙酯" → **EMC** (charge=0)
 - "TTE""含氟醚" → **TTE** (charge=0)
-- "DMAA""二甲基乙酰胺""DMAC" → **DMAA** (charge=0)
+
+本次新增 key 的中文名、英文缩写和带电写法均以表格为准：`ADN`、`AN`、`AsF6`、`BCN4`、`BC`、`BF4`、`BOB`、`BTFE`、`CF3SO3`、`ClO4`、`DEC`、`DFEA`、`DFEC`、`DFOB`、`DGM`、`DMC`、`DOL`、`DXA`、`EA`、`EB`、`EP`、`FEMC`、`FSI`、`FTFSI`、`GVL`、`MA`、`MB`、`MPC`、`MP`、`Na`、`PA`、`PC`、`PFPN`、`PO2F2`、`PP`、`SN`、`T3GM`、`T4GM`、`TEP`、`TFOP`、`TFSM`、`THF`、`TMC`、`TMP`。带 `+`/`-` 的名称只作为别名，不作为文件 key。
 
 ### 化合物自动拆分
 
@@ -125,7 +170,7 @@
 
 | 参数 | 默认值 | 说明 |
 |------|:---:|------|
-| dt | 0.001 ps (1 fs) | 含 Li⁺ 等高电荷密度离子建议 1fs |
+| dt | 0.001 ps (1 fs) | 当前 Agent 默认对所有体系采用 1 fs；如需更大步长必须由用户明确指定并重新验收 |
 | constraints | hbonds | LINCS 约束所有含 H 的键 |
 | rcoulomb / rvdw | 1.0 nm | 非键截断 |
 | coulombtype | PME | 长程静电 |
@@ -162,7 +207,7 @@
 
 ## 六、初始建盒密度
 
-Step 7 的初始盒子使用质量密度，而不是分子数量估算。默认提示为“初始体积将由使用默认1.5g/cm3的密度猜测”。每个组分的分子质量从当前 run 的 `<residue>.itp` 中 `[ atoms ]` 的质量列计算；这使同一分子在不同参数化后仍以实际拓扑质量建盒。
+Step 7 的初始盒子使用质量密度，而不是分子数量估算。默认提示为“初始体积将由使用默认0.7g/cm3的密度猜测”。每个组分的分子质量从当前 run 的 `<residue>.itp` 中 `[ atoms ]` 的质量列计算；这使同一分子在不同参数化后仍以实际拓扑质量建盒。
 
 **公式**：`V_nm3 = M_amu * 1.66053906660e-3 / rho_g_cm3`，`L_A = 10 * cbrt(V_nm3)`。
 
@@ -172,7 +217,7 @@ Step 7 的初始盒子使用质量密度，而不是分子数量估算。默认�
 
 | 字段 | 默认值 | 说明 |
 |------|:---:|------|
-| box.target_mass_density_g_cm3 | 1.5 | 初始目标质量密度 (g/cm3)，未设手动边长时由拓扑质量自动计算 |
+| box.target_mass_density_g_cm3 | 0.7 | 初始目标质量密度 (g/cm3)，未设手动边长时由拓扑质量自动计算 |
 | box.box_size | null | 手动指定立方盒边长 (Å)，优先于密度估算 |
 | box.tolerance | 2.0 | Packmol 分子间最小容忍距离 (Å)，过小可能导致 packing 失败 |
 | box.packing_number_density_nm3 | 仅历史兼容 | 旧运行快照字段；只有不存在目标质量密度时才执行 |
@@ -187,7 +232,7 @@ Step 7 的初始盒子使用质量密度，而不是分子数量估算。默认�
 config.json ──────────────────────────────────────────────────┐
     │                                                          │
     ▼                                                          │
-[1] struct_g16/struct_orca: .gjf → 结构优化 → .fchk/.molden     │
+[1] struct_g16/struct_g09/struct_orca: .gjf (G16/G09) / .inp (ORCA) → 结构优化 → .fchk/.molden │
 [2] singlepoint_* + fchk_mol2: 单点能 → .mol2                  │
 [3] chg_resp:      RESP 电荷计算 → .chg                         │
 [4] topo_gaff/topo_opls: .mol2+.chg → .itp+.gro                │
@@ -213,10 +258,10 @@ config.json ──────────────────────�
 2. **基组**：<20 原子用 6-311+g(d,p)，≥20 用 6-31g(d)
 3. **溶剂**：电池电解质用 acetone，水溶液用 water，不确定问用户
 4. **温度**：电池模拟 298-350K，高温测试 400-500K
-5. **dt**：含 Li⁺/Mg²⁺ 等高电荷离子 → 1fs；纯有机 → 2fs
+5. **dt**：Agent 默认所有体系使用 1fs（`0.001 ps`），包括纯有机体系；更大步长只能作为用户明确指定的独立协议变更
 6. **EQ**：默认 500/400/298 K 六段退火，总时长 10 ns；所有段为正且总长 7-100 ns
 7. **PROD**：用户独立指定 2-200 ns；温度必须等于 EQ 目标温度，默认 10 ns，并只从已验收 EQ checkpoint 启动
-8. **初始建盒**：默认以拓扑质量和 `1.5 g/cm3` 估算；用户指定边长或目标质量密度优先。实际 PBC 盒矢量必须由 Packmol 输出审计后再交给 GROMACS
+8. **初始建盒**：默认以拓扑质量和 `0.7 g/cm3` 估算；用户指定边长或目标质量密度优先。实际 PBC 盒矢量必须由 Packmol 输出审计后再交给 GROMACS
 9. **力场**：新 run 默认使用 `sobtop/gaff_uff`；需要 OPLS-AA 时显式选择 `oplsaa/oplsaa` 并满足 LigParGen/BOSS 依赖。不得在同一 run 混用两类 family。
 10. **冲突处理**：用户指定 > 知识库推荐 > 默认值
 11. **用户上传分子**：`struct/` 下的自上传 `.gjf` 文件会以默认中性参数（charge=0, spin=1, GAFF 力场, b3lyp/6-311+g(d,p)）自动注册。若分子实际为离子或需特殊基组，用户需在 knowledge.md 表格中手动注册

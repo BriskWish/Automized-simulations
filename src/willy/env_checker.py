@@ -1,7 +1,7 @@
 """Compatibility facade for centralized external dependency checks.
 
-``env_registry`` resolves every non-bundled executable and builds its child
-environment.  This module keeps the historic check_all/check_module/ensure
+``env_registry`` resolves external and bundled runtime tools and builds their
+child environment. This module keeps the historic check_all/check_module/ensure
 API used by the pipeline and adapters.
 """
 
@@ -27,6 +27,7 @@ from willy.step_registry import EXECUTION_MODULE_REGISTRY
 
 ROOT = get_project_root()
 SOBTOP_DIR = ROOT / "vendor" / "sobtop"
+MULTIWFN_BIN = ROOT / "vendor" / "multiwfn" / "linux-x86_64" / "3.8-dev-2025-02-14" / "Multiwfn"
 # Backward-compatible import name. It is never written into os.environ.
 DEFAULT_BOSSDIR = DEFAULT_BOSS_HOME
 
@@ -120,9 +121,19 @@ class _DependencyDefinition:
 _DEPENDENCY_DEFINITIONS: tuple[_DependencyDefinition, ...] = (
     _DependencyDefinition("g16", "binary", "g16", "设置 WILLY_G16_BIN 或将 g16 加入 PATH", tool_id="g16"),
     _DependencyDefinition("formchk", "binary", "formchk", "设置 WILLY_FORMCHK_BIN 或将 formchk 加入 PATH", tool_id="formchk"),
+    _DependencyDefinition("g09", "binary", "g09", "设置 WILLY_G09_BIN 或将 g09 加入 PATH", tool_id="g09"),
+    _DependencyDefinition(
+        "g09_formchk", "binary", "formchk",
+        "设置 WILLY_G09_FORMCHK_BIN 或将 G09 安装目录中的 formchk 加入 PATH",
+        tool_id="g09_formchk",
+    ),
     _DependencyDefinition("orca", "binary", "orca", "设置 WILLY_ORCA_HOME/WILLY_ORCA_BIN，或将 orca 加入 PATH", tool_id="orca"),
     _DependencyDefinition("orca_2mkl", "binary", "orca_2mkl", "设置 WILLY_ORCA_HOME/WILLY_ORCA_2MKL_BIN，或将 orca_2mkl 加入 PATH", tool_id="orca_2mkl"),
-    _DependencyDefinition("Multiwfn", "binary", "Multiwfn", "设置 WILLY_MULTIWFN_BIN 或将 Multiwfn 加入 PATH", tool_id="multiwfn"),
+    _DependencyDefinition(
+        "Multiwfn", "file_exec", str(MULTIWFN_BIN),
+        "项目内置 Multiwfn 文件缺失",
+        bundled_dependency_id="multiwfn",
+    ),
     _DependencyDefinition("sobtop", "file_exec", str(SOBTOP_DIR / "sobtop"), "项目内置 Sobtop 文件缺失", bundled_dependency_id="sobtop"),
     _DependencyDefinition("atomtype", "file_exec", str(SOBTOP_DIR / "atomtype"), "项目内置 Sobtop 文件无执行权限", bundled_dependency_id="atomtype"),
     _DependencyDefinition("sobtop.ini", "file", str(SOBTOP_DIR / "sobtop.ini"), "项目内置 Sobtop 配置缺失", bundled_dependency_id="sobtop_ini"),
@@ -130,6 +141,8 @@ _DEPENDENCY_DEFINITIONS: tuple[_DependencyDefinition, ...] = (
     _DependencyDefinition("bonded_param.dat", "file", str(SOBTOP_DIR / "bonded_param.dat"), "项目内置 Sobtop 键参数缺失", bundled_dependency_id="sobtop_bonded_parameters"),
     _DependencyDefinition("LigParGen", "binary", "LigParGen", "设置 WILLY_LIGPARGEN_BIN 或将 LigParGen 加入 PATH", tool_id="ligpargen"),
     _DependencyDefinition("BOSSdir", "envvar", "BOSSdir", "设置 WILLY_BOSS_HOME；兼容 BOSSdir，默认目录为 ~/boss/boss", tool_id="boss"),
+    _DependencyDefinition("Open Babel", "binary", "obabel", "设置 WILLY_OBABEL_BIN 或将带格式插件的 obabel 加入 PATH", tool_id="obabel"),
+    _DependencyDefinition("C shell", "binary", "csh", "设置 WILLY_CSH_BIN 或将 csh 加入 PATH（BOSS 脚本必需）", tool_id="csh"),
     _DependencyDefinition("gmx", "binary", "gmx", "设置 WILLY_GMX_BIN 或将 gmx 加入 PATH", tool_id="gmx"),
     _DependencyDefinition("packmol", "file_exec", str(ROOT / "vendor" / "packmol"), "项目内置 Packmol 文件缺失", bundled_dependency_id="packmol"),
     _DependencyDefinition("obabel", "file_exec", str(ROOT / "vendor" / "obabel.bin"), "项目内置 OpenBabel 文件缺失", bundled_dependency_id="obabel"),

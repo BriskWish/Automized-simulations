@@ -111,12 +111,12 @@ SMOKE_CASES: tuple[ExternalSmokeCase, ...] = (
         ("orca", "orca_2mkl"), ("orca_minimal/input.gjf",), timeout_s=900,
     ),
     ExternalSmokeCase(
-        "multiwfn_minimal", "Multiwfn RESP 最小输入验收",
+        "multiwfn_minimal", "内置 Multiwfn RESP 最小输入验收",
         ("multiwfn",), ("multiwfn_minimal/input.fchk",), timeout_s=600,
     ),
     ExternalSmokeCase(
         "ligpargen_minimal", "LigParGen + BOSS OPLS-AA 中性分子验收",
-        ("ligpargen", "boss"), ("ligpargen_minimal/input.mol2",), timeout_s=900,
+        ("ligpargen", "boss", "obabel", "csh"), ("ligpargen_minimal/input.mol2",), timeout_s=900,
     ),
 )
 

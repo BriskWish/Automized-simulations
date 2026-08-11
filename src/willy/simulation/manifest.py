@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Iterable, Mapping, Any
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -16,6 +17,13 @@ import subprocess
 from willy.simulation.protocol import canonical_json_fingerprint
 from willy.env_registry import require_tool
 from willy._paths import get_project_root
+from willy.run_metadata import (
+    RUN_MANIFEST_FILENAME,
+    RunManifestRevisionConflict,
+    RunMetadataError,
+    load_run_manifest,
+    update_run_manifest_section,
+)
 from willy.run_store import run_transaction
 
 
@@ -134,10 +142,47 @@ def tool_versions() -> dict[str, str]:
 
 
 def manifest_path(run_dir: str | Path) -> Path:
+    """Return the legacy MD-only manifest location.
+
+    New runs persist this payload in the ``simulation`` and ``protocol``
+    sections of ``run_manifest.json``.  This path remains for standalone and
+    historical-run compatibility.
+    """
     return Path(run_dir) / MANIFEST_FILENAME
 
 
+def unified_manifest_path(run_dir: str | Path) -> Path:
+    """Return the schema-v2 unified run metadata location."""
+    return Path(run_dir) / RUN_MANIFEST_FILENAME
+
+
+def manifest_exists(run_dir: str | Path) -> bool:
+    """Whether either supported MD manifest representation is available."""
+    return unified_manifest_path(run_dir).is_file() or manifest_path(run_dir).is_file()
+
+
+def _combine_unified_sections(root: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct the v1 MD view from the two owned v2 sections."""
+    sections = root.get("sections")
+    if not isinstance(sections, Mapping):
+        raise ManifestError("run_manifest 缺少 simulation/protocol sections")
+    simulation = sections.get("simulation")
+    protocol = sections.get("protocol")
+    if not isinstance(simulation, Mapping) or not isinstance(protocol, Mapping):
+        raise ManifestError("run_manifest simulation/protocol sections 无效")
+    payload = dict(simulation.get("data", {}))
+    payload["protocol"] = dict(protocol.get("data", {}))
+    return _validate_manifest_payload(payload)
+
+
 def load_manifest(run_dir: str | Path) -> dict[str, Any]:
+    unified_path = unified_manifest_path(run_dir)
+    if unified_path.is_file():
+        try:
+            return _combine_unified_sections(load_run_manifest(run_dir))
+        except RunMetadataError as exc:
+            raise ManifestError(f"run_manifest 格式无效: {exc}") from exc
+
     path = manifest_path(run_dir)
     if not path.is_file():
         raise ManifestError(f"缺少 MD manifest: {path}")
@@ -156,6 +201,43 @@ def _validate_manifest_payload(payload: object) -> dict[str, Any]:
     return payload
 
 
+@contextmanager
+def _simulation_manifest_transaction(directory: Path):
+    """Edit only the v2 ``simulation`` section, or the legacy MD document.
+
+    V2 updates use the section revision as a compare-and-swap guard.  That
+    prevents a stale MD retry from replacing another process's stage evidence;
+    callers still use the separate MD run lock around external execution.
+    """
+    unified_path = unified_manifest_path(directory)
+    if unified_path.is_file():
+        try:
+            root = load_run_manifest(directory)
+            section = root["sections"]["simulation"]
+            payload = _combine_unified_sections(root)
+        except (KeyError, RunMetadataError) as exc:
+            raise ManifestError(f"run_manifest simulation section 无效: {exc}") from exc
+        yield payload
+        simulation_payload = dict(payload)
+        simulation_payload.pop("protocol", None)
+        try:
+            update_run_manifest_section(
+                directory,
+                "simulation",
+                simulation_payload,
+                expected_section_revision=section["revision"],
+            )
+        except (RunMetadataError, RunManifestRevisionConflict) as exc:
+            raise ManifestError(f"MD manifest 并发更新冲突: {exc}") from exc
+        return
+
+    with run_transaction(directory) as store:
+        raw = store.read_json(MANIFEST_FILENAME)
+        payload = _validate_manifest_payload(raw)
+        yield payload
+        store.write_json(MANIFEST_FILENAME, payload)
+
+
 def initialize_manifest(
     run_dir: str | Path,
     config_path: str | Path,
@@ -167,6 +249,36 @@ def initialize_manifest(
     directory = Path(run_dir)
     config = Path(config_path)
     config_fp = archive_config_revision(directory, config)
+    if unified_manifest_path(directory).is_file():
+        try:
+            root = load_run_manifest(directory)
+            section = root["sections"]["simulation"]
+            raw = section["data"]
+        except (KeyError, RunMetadataError) as exc:
+            raise ManifestError(f"run_manifest simulation section 无效: {exc}") from exc
+        if raw:
+            payload = _combine_unified_sections(root)
+            payload["updated_at"] = _now()
+            payload.setdefault("config", config_fp)
+            _record_config_revision(payload, config_fp)
+            payload.setdefault("random_seed", int(random_seed))
+            payload.setdefault("tool_versions", dict(versions or tool_versions()))
+            payload.setdefault("resources", resource_snapshot(directory))
+        else:
+            payload = _new_manifest_payload(directory, config_fp, random_seed, versions)
+        simulation_payload = dict(payload)
+        simulation_payload.pop("protocol", None)
+        try:
+            update_run_manifest_section(
+                directory,
+                "simulation",
+                simulation_payload,
+                expected_section_revision=section["revision"],
+            )
+        except (RunMetadataError, RunManifestRevisionConflict) as exc:
+            raise ManifestError(f"MD manifest 并发更新冲突: {exc}") from exc
+        return payload
+
     with run_transaction(directory) as store:
         raw = store.read_json(MANIFEST_FILENAME)
         if raw is not None:
@@ -178,21 +290,98 @@ def initialize_manifest(
             payload.setdefault("tool_versions", dict(versions or tool_versions()))
             payload.setdefault("resources", resource_snapshot(directory))
         else:
-            payload = {
-                "schema_version": 1,
-                "created_at": _now(),
-                "updated_at": _now(),
-                "config": config_fp,
-                "config_revisions": [{"recorded_at": _now(), **config_fp}],
-                "random_seed": int(random_seed),
-                "tool_versions": dict(versions or tool_versions()),
-                "resources": resource_snapshot(directory),
-                "stages": {},
-                "box_attempts": [],
-                "events": [{"time": _now(), "type": "manifest_initialized"}],
-            }
+            payload = _new_manifest_payload(directory, config_fp, random_seed, versions)
         store.write_json(MANIFEST_FILENAME, payload)
         return payload
+
+
+def _new_manifest_payload(
+    directory: Path,
+    config_fp: Mapping[str, Any],
+    random_seed: int,
+    versions: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "created_at": _now(),
+        "updated_at": _now(),
+        "config": dict(config_fp),
+        "config_revisions": [{"recorded_at": _now(), **dict(config_fp)}],
+        "random_seed": int(random_seed),
+        "tool_versions": dict(versions or tool_versions()),
+        "resources": resource_snapshot(directory),
+        "stages": {},
+        "box_attempts": [],
+        "box_executions": [],
+        "events": [{"time": _now(), "type": "manifest_initialized"}],
+    }
+
+
+def record_mdp_metadata(run_dir: str | Path, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Store generated MDP protocol metadata inside the MD manifest.
+
+    The simulation manifest is the authoritative record for protocol inputs,
+    stage permissions, and derived MDP timing.  Merging stage entries supports
+    partial MDP rebuilds without recreating a standalone metadata file.
+    """
+    directory = Path(run_dir)
+    clean = _json_safe(metadata)
+    if not isinstance(clean, dict):
+        raise ManifestError("MDP 协议元数据必须是对象")
+    if unified_manifest_path(directory).is_file():
+        try:
+            root = load_run_manifest(directory)
+            section = root["sections"]["protocol"]
+            protocol = dict(section["data"])
+        except (KeyError, RunMetadataError) as exc:
+            raise ManifestError(f"run_manifest protocol section 无效: {exc}") from exc
+        merged = _merge_mdp_metadata(protocol, clean)
+        try:
+            update_run_manifest_section(
+                directory,
+                "protocol",
+                protocol,
+                expected_section_revision=section["revision"],
+            )
+        except (RunMetadataError, RunManifestRevisionConflict) as exc:
+            raise ManifestError(f"MD protocol 并发更新冲突: {exc}") from exc
+        return merged
+
+    with run_transaction(directory) as store:
+        raw = store.read_json(MANIFEST_FILENAME)
+        if raw is None:
+            raise ManifestError("缺少 MD manifest，无法记录 MDP 协议元数据")
+        payload = _validate_manifest_payload(raw)
+        protocol = payload.get("protocol")
+        protocol = dict(protocol) if isinstance(protocol, Mapping) else {}
+        merged = _merge_mdp_metadata(protocol, clean)
+        payload["protocol"] = protocol
+        payload["updated_at"] = _now()
+        store.write_json(MANIFEST_FILENAME, payload)
+        return merged
+
+
+def _merge_mdp_metadata(protocol: dict[str, Any], clean: Mapping[str, Any]) -> dict[str, Any]:
+    previous = protocol.get("mdp")
+    merged = dict(previous) if isinstance(previous, Mapping) else {}
+    prior_stages = merged.get("stages")
+    next_stages = clean.get("stages")
+    combined_stages = dict(prior_stages) if isinstance(prior_stages, Mapping) else {}
+    if isinstance(next_stages, Mapping):
+        combined_stages.update(next_stages)
+    merged.update(clean)
+    merged["stages"] = combined_stages
+    protocol["mdp"] = merged
+    return merged
+
+
+def load_mdp_metadata(run_dir: str | Path) -> dict[str, Any]:
+    """Return manifest-owned MDP metadata, or an empty record when absent."""
+    protocol = load_manifest(run_dir).get("protocol")
+    if not isinstance(protocol, Mapping):
+        return {}
+    metadata = protocol.get("mdp")
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
 
 
 def stage_contract(
@@ -263,14 +452,16 @@ def prepare_stage_attempt(
     never shares ``.xtc/.edr/.cpt`` files with the previous protocol.
     """
     directory = Path(run_dir)
-    with run_transaction(directory) as store:
-        manifest = _validate_manifest_payload(store.read_json(MANIFEST_FILENAME))
+    with _simulation_manifest_transaction(directory) as manifest:
         stages = manifest.setdefault("stages", {})
         old = stages.get(stage, {})
         same_contract = old.get("contract", {}).get("fingerprint") == contract.get("fingerprint")
-        cleaned: list[str] = []
+        # Viewer PDBs are derived snapshots, never stage inputs.  Remove a
+        # prior snapshot for every new attempt, even an append-compatible one.
+        from willy.simulation.visualization import clear_stage_visualization_artifact
+        cleaned = clear_stage_visualization_artifact(directory, stage)
         if old and not same_contract:
-            cleaned = clear_stage_outputs(directory, stage)
+            cleaned.extend(clear_stage_outputs(directory, stage))
             _invalidate_downstream_stages(manifest, directory, stage)
         history = list(old.get("history", []))
         if old:
@@ -299,7 +490,6 @@ def prepare_stage_attempt(
             "attempt": record["attempt"],
             "cleared_outputs": cleaned,
         })
-        store.write_json(MANIFEST_FILENAME, manifest)
         return record
 
 
@@ -356,8 +546,7 @@ def invalidate_stages_from(
         start = _STAGE_ORDER.index(stage)
     except ValueError as exc:
         raise ManifestError(f"未知 MD 阶段: {stage}") from exc
-    with run_transaction(directory) as store:
-        manifest = _validate_manifest_payload(store.read_json(MANIFEST_FILENAME))
+    with _simulation_manifest_transaction(directory) as manifest:
         stages = manifest.setdefault("stages", {})
         invalidated: list[str] = []
         for affected in _STAGE_ORDER[start:]:
@@ -393,7 +582,6 @@ def invalidate_stages_from(
             })
         if invalidated:
             manifest["updated_at"] = _now()
-            store.write_json(MANIFEST_FILENAME, manifest)
         return invalidated
 
 
@@ -411,8 +599,7 @@ def record_stage_result(
 ) -> None:
     """Persist stage completion and private failure evidence for one run."""
     directory = Path(run_dir)
-    with run_transaction(directory) as store:
-        manifest = _validate_manifest_payload(store.read_json(MANIFEST_FILENAME))
+    with _simulation_manifest_transaction(directory) as manifest:
         record = manifest.setdefault("stages", {}).setdefault(stage, {})
         record["status"] = "accepted" if success and stage in {"em", "eq"} else ("completed" if success else "failed")
         record["completed_at"] = _now()
@@ -441,18 +628,35 @@ def record_stage_result(
             "stage": stage,
             "status": record["status"],
         })
-        store.write_json(MANIFEST_FILENAME, manifest)
 
 
 def record_box_attempt(run_dir: str | Path, parameters: Mapping[str, Any]) -> None:
     """Store requested and observed Packmol geometry for rollback and diagnosis."""
     directory = Path(run_dir)
-    with run_transaction(directory) as store:
-        manifest = _validate_manifest_payload(store.read_json(MANIFEST_FILENAME))
+    with _simulation_manifest_transaction(directory) as manifest:
         attempts = manifest.setdefault("box_attempts", [])
         attempts.append({"time": _now(), **dict(parameters)})
         manifest["updated_at"] = _now()
-        store.write_json(MANIFEST_FILENAME, manifest)
+
+
+def record_box_execution(run_dir: str | Path, evidence: Mapping[str, Any]) -> None:
+    """Persist bounded, private evidence for every Packmol process attempt.
+
+    This intentionally excludes command lines and stdout/stderr.  It records
+    only the deterministic facts needed to distinguish process, artifact,
+    atom-count, and PBC-contract failures after a run has stopped.
+    """
+    directory = Path(run_dir)
+    clean = _json_safe(evidence)
+    if not isinstance(clean, dict):
+        raise ManifestError("Packmol 执行证据必须是对象")
+    with _simulation_manifest_transaction(directory) as manifest:
+        executions = manifest.get("box_executions")
+        if not isinstance(executions, list):
+            executions = []
+            manifest["box_executions"] = executions
+        executions.append({"time": _now(), **clean})
+        manifest["updated_at"] = _now()
 
 
 def box_parameters_changed(run_dir: str | Path) -> bool:
@@ -482,6 +686,8 @@ def clear_stage_outputs(run_dir: str | Path, stage: str) -> list[str]:
         if path.is_file():
             path.unlink()
             removed.append(name)
+    from willy.simulation.visualization import clear_stage_visualization_artifact
+    removed.extend(clear_stage_visualization_artifact(directory, stage))
     return removed
 
 

@@ -40,14 +40,14 @@ LIGPARGEN_TMP_DIR = Path("/tmp")
 
 def check_ligpargen_ready() -> list[str]:
     """
-    预检 LigParGen + BOSS 环境是否就绪。
+    预检 LigParGen、BOSS 和内置 Open Babel 运行环境是否就绪。
 
     调用 run_ligpargen 前应先调用此函数，在迁移到新机器时给出清晰错误提示。
     """
     from willy.env_checker import check_module
     issues = check_module("topo_opls").failed_strs()
     if not issues:
-        print("[ligpargen] ✅ LigParGen + BOSS 环境预检通过")
+        print("[ligpargen] ✅ LigParGen + BOSS + Open Babel 环境预检通过")
     return issues
 
 
@@ -73,11 +73,12 @@ class LigParGenInput:
 # ============================================================
 
 def _mol2_to_smiles(mol2_path: str, *, run_dir: str | Path | None = None) -> str:
-    """通过 vendored obabel 从 mol2 提取 SMILES。"""
-    obabel = str(ROOT / "vendor" / "obabel.bin")
+    """通过完整安装的 Open Babel 从 mol2 提取 SMILES。"""
+    obabel = require_tool("obabel")
     result = run_managed_command(
-        [obabel, mol2_path, "-osmi"],
+        [str(obabel.executable), mol2_path, "-osmi"],
         timeout=30,
+        env=build_tool_env("obabel"),
         run_dir=run_dir,
     )
     if result.returncode != 0 or not result.stdout.strip():
@@ -86,6 +87,92 @@ def _mol2_to_smiles(mol2_path: str, *, run_dir: str | Path | None = None) -> str
     smiles = result.stdout.strip().split()[0]  # obabel 输出格式: "SMILES\tNAME"
     print(f"[ligpargen] 🔄 mol2 → SMILES: {smiles}")
     return smiles
+
+
+def _ligpargen_compat_dir(prefix: str) -> Path:
+    return LIGPARGEN_TMP_DIR / f".willy_ligpargen_{prefix}"
+
+
+def _prepare_ligpargen_child_env(
+    base_env: dict[str, str],
+    prefix: str,
+    obabel_executable: Path,
+    csh_executable: Path,
+) -> dict[str, str]:
+    """Provide LigParGen 2.x its legacy ``babel`` command without global setup.
+
+    LigParGen invokes ``babel`` internally, whereas Willy configures a
+    complete Open Babel executable as ``obabel``. LigParGen 2.1 also uses the Open Babel 2
+    output-file syntax, so the private launcher translates it to Open Babel 3
+    syntax. This keeps both legacy assumptions local to the current process
+    invocation.
+    """
+    compat_dir = _ligpargen_compat_dir(prefix)
+    compat_dir.mkdir(mode=0o700)
+    wrapper = compat_dir / "babel"
+    wrapper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        f"obabel = {str(obabel_executable)!r}\n"
+        "arguments = []\n"
+        "index = 1\n"
+        "while index < len(sys.argv):\n"
+        "    argument = sys.argv[index]\n"
+        "    if argument == '-omol' and index + 1 < len(sys.argv):\n"
+        "        arguments.extend((argument, '-O', sys.argv[index + 1]))\n"
+        "        index += 2\n"
+        "        continue\n"
+        "    arguments.append(argument)\n"
+        "    index += 1\n"
+        "os.execv(obabel, [obabel, *arguments])\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    (compat_dir / "csh").symlink_to(csh_executable)
+    # LigParGen 2.1 predates NetworkX 3 and pandas 2, and still reads
+    # ``DiGraph.node`` and ``DataFrame.ix``. Make both removed aliases
+    # available only in the child interpreter.
+    (compat_dir / "sitecustomize.py").write_text(
+        "import networkx as nx\n"
+        "import pandas as pd\n"
+        "if not hasattr(nx.DiGraph, 'node'):\n"
+        "    nx.DiGraph.node = property(lambda graph: graph._node)\n"
+        "if not hasattr(pd.DataFrame, 'ix'):\n"
+        "    class _LegacyIx:\n"
+        "        def __init__(self, frame):\n"
+        "            self._frame = frame\n"
+        "        def __getitem__(self, key):\n"
+        "            return self._frame.loc[key]\n"
+        "    pd.DataFrame.ix = property(_LegacyIx)\n"
+        "_pd_concat = pd.concat\n"
+        "def _legacy_concat(objs, *args, **kwargs):\n"
+        "    join_axes = kwargs.pop('join_axes', None)\n"
+        "    axis = kwargs.get('axis', args[0] if args else 0)\n"
+        "    result = _pd_concat(objs, *args, **kwargs)\n"
+        "    if join_axes:\n"
+        "        join_axis = 1 if axis == 0 else 0\n"
+        "        result = result.reindex(index=join_axes[0]) if join_axis == 0 else result.reindex(columns=join_axes[0])\n"
+        "    return result\n"
+        "pd.concat = _legacy_concat\n"
+        "_pd_drop = pd.DataFrame.drop\n"
+        "def _legacy_drop(self, labels=None, *args, **kwargs):\n"
+        "    if args:\n"
+        "        if len(args) > 1:\n"
+        "            raise TypeError('too many positional arguments for DataFrame.drop')\n"
+        "        kwargs.setdefault('axis', args[0])\n"
+        "    return _pd_drop(self, labels=labels, **kwargs)\n"
+        "pd.DataFrame.drop = _legacy_drop\n",
+        encoding="utf-8",
+    )
+    env = dict(base_env)
+    current_path = env.get("PATH", "")
+    env["PATH"] = f"{compat_dir}:{current_path}" if current_path else str(compat_dir)
+    current_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{compat_dir}:{current_pythonpath}" if current_pythonpath else str(compat_dir)
+    )
+    return env
 
 
 def _temporary_prefix(inp: LigParGenInput) -> str:
@@ -114,6 +201,7 @@ def _cleanup_tmp(prefix: str) -> None:
                 path.unlink()
         except OSError:
             pass
+    shutil.rmtree(_ligpargen_compat_dir(prefix), ignore_errors=True)
 
 
 def _restore_moleculetype_name(itp_path: Path, residue_name: str) -> bool:
@@ -146,6 +234,62 @@ def _restore_moleculetype_name(itp_path: Path, residue_name: str) -> bool:
         itp_path.write_text("".join(lines))
         return True
     return False
+
+
+def _restore_gro_residue_name(
+    gro_path: Path,
+    residue_name: str,
+    temporary_prefix: str,
+) -> str | None:
+    """Replace LigParGen's temporary ``-r`` name in GRO atom records.
+
+    LigParGen uses ``-r`` both for its shared ``/tmp`` output prefix and for
+    the GRO residue name.  The former must remain unique across concurrent
+    calls, whereas GROMACS reserves exactly five columns for the latter.  The
+    final run artifact therefore uses the configured residue name, truncated
+    to the representable five characters.  Coordinate and atom fields remain
+    byte-for-byte unchanged.
+
+    ``None`` indicates an invalid GRO layout.  A normal fixed-width GRO row is
+    accepted as a fallback for compatibility with existing test fixtures and
+    future LigParGen releases that truncate ``-r`` themselves.
+    """
+
+    try:
+        lines = gro_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        atom_count = int(lines[1].strip())
+    except (IndexError, OSError, ValueError):
+        return None
+    if atom_count < 1 or len(lines) < atom_count + 3:
+        return None
+
+    gro_residue_name = residue_name[:5].ljust(5)
+    for index in range(2, atom_count + 2):
+        line = lines[index]
+        body = line.rstrip("\r\n")
+        newline = line[len(body):]
+        if len(body) < 10:
+            return None
+
+        residue_id = body[:5]
+        remainder = body[5:]
+        if remainder.startswith(temporary_prefix):
+            # The generated prefix can exceed the GRO field width, shifting
+            # all following columns. Remove exactly that known prefix.
+            remaining_fields = remainder[len(temporary_prefix):]
+        elif remainder[:5].strip():
+            # A conventional five-column input is already parseable. Replacing
+            # its residue field also handles upstream versions that truncate.
+            remaining_fields = remainder[5:]
+        else:
+            return None
+        lines[index] = f"{residue_id}{gro_residue_name}{remaining_fields}{newline}"
+
+    try:
+        gro_path.write_text("".join(lines), encoding="utf-8")
+    except OSError:
+        return None
+    return gro_residue_name.rstrip()
 
 
 def make_itp_gro_opls(
@@ -244,7 +388,14 @@ def make_itp_gro_opls(
 
     try:
         ligpargen = require_tool("ligpargen")
-        ligpargen_env = build_tool_env("ligpargen")
+        obabel = require_tool("obabel")
+        csh = require_tool("csh")
+        ligpargen_env = _prepare_ligpargen_child_env(
+            build_tool_env("ligpargen"),
+            temporary_prefix,
+            obabel.executable,
+            csh.executable,
+        )
     except EnvironmentRegistryError as exc:
         return StepResult(
             step_name="topo_opls", step_index=4, success=False,
@@ -356,6 +507,23 @@ def make_itp_gro_opls(
                 ),
                 duration_s=_time.time() - _start,
             )
+        if ext == "gro":
+            gro_residue_name = _restore_gro_residue_name(
+                dst, resname, temporary_prefix,
+            )
+            if gro_residue_name is None:
+                for destination in destinations.values():
+                    destination.unlink(missing_ok=True)
+                if inp.cleanup_tmp:
+                    _cleanup_tmp(temporary_prefix)
+                return StepResult(
+                    step_name="topo_opls", step_index=4, success=False,
+                    error=StepError(
+                        ErrorKind.LIGPARGEN_FAILED,
+                        f"{resname}: LigParGen GRO 残基字段格式无效",
+                    ),
+                    duration_s=_time.time() - _start,
+                )
         outputs[ext] = dst
         artifacts.append(str(dst))
         print(f"[ligpargen] ✅ {ext}: {dst}")
@@ -385,6 +553,7 @@ def make_itp_gro_opls(
             "lbcc": inp.lbcc,
             "opt_steps": inp.opt_steps,
             "temporary_prefix": temporary_prefix,
+            "gro_residue_name": resname[:5],
             **final_validation.extra,
         },
     )

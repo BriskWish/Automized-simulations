@@ -115,6 +115,21 @@ def _pid_start_ticks(pid: object) -> int | None:
         return None
 
 
+def _process_group_is_alive(pgid: object) -> bool:
+    """Return whether a managed process group still has signalable members."""
+    if not isinstance(pgid, int) or pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _recorded_pid_is_alive(record: dict, prefix: str) -> bool:
     pid_key = f"{prefix}_pid" if prefix else "pid"
     ticks_key = f"{prefix}_started_ticks" if prefix else "started_ticks"
@@ -131,7 +146,12 @@ def _record_is_active(record: dict) -> bool:
     state = record.get("state")
     if state == "reserved":
         return _recorded_pid_is_alive(record, "launcher")
-    return _recorded_pid_is_alive(record, "runner") or _recorded_pid_is_alive(record, "")
+    if _recorded_pid_is_alive(record, "runner") or _recorded_pid_is_alive(record, ""):
+        return True
+    # Current launches use start_new_session=True, so the runner PID is also
+    # the process-group ID.  A surviving GROMACS child keeps the reservation
+    # active even if the Python wrapper is being reaped.
+    return _process_group_is_alive(record.get("runner_pgid"))
 
 
 def _allocate_run_dir(root: Path) -> Path:
@@ -185,6 +205,10 @@ class PipelineLaunchReservation:
         return self.run_dir.name
 
     def mark_runner_started(self, pid: int) -> None:
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            pgid = int(pid)
         _write_lock_fd(self.fd, {
             "version": 1,
             "state": "running",
@@ -192,6 +216,7 @@ class PipelineLaunchReservation:
             "token": self.token,
             "runner_pid": int(pid),
             "runner_started_ticks": _pid_start_ticks(pid),
+            "runner_pgid": int(pgid),
             "updated_at": _now(),
         })
 

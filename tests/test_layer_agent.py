@@ -165,6 +165,22 @@ class TestBuildContext:
 
         assert fchk_path in ctx
 
+    def test_context_includes_structured_execution_evidence(self, mock_llm_client, make_step_result):
+        agent = LayerAgent("test", "prompt", [], lambda n, a: "{}", mock_llm_client)
+        sr = make_step_result(success=False, error_kind=ErrorKind.INPUT_CONTRACT)
+        sr.extra = {
+            "box_execution": {
+                "failure_stage": "preflight",
+                "preflight_issues": ["AR.pdb/.gro"],
+            },
+        }
+
+        ctx = agent._build_context(sr, "{}", "/tmp/run", {})
+
+        assert "私有执行证据" in ctx
+        assert "preflight" in ctx
+        assert "AR.pdb/.gro" in ctx
+
 
 # ============================================================
 # _escalate
@@ -391,6 +407,47 @@ class TestHandleFailure:
 
         dispatch.assert_not_called()
         assert result["error_kind"] == "user_confirmation_required"
+
+    def test_simulation_agent_rejects_box_retry_without_geometry_evidence(
+        self, tmp_path, mock_llm_client, make_step_result,
+    ):
+        from willy.agent_simulation import SimulationAgent
+
+        calls = []
+        traces = []
+        catalog = build_default_tool_catalog()
+        agent = SimulationAgent(
+            mock_llm_client,
+            recovery_policy=default_recovery_policy(catalog),
+            tool_catalog=catalog,
+            on_decision=traces.append,
+        )
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+        failed = make_step_result(
+            success=False,
+            step_name="box",
+            step_index=7,
+            error_kind=ErrorKind.INPUT_CONTRACT,
+        )
+        failed.extra = {"box_execution": {"failure_stage": "preflight"}}
+        ctx = RetryContext("simulation", "box", ErrorKind.INPUT_CONTRACT, max_attempts=3)
+
+        with patch.object(agent, "handle_tool", side_effect=lambda *args: calls.append(args)):
+            payload = agent._dispatch_tool(
+                "tools_retry_box",
+                {"tolerance": 2.5},
+                step_result=failed,
+                ctx=ctx,
+                run_dir=str(tmp_path / "md__202608100001"),
+                config_path=str(config_path),
+            )
+
+        result = json.loads(payload)
+        assert result["error_kind"] == ErrorKind.INPUT_CONTRACT.value
+        assert result["extra"]["evidence_rejected"] is True
+        assert calls == []
+        assert traces[-1]["result"] == "evidence_rejected"
 
     def test_handle_failure_detects_escalation_keyword(self, agent, make_step_result):
         """当 LLM 在响应中说 'escalat' 时，应立即升级。"""

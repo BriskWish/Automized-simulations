@@ -39,6 +39,11 @@ def test_execution_modules_own_normalized_tool_and_step_dependencies():
     )
     assert EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency("packmol") == ("box",)
     assert EXECUTION_MODULE_REGISTRY.step_for_module("gromacs_eq").index == EQ_STEP
+    assert EXECUTION_MODULE_REGISTRY.module("struct_g09").tool_ids == ("g09", "g09_formchk")
+    assert EXECUTION_MODULE_REGISTRY.module("sp_g09").tool_ids == ("g09", "g09_formchk")
+    assert EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency("multiwfn") == (
+        "sp_g16", "sp_g09", "sp_orca", "chg_resp",
+    )
     assert EXECUTION_MODULE_REGISTRY.has_module("topo_opls")
     assert not EXECUTION_MODULE_REGISTRY.has_module("unregistered")
     assert {

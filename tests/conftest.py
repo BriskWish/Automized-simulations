@@ -25,6 +25,7 @@ _TEST_LAYER_BY_FILE = {
     "test_workflow_config.py": "contract",
     "test_simulation_protocol.py": "contract",
     "test_toolist_global.py": "contract",
+    "test_quantum_input_audit.py": "contract",
     "test_toolist_quantum_topology.py": "contract",
     "test_toolist_simulation.py": "contract",
     "test_action_contract.py": "contract",
@@ -34,6 +35,7 @@ _TEST_LAYER_BY_FILE = {
     "test_layer_agent.py": "integration",
     "test_mdrun_eta.py": "integration",
     "test_process_lifecycle.py": "integration",
+    "test_remote_execution.py": "unit",
     "test_run_provenance.py": "integration",
     "test_run_store.py": "integration",
     "test_step_registry.py": "contract",
@@ -42,6 +44,10 @@ _TEST_LAYER_BY_FILE = {
     "test_postprocess.py": "integration",
     "test_run_assistant.py": "integration",
     "test_simulation_execution.py": "integration",
+    "test_mdrun_knowledge.py": "contract",
+    "test_gateway.py": "integration",
+    "test_gateway_admin.py": "integration",
+    "test_managed_gateway.py": "integration",
     "test_topology_contract.py": "integration",
 }
 
@@ -59,14 +65,22 @@ def pytest_addoption(parser):
         default=False,
         help="run the real OpenAI-compatible LLM connection test",
     )
+    parser.addoption(
+        "--run-e2e",
+        action="store_true",
+        default=False,
+        help="run browser tests against a disposable fake-executor service",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
     """Classify every pytest case and keep real-tool smoke opt-in."""
     run_external = config.getoption("--run-external")
     run_llm_connection = config.getoption("--run-llm-connection")
+    run_e2e = config.getoption("--run-e2e")
     skip_external = pytest.mark.skip(reason="requires --run-external")
     skip_llm_connection = pytest.mark.skip(reason="requires --run-llm-connection")
+    skip_e2e = pytest.mark.skip(reason="requires --run-e2e")
 
     for item in items:
         category = _TEST_LAYER_BY_FILE.get(Path(str(item.fspath)).name)
@@ -76,6 +90,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_external)
         if "llm_connection" in item.keywords and not run_llm_connection:
             item.add_marker(skip_llm_connection)
+        if "e2e" in item.keywords and not run_e2e:
+            item.add_marker(skip_e2e)
 
 # 确保 src/willy 在 path 中
 _SRC = Path(__file__).resolve().parent.parent / "src"

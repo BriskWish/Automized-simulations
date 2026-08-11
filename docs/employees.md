@@ -1,10 +1,10 @@
 # Willy 开发团队
 
-> 本文档定义团队职责边界。0 号为总工程师，负责全局技术治理与业务边界裁决；1-6 号为领域工程师，负责各自模块的设计、实现和维护。
+> 本文档定义团队职责边界。0 号为总工程师，负责全局技术治理与业务边界裁决；1-7 号为领域工程师，负责各自模块的设计、实现和维护。
 
 ## 0. Codex — 总工程师（Architecture / Delivery / Quality）
 
-- **定位**: 0 号总工程师不是某一个执行模块的所有者，而是 Willy 项目的技术负责人。职责是把业务目标、系统架构、跨层契约、交付节奏和质量门禁统一起来，确保 1-6 号工程师的工作可以稳定合流。
+- **定位**: 0 号总工程师不是某一个执行模块的所有者，而是 Willy 项目的技术负责人。职责是把业务目标、系统架构、跨层契约、交付节奏和质量门禁统一起来，确保 1-7 号工程师的工作可以稳定合流。
 - **核心业务**:
   - **业务边界裁决**: 判断项目当前承诺什么、不承诺什么。尤其负责同步 README、架构文档和真实主流程，避免“文档声称端到端完成，但代码只到建盒”的边界失真。
   - **路线图统筹**: 维护 `docs/revision_strategy.md`，确定 Phase 0-5 的修订顺序，优先补闭环、契约、安全和测试基线，再扩展新能力。
@@ -12,10 +12,9 @@
   - **架构审查**: 审查跨层改动是否越界，防止 orchestrator 写业务逻辑、toolist 承载复杂算法、前端直接操作 shell、执行层反向调用 LLM。
   - **质量门禁**: 定义每类变更的最小验证命令，要求测试、LLM eval、环境检查和文档同步在交付前完成。
   - **安全治理**: 负责 API key、Gradio 暴露面、参数化子进程调用、进程组控制、运行产物清理和 vendor 依赖来源的风险收敛。
-  - **文档治理**: 维护 `docs/README.md`、`project_evaluation.md`、`revision_strategy.md`、`project_gap_analysis.md` 与各设计文档之间的一致性。
+  - **文档治理**: 维护 `docs/README.md`、`revision_strategy.md`、`project_gap_analysis.md` 与各设计文档之间的一致性。
 - **管辖文档**:
   - `docs/revision_strategy.md` — 总计划、模块边界、跨层契约和验收规则。
-  - `docs/project_evaluation.md` — 当前项目综合评估。
   - `docs/project_gap_analysis.md` — 缺口和修复优先级。
   - `docs/README.md` — 文档导航与分类入口。
   - `docs/document_registry.md` — 文档用途、状态、责任人与维护规范的权威台账。
@@ -36,30 +35,33 @@
 
 | 领域 | 负责人 | 0 号关注点 | 不直接接管 |
 |------|------|------|------|
-| 量子层 | 1 号 | 产物契约、错误结构化、后端隔离、依赖预检命名 | G16/ORCA 具体计算细节 |
+| 量子层 | 1 号 | 产物契约、错误结构化、后端隔离、依赖预检命名 | G16/G09/ORCA 具体计算细节 |
 | 拓扑层 | 2 号 | `.mol2`/`.chg` 到 `.itp`/`.gro` 的边界、top assembly 目录一致性 | Sobtop/LigParGen 交互细节 |
 | 模拟层 | 3 号 | v2 协议、EM/EQ/PROD 阶段许可、状态机步骤一致性 | GROMACS 参数细节 |
 | 前端交互 | 4 号 | 安全暴露面、run 管理、状态展示准确性 | Gradio 组件细节 |
 | 文档架构 | 5 号 | 文档是否反映真实代码、索引是否完整、旧名是否清理 | 每份设计文档的具体技术细节 |
 | 测试与验收 | 6 号 | 测试策略、回归基线、真实案例验收与发布质量门禁 | 领域算法与业务协议实现 |
+| LLM 网关 | 7 号 | 托管网关协议、设备认证、额度/审计、provider 隔离与部署安全 | 上游供应商运营、Willy 本地工作流执行 |
 
 ### 0 号当前业务重点
 
 1. **Phase 0 基线收敛**: 已完成配置验证、依赖预检命名、`top_assembly` 目录、脆弱测试和 Gradio 默认暴露面的修复。
 2. **Phase 1 契约稳定**: `StepResult.to_dict()`、完整配置外层 schema、唯一步骤/执行模块注册、run 事务与 provenance 已落地；公共接口中仍禁止以裸异常替代 `StepResult`。
-3. **Phase 2 端到端闭环**: 10 步主流程及 EM/NPT EQ/PROD 已接入；四种真实量子/拓扑组合端到端验收仍待目标验收机执行，目标体系科学验收尚未完成。
+3. **Phase 2 端到端闭环**: 10 步主流程及 EM/NPT EQ/PROD 已接入；2026-08-11 的四条真实量子/拓扑 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，中性 OPLS 的单一 Ewald 净电荷 warning 按 `0.15e` 受控容差放行并已回归。本版本以十步完成且最终无错误为验收标准，不进行目标体系科学预测。
 4. **Phase 3+ 治理增强**: 安全进程管理、tool 权限元数据、CI、运行产物和 vendor 治理持续推进。
 
 ## 1. Claude — 量子层接口专家
 
 - **职责**: 量子计算层（`src/willy/quantum/`）的接口设计、实现与维护
-- **成果**（对应量子模块 8 个文件）:
+- **成果**（对应量子模块 10 个文件）:
   - `struct_g16.py` — Gaussian 结构优化：.gjf 解析 / route card 重写 / g16 + formchk → .fchk
-  - `struct_orca.py` — .gjf→.inp 转换 + ORCA opt freq → orca_2mkl → .molden
+  - `struct_g09.py` — G09 独立镜像链路：.gjf 解析 / route card 重写 / g09 + G09 formchk → .fchk
+  - `struct_orca.py` — 以用户 `.inp` 原始输入执行 ORCA opt freq → orca_2mkl → .molden
   - `singlepoint_g16.py` — 从优化后的 .fchk 提取坐标，执行 def2-TZVP 单点能 → `*_opt.fchk`
+  - `singlepoint_g09.py` — G09 独立镜像：从优化后的 .fchk 提取坐标，执行 def2-TZVP 单点能 → `*_opt.fchk`
   - `singlepoint_orca.py` — 从 .molden 提取坐标，执行 def2-TZVP 单点能并转换 → `*_opt.fchk`
   - `fchk_mol2.py` — 统一解析 `*_opt.fchk`（Atomic numbers / IBond / RBond）→ Tripos .mol2，无外部依赖
-  - `chg_resp.py` — 统一的 Multiwfn RESP：`*_opt.fchk` → .chg，G16 与 ORCA 共用
+  - `chg_resp.py` — 统一的 Multiwfn RESP：`*_opt.fchk` → .chg，G16/G09 与 ORCA 共用
   - `_orca_utils.py` — ORCA / Multiwfn 路径解析、运行环境、坐标提取和格式化共享工具
   - `quantum_design.md` — 设计文档
 - **原则**: 一个 maker 只做一件事、下游只消费 `.mol2` + `.chg`、统一 `config.json` 配置源
@@ -91,12 +93,12 @@
   - `eq.py` — 三点式退火平衡执行器，检验最终目标温度保持段和最终 `.gro` 宏观真空区
   - `prod.py` — 生产 MD 执行器；必须由已验收 `eq.cpt` 连续启动，`prod.tpr` 前允许独立重写 prod.mdp
   - `postprocess.py` / `mdrun_eta.py` / `pending_action.py` — 生产后确定性分析、运行心跳/ETA 和 run-local EQ 方案确认
-  - `toolist_simulation.py` — Layer 3 的 **13** 个 JSON Schema tool 定义与 handler，含显式旧配置迁移、输出配置与 PROD MDP 配置
+  - `toolist_simulation.py` — Layer 3 的 **14** 个 JSON Schema tool 定义与 handler，含显式旧配置迁移、输出配置、PROD MDP 配置和只读 GROMACS 知识检索
   - `SIMULATION_AGENT_PROMPT` (in `agent_simulation.py`) — EM/EQ/PROD/通用决策规则
   - `log_parsers.py` 中 `parse_gromacs_log()` — 7 种异常模式识别
 - **原则**: 所有函数返回 `StepResult`、v2 配置和 run 内 manifest 为协议真相源、EM→EQ→PROD 只能消费已验收父阶段、盒子与拓扑同源读取、诊断返回结构化 dict
 - **事实勘误**:
-  - Simulation Agent 对外公开 13 个 JSON Schema；时长、温度、压力耦合和输出精度变更需要模拟前确认。
+  - Simulation Agent 对外公开 14 个 JSON Schema；时长、温度、压力耦合和输出精度变更需要模拟前确认，GROMACS 知识检索保持只读并受两次/三条预算限制。
 
 ## 4. Claude — 前端与交互工程师
 
@@ -118,7 +120,7 @@
 
 - **职责**: 项目架构评审、文档体系规范化、命名规范制定、技术选型分析
 - **成果**:
-  - **命名规范制定**: `docs/naming_convention.md` — tools/toolist/agent 三套命名体系，覆盖 46 个 LLM tool（10/8/6/13/9，含 9 个只读 run tool）、5 个 toolist 模块和 5 个 agent 文件
+  - **命名规范制定**: `docs/naming_convention.md` — tools/toolist/agent 三套命名体系，覆盖 50 个 LLM tool（11/10/6/14/9，含 9 个只读 run tool）、5 个 toolist 模块和 5 个 agent 文件
   - **现有文档规范化**: `knowledge.md`（分子注册说明、步骤数修正、box 配置补充）、`Willy.md`（幽灵引用删除、ORCA 后端补全、vendor 细化）、`quantum_design.md`/`topology_design.md`（章节编号统一、接口清单）
   - **新建文档**: `README.md`（中文门面 + 架构图）、`.env.example`、`docs/naming_convention.md`
   - **文档台账与治理**: `docs/document_registry.md` 记录全部文档的用途、责任人、状态与更新触发条件；所有领域工程师在同一变更中维护所负责的技术事实
@@ -129,7 +131,7 @@
 
 ---
 
-## 6. Claude — 测试工程师（Test / Verification / Release Gate）
+## 6. Codex — 测试工程师（Test / Verification / Release Gate）
 
 - **职责**: 统筹全项目的测试、验收与质量门禁，维护跨层回归基线，确保变更可验证、问题可复现、交付可追溯。
 - **范围**:
@@ -142,11 +144,30 @@
 - **所有权**: 负责 `tests/`、测试 fixture、测试脚本与验收基线；不替代领域工程师实现业务逻辑，发现问题后以可复现测试和验收结论反馈给对应负责人。
 - **原则**: 测试描述已观察到的契约；替身测试与真实冒烟测试并行；测试、实现和文档必须同步更新。
 
+## 7. Codex — LLM 网关工程师（Gateway / Provider Security）
+
+- **职责**: 独立托管 LLM Gateway 及 Willy 客户端 `managed`/`byok` provider 边界的设计、实现与维护。
+- **范围**:
+  - Gateway HTTP/ASGI 服务、固定模型别名和 OpenAI-compatible 非流式转发；网关不执行 tool、不访问 run 目录、不启动或停止 GROMACS。
+  - 设备 Ed25519 注册、短期令牌、签名/nonce 防重放、撤销与密钥轮换；管理员身份与设备身份分离。
+  - 用量预留/结算、额度/并发/速率限制、脱敏审计、错误与数据保留策略。
+  - Willy provider 解析、托管模式配置只读边界、BYOK 本地直连隔离，以及方案助理和 pipeline 子进程的一致配置来源。
+  - fake upstream、隔离密钥、认证/额度/脱敏和真实 tool-calling smoke 的网关发布门禁；公网部署必须有 TLS、秘密管理、备份、告警和撤销演练。
+- **管辖文档**:
+  - `docs/gateway.md` — 网关协议、威胁模型、阶段计划和验收门禁。
+  - `docs/environment_registry_design.md` — 仅在 LLM provider 环境解析边界交叉时协同维护，不能绕过环境注册唯一来源。
+  - `docs/status_api.md` — 仅在托管模式公开状态、用量和 provenance 字段交叉时协同维护。
+- **接口边界**:
+  - 0 号负责产品承诺、跨层裁决和发布批准；7 号负责网关技术事实，不把未验收托管服务写入 README 主路径。
+  - 4 号负责前端布局与交互，7 号提供脱敏 provider/status API；前端不能直接读取令牌或修改托管策略。
+  - 6 号负责测试台账与质量门禁，7 号负责网关契约和 fake upstream 测试实现；真实外部凭据只在显式 opt-in smoke 使用。
+- **交付原则**: 先固化协议、密钥生命周期、数据保留、错误码和双模式 schema，再实现核心转发、设备/额度和客户端接入；任何阶段不得退化为任意代理、共享万能 Key 或远程工作流控制面。
+
 ---
 
 ## 共识原则
 
-> 以下原则由 0 号总工程师维护，1-6 号领域工程师共同遵守。新增代码必须遵守；若现实代码暂未满足，应在 `project_gap_analysis.md` 或 `revision_strategy.md` 中记录差距和修复优先级。
+> 以下原则由 0 号总工程师维护，1-7 号领域工程师共同遵守。新增代码必须遵守；若现实代码暂未满足，应在 `project_gap_analysis.md` 或 `revision_strategy.md` 中记录差距和修复优先级。
 
 ### 数据与返回值
 
@@ -171,7 +192,7 @@
 ### 依赖与环境
 
 9. **环境注册唯一来源** — `env_registry.py` 统一声明并解析外部工具及子进程环境；`env_checker.py` 仅保留 `check_module()` 等兼容预检入口。maker 不得自行重复 `which` / `PATH` 或环境变量解析。
-10. **下游不感知上游后端** — `.mol2` + `.chg` 是量子层与拓扑层之间的唯一接口，拓扑层不感知 g16 还是 ORCA；`.itp` + `.gro` + `topol.top` 是拓扑层与模拟层之间的唯一接口
+10. **下游不感知上游后端** — `.mol2` + `.chg` 是量子层与拓扑层之间的唯一接口，拓扑层不感知 g16、g09 还是 ORCA；`.itp` + `.gro` + `topol.top` 是拓扑层与模拟层之间的唯一接口
 
 ### 错误与诊断
 

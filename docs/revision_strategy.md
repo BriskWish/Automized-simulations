@@ -15,7 +15,7 @@
 
 当前最大的结构性问题不是单点 bug，而是三类边界不够稳定：
 
-1. **产品承诺边界**：主编排器已执行 EM/NPT EQ/PROD；真实外部组合验收仍在执行，文档不得将其误述为目标体系科学收敛。
+1. **产品承诺边界**：主编排器及四条已承诺 profile 已完成 EM/NPT EQ/PROD 十步真实执行；文档只承诺最终无错误和产物契约通过，不延伸为科学体系预测。
 2. **模块职责边界**：部分执行层、toolist、orchestrator、运行注册与环境注册之间的命名和契约仍需以唯一事实来源收敛。
 3. **运行安全边界**：前端、参数化子进程、进程控制、API key、运行产物管理还没有形成完整发布约束。
 
@@ -25,7 +25,7 @@
 
 ## 二、责任归属
 
-本计划由 **0 号总工程师 Codex** 维护。0 号负责判断修订优先级、裁决跨层边界、定义验收门槛，并协调 1-5 号领域工程师的改动合流。
+本计划由 **0 号总工程师 Codex** 维护。0 号负责判断修订优先级、裁决跨层边界、定义验收门槛，并协调 1-7 号领域工程师的改动合流。
 
 职责关系：
 
@@ -37,6 +37,8 @@
 | 3 号模拟层工程师 | `simulation/` 执行层、MDP/Packmol/GROMACS 主流程 |
 | 4 号前端交互工程师 | `app.py`、`frontend_api.py`、进度展示、用户交互 |
 | 5 号文档架构师 | 命名规范、设计文档、知识库、索引和文档台账 |
+| 6 号测试工程师 | 测试策略、回归基线、外部 smoke 与发布质量门禁 |
+| 7 号 LLM 网关工程师 | 独立托管网关、provider 边界、设备认证、额度审计与部署安全 |
 
 当两个领域对同一边界有不同判断时，以 0 号总工程师在本文档和 `docs/employees.md` 中定义的边界为准；若边界需要调整，必须先更新文档，再改代码。当前架构已经引入 `env_registry.py`（环境事实来源）、`run_registry.py`（公开运行事实来源）和 `pipeline_launch.py`（启动锁与 run 绑定）；它们的接口分别以 `environment_registry_design.md`、`status_api.md` 和 `run_assistant_design.md` 为准。
 
@@ -108,9 +110,9 @@ python3 -m tests.llm_eval.run_eval
 - 已验证 `toolist_*.py` 中不再出现重复的 `_step_to_dict`。
 - 新增配置字段必须同时出现在 schema、defaults、文档和测试中。
 
-### Phase 2：端到端 MD 闭环（主链路与小体系 smoke 已完成；目标体系验收待执行）
+### Phase 2：端到端 MD 闭环（本版本已完成）
 
-目标：让主流程真正完成从结构输入到 GROMACS 生产运行。
+目标：让主流程真正完成从结构输入到 GROMACS 生产运行。本版本不纳入科学体系预测、后处理/分析或远程执行。
 
 范围：
 
@@ -123,7 +125,7 @@ python3 -m tests.llm_eval.run_eval
 - `PipelineOrchestrator._build_steps()` 已接入 `simulation.em.run_em()`、`simulation.eq.run_eq()` 和 `simulation.prod.run_prod()`。
 - 当前 run workspace 已在步骤 1-7 原位生成并消费 `topol.top`、`.itp`、`.mdp` 和 `model.pdb`，不再额外复制到旧式 setup 目录。
 - 三个阶段在执行前校验输入，在成功时强制登记 `.tpr/.gro/.xtc/.edr`；可选 `.trr` 由模拟前配置控制。
-- EM 收敛失败和 EQ 宏观真空区会有限次回滚至 Packmol 建盒；EQ 通过前不得进入 PROD。
+- EM 收敛失败可有限次回滚至 Packmol 建盒；EQ 通过前不得进入 PROD。EQ 的真空区与密度证据保留给诊断，但不自动触发回滚。
 
 建议最终主流程：
 
@@ -160,14 +162,14 @@ python3 -m tests.llm_eval.run_eval
 
 已完成：
 
-- `action_contract.py` 从五个 toolist 的 JSON Schema 与 `TOOL_META` 构建唯一的 46 项工具目录，声明 `read_only`、`retry_safe`、`requires_confirmation`、`requires_fork`、`destructive` 等效果等级。
+- `action_contract.py` 从五个 toolist 的 JSON Schema 与 `TOOL_META` 构建唯一的 50 项工具目录，声明 `read_only`、`retry_safe`、`requires_confirmation`、`requires_fork`、`destructive` 等效果等级；Config Agent 的 `tools_inspect_quantum_inputs` 与模拟层的 `tools_lookup_mdrun_knowledge` 均为只读、低风险工具。
 - `recovery_policy.py` 按 layer、错误类型、步骤和工具效果裁决重试上限、确认要求与 fork 限制；模型不能通过参数提升权限。
 - `LayerAgent` 对 JSON、tool 和 LLM 异常均写入受限的结构化决策；`llm_budget.py` 对单个 run 限制调用次数、累计时长、单次超时和连续失败熔断。
 - 确定性回归与 18 个离线 mock LLM 场景覆盖跨层工具隔离、恢复身份、升级和确认边界。
 
 仍需完成：
 
-- 在真实远程 LLM 服务上验证模型兼容性、超时和失败降级；该验证必须显式 opt-in，不能由默认回归代替。
+- 在真实远程 LLM 服务上验证模型兼容性、超时和失败降级；该验证属于产品增强，必须显式 opt-in，不能由默认回归代替。
 - 随实际修复策略扩展，持续将高影响动作收敛到可审计的确认或派生 run 流程。
 
 验收标准：
@@ -225,7 +227,7 @@ python3 -m tests.llm_eval.run_eval
 
 仍需完成：
 
-- 将示例数据与真实运行产物进一步分离，并为 vendor 二进制补齐来源、版本、license 和校验方式。
+- 已建立 `vendor/manifest.json` 与只读 SHA-256 校验；继续将示例数据与真实运行产物分离，并为尚未 `release_ready` 的 vendor 二进制补齐来源、版本、license 和校验方式。
 - 增加独立的文档链接检查与目标环境 external smoke 成功证据；CI 配置存在不等于真实外部链路已验收。
 
 验收标准：
@@ -293,8 +295,9 @@ python3 -m tests.llm_eval.run_eval
 允许：
 
 - 读取 `docs/knowledge.md`。
-- 扫描 `struct/*.gjf` 作为可用分子列表。
+- 扫描 `struct/*.gjf` 与 `struct/*.inp` 作为可用分子列表；方案生成时必须按所选后端以受限解析器审计原始输入，而不是以 registry 默认电荷代替文件头。
 - 写入 `config.json`，但必须通过 `workflow_config.apply_config()` 或统一配置 API。
+- 在 `awaiting_confirmation` 期间接收方案问题和增量修改：将经过指纹校验的冻结配置、摘要及最近对话绑定到 LLM 请求；问题只读回答，修改只生成新的待确认方案，且服务端重新执行量子输入审计。只有明确声明新项目/新体系/重新提交时才使旧方案失效。
 
 禁止：
 
@@ -763,7 +766,7 @@ StepResult(
 - `docs/README.md`
 - `docs/document_registry.md`
 - `docs/naming_convention.md`
-- `docs/reconstruction.md`
+- `docs/revision_strategy.md` 的“重构同步检查清单”
 - `README.md`
 
 ---
@@ -831,7 +834,7 @@ StepResult(
 1. 建立 step registry。
 2. 以真实小体系验收 EM/NPT/PROD 和 PATH 中的 GROMACS 版本。
 3. 固化外部 smoke 与 EQ/PROD 真实验收证据。
-4. 验证 EQ 真空区回滚与 PROD 参数确认。
+4. 验证 EQ 温度/势能验收、非阻塞真空区观测与 PROD 参数确认。
 
 ### 第三批：安全和运行治理
 
@@ -857,16 +860,24 @@ StepResult(
 
 相关文档职责：
 
-- `project_evaluation.md`：当前状态评估。
 - `project_gap_analysis.md`：已知缺口和修复优先级。
 - `naming_convention.md`：命名规范。
-- `reconstruction.md`：重构时的具体检查清单。
 - `quantum_design.md`：量子层设计细节。
 - `topology_design.md`：拓扑层设计细节。
-- `simulation_design.md`：模拟协议、阶段许可和恢复契约。
-- `postprocessing_design.md`：PROD 后独立分析契约。
+- `simulation_design.md`：模拟协议、阶段许可、恢复契约和 PROD 后处理契约。
 - `environment_registry_design.md`：外部软件发现、预检与子进程环境。
 - `status_api.md`：状态文件和前端轮询接口。
 - `run_assistant_design.md`：运行审计、只读查询和后续控制计划。
 
 各领域设计文档是可执行契约的细节来源；本文只维护跨层边界、优先级和完成定义。
+
+## 十一、重构同步检查清单
+
+重构 `quantum/`、`topology/`、`simulation/` 或运行管理模块时，必须沿以下顺序核对：
+
+1. maker、handler、orchestrator 的函数签名、步骤身份和产物命名是否一致。
+2. `STEP_REGISTRY`、`EXECUTION_MODULE_REGISTRY`、`ErrorKind`、`ActionToolCatalog` 和恢复策略是否同步。
+3. 配置 schema、默认值、迁移、run-local manifest/provenance、状态事件和公开 API 是否同步。
+4. 外部依赖是否只经 `env_registry` 注册，子进程生命周期、超时、信号升级和脱敏审计是否保持。
+5. Agent prompt、tool schema、测试、`docs/README.md`、本台账及全仓旧名引用是否已更新。
+6. 完成最小回归、台账生成和 `git diff --check`；新增 bug 必须转为可重复的回归测试。

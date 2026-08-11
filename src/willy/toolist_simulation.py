@@ -1,7 +1,7 @@
 """
 toolist_simulation.py
 =====================
-Layer 3 — Simulation Agent 的 13 个工具定义与处理函数。
+Layer 3 — Simulation Agent 的 14 个工具定义与处理函数。
 
 工具:
   tools_retry_mdp, tools_retry_box, tools_retry_em, tools_retry_eq,
@@ -9,7 +9,8 @@ Layer 3 — Simulation Agent 的 13 个工具定义与处理函数。
   tools_run_prod_simulation,
   tools_configure_outputs_simulation,
   tools_configure_prod_simulation, tools_diagnose_error_simulation,
-  tools_modify_config_simulation, tools_migrate_md_config_simulation
+  tools_modify_config_simulation, tools_migrate_md_config_simulation,
+  tools_lookup_mdrun_knowledge
 """
 
 from __future__ import annotations
@@ -24,6 +25,36 @@ from willy.log_parsers import parse_gromacs_log
 from willy.step_registry import EM_STEP, EQ_STEP, MDP_STEP, PACKMOL_STEP, PROD_STEP, STEP_REGISTRY
 
 ROOT = get_project_root()
+
+
+MDRUN_KNOWLEDGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "tools_lookup_mdrun_knowledge",
+        "description": "只读检索 GROMACS mdrun 知识条目。必须同时提供条目 number 和完整 name；单次最多 3 条。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entries": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "number": {"type": "integer", "description": "知识库条目数字编号"},
+                            "name": {"type": "string", "description": "与索引完全对应的条目名称"},
+                        },
+                        "required": ["number", "name"],
+                        "additionalProperties": False,
+                    },
+                    "description": "只从提示词提供的 number + name 索引中选择，最多 3 条",
+                },
+            },
+            "required": ["entries"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def _gromacs_run_tool(stage: str, description: str) -> dict:
@@ -130,7 +161,7 @@ SIMULATION_TOOLS = [
     ),
     _gromacs_run_tool(
         "eq",
-        "执行 GROMACS 三点式退火平衡。运行前校验 topol.top、.itp、eq.mdp、em.gro；仅在最终保持段统计和真空区验收通过时成功。",
+        "执行 GROMACS 三点式退火平衡。运行前校验 topol.top、.itp、eq.mdp、em.gro；仅在最终保持段温度均值和势能线性斜率验收通过时成功。",
     ),
     _gromacs_run_tool(
         "prod",
@@ -146,7 +177,7 @@ SIMULATION_TOOLS = [
                 "properties": {
                     "target_mass_density_g_cm3": {
                         "type": "number",
-                        "description": "初始目标质量密度 (g/cm3)，默认 1.5；仅用于初始建盒，不替代 EQ 验收",
+                        "description": "初始目标质量密度 (g/cm3)，默认 0.7；仅用于初始建盒，不替代 EQ 验收",
                     },
                     "packing_number_density_nm3": {
                         "type": "number",
@@ -339,6 +370,7 @@ SIMULATION_TOOLS = [
             },
         },
     },
+    MDRUN_KNOWLEDGE_TOOL,
 ]
 
 # ============================================================
@@ -359,6 +391,7 @@ TOOL_META = {
     "tools_diagnose_error_simulation":    {"category": "diagnostic", "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_modify_config_simulation":     {"category": "config",     "mutating": True,  "risk": "medium", "requires_confirmation": True, "effect": "requires_confirmation"},
     "tools_migrate_md_config_simulation": {"category": "config",     "mutating": True,  "risk": "medium", "requires_confirmation": True, "effect": "requires_confirmation"},
+    "tools_lookup_mdrun_knowledge":       {"category": "diagnostic", "mutating": False, "risk": "low", "effect": "read_only"},
 }
 
 
@@ -526,8 +559,10 @@ def _rebuild_affected_mdps(
         config_path=str(config_path), output_dir=str(execution_dir), stages=stages,
     )
     invalidated: list[str] = []
-    if getattr(result, "success", False) and (execution_dir / "md_manifest.json").is_file():
-        from willy.simulation.manifest import invalidate_stages_from
+    if getattr(result, "success", False):
+        from willy.simulation.manifest import invalidate_stages_from, manifest_exists
+        if not manifest_exists(execution_dir):
+            return result, stages, invalidated
         invalidated = invalidate_stages_from(
             execution_dir,
             earliest,
@@ -678,6 +713,11 @@ def handle_simulation_tool_call(
     active_config = Path(config_path) if config_path else ROOT / "config.json"
     isolated_context = work_dir is not None or config_path is not None
 
+    if tool_name == "tools_lookup_mdrun_knowledge":
+        from willy.simulation.mdrun_knowledge import lookup_mdrun_knowledge
+        entries = args.get("entries") if isinstance(args, dict) else None
+        return _json.dumps(lookup_mdrun_knowledge(entries), ensure_ascii=False)
+
     requested_fields = protocol_change_request(tool_name, args)
     if requested_fields and not protocol_change_authorized:
         return _protocol_confirmation_result(tool_name, requested_fields)
@@ -801,15 +841,32 @@ def handle_simulation_tool_call(
         )
         gen = InpGenerator(config)
         sr = gen.run()
-        if sr.success and workspace is not None and (workspace / "md_manifest.json").is_file():
-            from willy.simulation.manifest import invalidate_stages_from, record_box_attempt
-            record_box_attempt(workspace, sr.extra.get("box_parameters", {}))
-            invalidated = invalidate_stages_from(
-                workspace,
-                "em",
-                reason="Packmol 建盒参数已更新",
+        if workspace is not None:
+            from willy.simulation.manifest import (
+                ManifestError,
+                invalidate_stages_from,
+                manifest_exists,
+                record_box_attempt,
+                record_box_execution,
             )
-            sr.extra["invalidated_stages"] = invalidated
+            if manifest_exists(workspace):
+                try:
+                    evidence = sr.extra.get("box_execution")
+                    if not isinstance(evidence, dict):
+                        raise ManifestError("Packmol 未返回执行证据")
+                    record_box_execution(workspace, evidence)
+                except (OSError, ValueError, ManifestError) as exc:
+                    return _tool_step_error("box", PACKMOL_STEP, f"无法记录建盒执行证据: {exc}")
+        if sr.success and workspace is not None:
+            from willy.simulation.manifest import invalidate_stages_from, manifest_exists, record_box_attempt
+            if manifest_exists(workspace):
+                record_box_attempt(workspace, sr.extra.get("box_parameters", {}))
+                invalidated = invalidate_stages_from(
+                    workspace,
+                    "em",
+                    reason="Packmol 建盒参数已更新",
+                )
+                sr.extra["invalidated_stages"] = invalidated
         return _json.dumps(sr.to_dict(), ensure_ascii=False)
 
     elif tool_name == "tools_retry_em":
@@ -908,8 +965,8 @@ def handle_simulation_tool_call(
             severity = "warning"
 
         box_parameters = None
-        manifest_path = Path(work_dir) / "md_manifest.json"
-        if manifest_path.is_file():
+        from willy.simulation.manifest import manifest_exists
+        if manifest_exists(work_dir):
             try:
                 from willy.simulation.manifest import load_manifest
                 attempts = load_manifest(work_dir).get("box_attempts", [])

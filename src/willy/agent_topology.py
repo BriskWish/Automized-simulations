@@ -18,7 +18,7 @@ TOPOLOGY_AGENT_PROMPT = """你是 Willy Topology Agent。你处理当前运行�
 ## 角色
 - 你接收一个表示失败的 StepResult 和当前的 config.json。
 - 你诊断错误、决定纠正措施并重试该步骤。
-- 当前运行的 topology_manifest.json 是唯一输入/产物清单；不得猜测或拼接路径。
+- 当前运行的拓扑 manifest（统一 run_manifest 的 topology section 或兼容的 topology_manifest.json）是唯一输入/产物清单；不得猜测或拼接路径。
 - Sobtop 仅支持 GAFF+UFF 组合；OPLS-AA 是 LigParGen/BOSS 的独立整套体系。
 - 不支持 AMBER，也不支持 Sobtop 与 OPLS-AA 在同一运行内混用。
 - 拓扑生成最多 4 次重试。

@@ -48,7 +48,7 @@ class TestToolDefinitions:
             assert name.startswith("tools_"), f"{name} 应以 tools_ 开头"
 
     def test_required_tools_present(self, global_tools):
-        """所有 9 个必需工具必须存在。"""
+        """所有必需的 Config Agent 工具必须存在。"""
         names = {t["function"]["name"] for t in global_tools}
         required = {
             "tools_lookup_molecule",
@@ -60,6 +60,7 @@ class TestToolDefinitions:
             "tools_diagnose_error_config",
             "tools_validate_config",
             "tools_set_backend_quantum",
+            "tools_inspect_quantum_inputs",
         }
         missing = required - names
         assert not missing, f"缺少工具定义: {missing}"
@@ -76,7 +77,7 @@ class TestToolsValidateConfig:
         from willy.toolist_global import handle_tool_call
         args = {"config_json": json.dumps({
             "residues": {"LiTFSI": 10},
-            "molecules": {"LiTFSI": {"charge": 0}},
+            "molecules": {"LiTFSI": {"charge": 0, "spin": 1}},
             "md": {},
         })}
         result = json.loads(handle_tool_call("tools_validate_config", args))
@@ -130,6 +131,22 @@ class TestMoleculeRegistry:
         result = registry.lookup("双三氟甲磺酰亚胺")
         assert result is not None
         assert result["name"] == "TFSI"
+
+    @pytest.mark.parametrize(("alias", "name", "charge", "spin", "atom_count"), [
+        ("钠离子", "Na", 1, 1, 1),
+        ("六氟砷酸根", "AsF6", -1, 1, 7),
+        ("B(CN)4-", "BCN4", -1, 1, 9),
+        ("FTFSI-", "FTFSI", -1, 2, 13),
+        ("四乙二醇二甲醚", "T4GM", 0, 1, 37),
+    ])
+    def test_imported_species_aliases_are_indexed(self, registry, alias, name, charge, spin, atom_count):
+        """导入物种的中英文/带电别名必须进入表格与 TF-IDF 索引。"""
+        result = registry.lookup(alias)
+
+        assert result is not None
+        assert (result["name"], result["charge"], result["spin"], result["atom_count"]) == (
+            name, charge, spin, atom_count,
+        )
 
 
 # ============================================================
@@ -196,14 +213,24 @@ class TestHandleToolCall:
         parsed = json.loads(result)
         assert parsed.get("ok") is True or "refreshed" in str(parsed).lower()
 
+    def test_refresh_structs_is_idempotent(self):
+        """重复刷新不得复制表格条目或向量文档。"""
+        import willy.toolist_global as tg
+
+        first = json.loads(tg.handle_tool_call("tools_refresh_structs", {}))
+        second = json.loads(tg.handle_tool_call("tools_refresh_structs", {}))
+
+        assert second["count"] == first["count"]
+        assert len(second["molecules"]) == len(set(second["molecules"]))
+
     def test_get_box_density_known_system(self):
         """tools_get_box_density returns the mass-density default contract."""
         from willy.toolist_global import handle_tool_call
         result = handle_tool_call("tools_get_box_density", {"system_type": "electrolyte"})
         parsed = json.loads(result)
-        assert parsed["target_mass_density_g_cm3"] == 1.5
+        assert parsed["target_mass_density_g_cm3"] == 0.7
         assert parsed["unit"] == "g/cm3"
-        assert "初始体积将由使用默认1.5g/cm3的密度猜测" == parsed["note"]
+        assert "初始体积将由使用默认0.7g/cm3的密度猜测" == parsed["note"]
 
     def test_lookup_md_defaults_for_electrolyte(self):
         """tools_lookup_md_defaults 对 electrolyte 返回合理默认值。"""
@@ -212,6 +239,15 @@ class TestHandleToolCall:
         parsed = json.loads(result)
         # 应包含 MD 参数建议
         assert isinstance(parsed, dict)
+
+    @pytest.mark.parametrize("system_type", ["ionic_liquid", "solvent_mix", "aqueous", "organic"])
+    def test_all_md_default_presets_use_one_fs(self, system_type):
+        """所有 Agent 体系预设统一使用 1 fs，避免新任务回退到 2 fs。"""
+        from willy.toolist_global import handle_tool_call
+        result = json.loads(handle_tool_call(
+            "tools_lookup_md_defaults", {"system_type": system_type},
+        ))
+        assert result["dt"] == 0.001
 
     def test_set_backend_quantum(self, tmp_project_root, monkeypatch):
         """tools_set_backend_quantum 应更新 config.json。"""
@@ -222,6 +258,17 @@ class TestHandleToolCall:
         result = tg.handle_tool_call("tools_set_backend_quantum", {"backend": "orca"})
         parsed = json.loads(result)
         assert parsed.get("backend") == "orca" or parsed.get("ok") is True
+
+    def test_set_g09_backend_quantum(self, tmp_project_root, monkeypatch):
+        import willy.toolist_global as tg
+        import willy._paths
+        monkeypatch.setattr(willy._paths, "get_project_root", lambda: tmp_project_root)
+
+        result = tg.handle_tool_call("tools_set_backend_quantum", {"backend": "g09"})
+        parsed = json.loads(result)
+
+        assert parsed["ok"] is True
+        assert parsed["backend"] == "g09"
 
     def test_lookup_basis_set_returns_recommendation(self):
         """tools_lookup_basis_set 应返回基组推荐。"""

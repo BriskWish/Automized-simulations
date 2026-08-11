@@ -1,7 +1,7 @@
-"""Resolve external runtime tools without exposing machine-local details.
+"""Resolve registered runtime tools without exposing machine-local details.
 
-This module owns external executable discovery and the environment passed to
-their subprocesses.  It is deliberately separate from ``toolist_*.py``:
+This module owns external discovery, bundled-runtime resolution, and the
+environment passed to their subprocesses.  It is deliberately separate from ``toolist_*.py``:
 those modules describe LLM function-calling tools, while this module describes
 software installed in the execution environment.
 """
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Mapping
 import os
 import shutil
+import subprocess
 
 from willy._paths import get_project_root
 
@@ -28,24 +29,37 @@ _DOTENV_KEYS = {
     "WILLY_LLM_API_KEY",
     "WILLY_LLM_BASE_URL",
     "WILLY_LLM_MODEL",
+    "WILLY_LLM_MODE",
     "WILLY_SERVER_PORT",
     "WILLY_G16_BIN",
     "WILLY_FORMCHK_BIN",
+    "WILLY_G09_BIN",
+    "WILLY_G09_FORMCHK_BIN",
     "WILLY_ORCA_BIN",
     "WILLY_ORCA_2MKL_BIN",
     "WILLY_ORCA_HOME",
-    "WILLY_MULTIWFN_BIN",
     "WILLY_GMX_BIN",
     "WILLY_LIGPARGEN_BIN",
+    "WILLY_OBABEL_BIN",
+    "WILLY_CSH_BIN",
     "WILLY_BOSS_HOME",
 }
 
 DEFAULT_BOSS_HOME = Path.home() / "boss" / "boss"
+MULTIWFN_VENDOR_DIR = (
+    get_project_root()
+    / "vendor"
+    / "multiwfn"
+    / "linux-x86_64"
+    / "3.8-dev-2025-02-14"
+)
+DEFAULT_MULTIWFN_BIN = MULTIWFN_VENDOR_DIR / "Multiwfn"
+MULTIWFN_VENDOR_VERSION = "3.8(dev)-2025-02-14"
 
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Static contract for one non-bundled executable or installation."""
+    """Static contract for one registered executable or installation."""
 
     tool_id: str
     label: str
@@ -57,7 +71,7 @@ class ToolSpec:
 
 @dataclass(frozen=True)
 class ResolvedTool:
-    """A resolved external tool. ``as_public_dict`` never exposes paths."""
+    """A resolved registered tool. ``as_public_dict`` never exposes paths."""
 
     tool_id: str
     label: str
@@ -90,6 +104,10 @@ class EnvironmentRegistryError(RuntimeError):
 TOOL_SPECS: dict[str, ToolSpec] = {
     "g16": ToolSpec("g16", "Gaussian 16", "g16", "WILLY_G16_BIN"),
     "formchk": ToolSpec("formchk", "Gaussian formchk", "formchk", "WILLY_FORMCHK_BIN"),
+    "g09": ToolSpec("g09", "Gaussian 09", "g09", "WILLY_G09_BIN"),
+    "g09_formchk": ToolSpec(
+        "g09_formchk", "Gaussian 09 formchk", "formchk", "WILLY_G09_FORMCHK_BIN",
+    ),
     "orca": ToolSpec(
         "orca", "ORCA", "orca", "WILLY_ORCA_BIN", "WILLY_ORCA_HOME", ("ORCA_DIR",),
     ),
@@ -97,11 +115,11 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         "orca_2mkl", "ORCA orca_2mkl", "orca_2mkl", "WILLY_ORCA_2MKL_BIN",
         "WILLY_ORCA_HOME", ("ORCA_DIR",),
     ),
-    "multiwfn": ToolSpec(
-        "multiwfn", "Multiwfn", "Multiwfn", "WILLY_MULTIWFN_BIN", "", ("MULTIWFN_BIN",),
-    ),
+    "multiwfn": ToolSpec("multiwfn", "Multiwfn", "Multiwfn"),
     "gmx": ToolSpec("gmx", "GROMACS", "gmx", "WILLY_GMX_BIN"),
     "ligpargen": ToolSpec("ligpargen", "LigParGen", "LigParGen", "WILLY_LIGPARGEN_BIN"),
+    "obabel": ToolSpec("obabel", "Open Babel", "obabel", "WILLY_OBABEL_BIN"),
+    "csh": ToolSpec("csh", "C shell", "csh", "WILLY_CSH_BIN"),
     "boss": ToolSpec("boss", "BOSS", "BOSS", "", "WILLY_BOSS_HOME", ("BOSSdir",)),
 }
 
@@ -253,6 +271,29 @@ def _resolve_binary(spec: ToolSpec, project_root: str | Path | None) -> Resolved
     return ResolvedTool(spec.tool_id, spec.label, MISSING, source="path", public_reason="未在 PATH 中找到可执行文件")
 
 
+def _resolve_multiwfn(project_root: str | Path | None) -> ResolvedTool:
+    """Resolve only Willy's bundled Multiwfn runtime."""
+    spec = TOOL_SPECS["multiwfn"]
+    root = _project_root(project_root)
+    bundled = root / "vendor" / "multiwfn" / "linux-x86_64" / "3.8-dev-2025-02-14" / "Multiwfn"
+    result = _binary_result(spec, str(bundled), "bundled", strict=False)
+    if result.available:
+        return ResolvedTool(
+            **{
+                **result.__dict__,
+                "home": bundled.parent.resolve(),
+                "version": MULTIWFN_VENDOR_VERSION,
+            },
+        )
+    return ResolvedTool(
+        spec.tool_id,
+        spec.label,
+        MISSING,
+        source="bundled",
+        public_reason="项目内置 Multiwfn 负载缺失",
+    )
+
+
 def _resolve_boss(project_root: str | Path | None) -> ResolvedTool:
     spec = TOOL_SPECS["boss"]
     value, source = _configured_value(spec.home_env, project_root)
@@ -266,21 +307,61 @@ def _resolve_boss(project_root: str | Path | None) -> ResolvedTool:
     return ResolvedTool(spec.tool_id, spec.label, MISSING, source="default", public_reason="未配置 BOSS 安装目录")
 
 
+def _verify_boss_runtime(result: ResolvedTool) -> ResolvedTool:
+    """Check that BOSS can be loaded without starting a scientific run."""
+    if not result.available or result.executable is None:
+        return result
+    try:
+        probe = subprocess.run(
+            [str(result.executable)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        if probe.returncode < 0:
+            return ResolvedTool(
+                result.tool_id,
+                result.label,
+                RUNTIME_UNAVAILABLE,
+                executable=result.executable,
+                home=result.home,
+                source=result.source,
+                public_reason=(
+                    "BOSS 启动时被系统信号终止（可能缺少兼容的 32 位运行时或被执行策略拦截）"
+                ),
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return ResolvedTool(
+            result.tool_id,
+            result.label,
+            RUNTIME_UNAVAILABLE,
+            executable=result.executable,
+            home=result.home,
+            source=result.source,
+            public_reason="BOSS 二进制无法在当前系统启动，请安装兼容的运行时（含 32 位支持，如适用）",
+        )
+    return result
+
+
 def resolve_tool(tool_id: str, project_root: str | Path | None = None) -> ResolvedTool:
-    """Resolve one supported external tool without changing global process state."""
+    """Resolve one registered tool without changing global process state."""
     try:
         spec = TOOL_SPECS[tool_id]
     except KeyError as exc:
-        raise KeyError(f"未知外部工具: {tool_id}") from exc
+        raise KeyError(f"未知运行工具: {tool_id}") from exc
     if tool_id == "boss":
-        return _resolve_boss(project_root)
+        return _verify_boss_runtime(_resolve_boss(project_root))
+    if tool_id == "multiwfn":
+        return _resolve_multiwfn(project_root)
     if tool_id in {"orca", "orca_2mkl"}:
         return _resolve_orca_helper(spec, project_root)
     return _resolve_binary(spec, project_root)
 
 
 def resolve_all(project_root: str | Path | None = None) -> dict[str, ResolvedTool]:
-    """Discover all non-bundled tools. Discovery never raises for missing tools."""
+    """Discover all registered tools. Discovery never raises for missing tools."""
     return {tool_id: resolve_tool(tool_id, project_root=project_root) for tool_id in TOOL_SPECS}
 
 
@@ -299,11 +380,11 @@ def build_tool_env(
     base_env: Mapping[str, str] | None = None,
     project_root: str | Path | None = None,
 ) -> dict[str, str]:
-    """Return an isolated child environment for one resolved external tool."""
+    """Return an isolated child environment for one resolved runtime tool."""
     result = require_tool(tool_id, project_root=project_root)
     env = dict(os.environ if base_env is None else base_env)
 
-    if tool_id in {"g16", "formchk"}:
+    if tool_id in {"g16", "formchk", "g09", "g09_formchk"}:
         env["GAUSS_CDEF"] = "0"
         env["OMP_NUM_THREADS"] = "1"
     if tool_id in {"orca", "orca_2mkl"}:

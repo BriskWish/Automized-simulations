@@ -76,6 +76,14 @@ def test_managed_command_honors_stop_request_and_records_audit(tmp_path):
     assert payload["reason"] == "stop_requested"
     assert payload["signals"] == ["SIGINT"]
     assert payload["command"] == [Path(sys.executable).name, "-c"]
+    structured = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "structured.jsonl").read_text().splitlines()
+    ]
+    assert [row["event_code"] for row in structured] == [
+        "process_started", "process_finished",
+    ]
+    assert structured[-1]["outcome"] == "failed"
 
 
 def test_managed_command_timeout_terminates_and_records_audit(tmp_path):
@@ -93,3 +101,30 @@ def test_managed_command_timeout_terminates_and_records_audit(tmp_path):
     assert payload["reason"] == "timeout"
     assert payload["signals"] == ["SIGINT"]
     assert payload["returncode"] != 0
+    structured = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "structured.jsonl").read_text().splitlines()
+    ]
+    assert structured[-1]["event_code"] == "process_finished"
+    assert structured[-1]["outcome"] == "timed_out"
+
+
+def test_managed_command_emits_low_frequency_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr("willy.process_lifecycle.STRUCTURED_HEARTBEAT_INTERVAL_S", 0.0)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_managed_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            run_dir=tmp_path,
+            timeout=0.03,
+            interrupt_grace_s=0.01,
+            terminate_grace_s=0.01,
+            poll_interval_s=0.01,
+        )
+
+    structured = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "structured.jsonl").read_text().splitlines()
+    ]
+    assert structured[0]["event_code"] == "process_started"
+    assert any(row["event_code"] == "process_heartbeat" for row in structured)
+    assert structured[-1]["event_code"] == "process_finished"

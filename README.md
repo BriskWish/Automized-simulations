@@ -2,7 +2,11 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证；四种量子/拓扑组合的真实端到端验收仍待在目标验收机执行。
+> **版本 0.2.0**：新增受控托管 LLM 网关服务器及 Willy 客户端 `managed/byok` provider，支持设备注册、短期令牌、模型白名单、额度和撤销审计。当前定位为本机/受控局域网试运行；OIDC、多实例、生产数据库、备份告警和公网部署仍未声明可用。
+
+> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证；2026-08-11 的四条真实 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，使用 7 ns EQ、2 ns PROD，且根目录配置在批次结束后恢复。
+
+本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测、后处理/分析和 SSH/Slurm 远程执行不属于本版本公开能力。
 
 ```
 用户: "Li 80, TFSI 80, FEC 300, 350K, 20ns"
@@ -25,13 +29,13 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
                      │
 ┌────────────────────▼─────────────────────────────┐
 │       Config Agent (agent_config.py)               │
-│  OpenAI-compatible 服务 + toolist_global.py（10 tools）│
+│  OpenAI-compatible 服务 + toolist_global.py（11 tools）│
 │     NL → config.json (molecules/residues/md)      │
 └────────────────────┬─────────────────────────────┘
                      │
 ┌────────────────────▼─────────────────────────────┐
 │              run_pipeline.py (10 步)              │
-│  1. 量子结构优化 (g16/ORCA)                        │
+│  1. 量子结构优化 (g16/ORCA；G09 未可靠全链路验证)     │
 │  2. 格式转换 (.fchk/.molden → .mol2)               │
 │  3. RESP 电荷计算                                  │
 │  4. 拓扑生成 (Sobtop: .mol2+.chg → .itp+.gro)      │
@@ -51,15 +55,19 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 | 依赖 | 用途 | 获取方式 |
 |------|------|------|
 | Python ≥3.10 | 运行环境 | `apt install python3` |
-| Gaussian16 | 量子化学计算（默认后端） | 需 license |
+| Gaussian16 / Gaussian09 | 量子化学计算（默认后端为 G16） | 需 license |
 | ORCA 6.x | 量子化学计算（可选后端） | [orcaforum.kofo.mpg.de](https://orcaforum.kofo.mpg.de/) |
-| formchk | Gaussian checkpoint 转换 | 随 Gaussian 安装 |
-| Multiwfn | RESP 电荷拟合 | [sobereva.com/multiwfn](http://sobereva.com/multiwfn/) |
+| formchk | Gaussian checkpoint 转换 | 分别配置对应版本的 formchk |
+| Multiwfn（内置） | RESP 电荷拟合 | 随仓库提供 Linux x86_64 负载 |
 | GROMACS | MD 模拟引擎 | `apt install gromacs` |
 | Packmol | 初始盒子构建 | [github.com/mcubeg/packmol](https://github.com/mcubeg/packmol) |
 | Sobtop | 拓扑生成 (GAFF 力场) | [sobereva.com/soft/sobtop](http://sobereva.com/soft/sobtop/) |
+| Open Babel 3（仅 OPLS-AA） | LigParGen 的 SMILES/MOL2 转换 | `apt install openbabel` |
+| C shell（仅 OPLS-AA） | BOSS 运行脚本 | `apt install csh` |
 
-> 项目 `vendor/` 目录已内置 Packmol、OpenBabel、Sobtop，无需额外下载。
+> 项目 `vendor/` 目录已内置 Packmol、Sobtop、Multiwfn 与精简 Open Babel 运行时。Multiwfn 不需要外部安装或 PATH 配置；OPLS-AA 的 LigParGen/BOSS 链路仍需要另行安装含格式插件和数据文件的完整 Open Babel，以及 C shell。
+
+> OPLS-AA 仅能作为与 Sobtop/GAFF 隔离的显式参数化路径。中性有机小分子的 LigParGen/BOSS 参数化、ITP 命名空间、GRO 五列残基字段、Packmol 以及 GROMACS EM/EQ/PROD 已有真实证据；对于单一 Ewald 净电荷 warning，只有总电荷绝对值不超过 `0.15e` 时才按受控规则放行，其他 warning 或更大不平衡仍拒绝。Li+、NO3-、TFSI- 等离子或不含 H 组分不由当前 LigParGen 路径支持，必须提供可验证的外部 OPLS 参数，且不得与 Sobtop 产物混用。
 
 ### 安装
 
@@ -69,18 +77,19 @@ cd AutomizedSimulations
 pip install -e .
 ```
 
-### 配置 API Key
+### 配置 LLM
 
-启动应用后，也可以在左侧“配置”页签填写 API Key、Base URL 和 Model。该页会列出常见服务商、端点和模型格式提示；“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`。密钥仅在点击保存后写入本机 `.env`，保存后请重启应用。
+启动应用后，在“配置”页选择“自带 API Key”或“托管网关（服务器）”。前者允许填写 API Key、Base URL 和 Model；“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`。后者只读取部署者提供的、未提交到 GitHub 的 `managed_gateway.json`；用户点击“申请接入”时才生成本机设备密钥，由网关按服务端名额记录并等待管理员批准，不会显示或接收上游 Key、Base URL 或邀请码。保存本机 BYOK 配置或切换模式后，应用会刷新 provider，无需重启。
 
 ```bash
 cp .env.example .env
 # 编辑 .env，填入 API Key、Base URL 和 Model
 ```
 
-外部软件可使用 `WILLY_G16_BIN`、`WILLY_ORCA_HOME`、`WILLY_GMX_BIN`、
-`WILLY_LIGPARGEN_BIN`、`WILLY_BOSS_HOME` 等白名单变量覆盖发现结果；详细优先级和
-旧变量兼容规则见 [`docs/environment_registry_design.md`](docs/environment_registry_design.md)。Sobtop、Packmol、OpenBabel 为项目内置工具，无需配置环境变量。
+外部软件可使用 `WILLY_G16_BIN`、`WILLY_G09_BIN`、`WILLY_G09_FORMCHK_BIN`、`WILLY_ORCA_HOME`、`WILLY_GMX_BIN`、
+`WILLY_LIGPARGEN_BIN`、`WILLY_BOSS_HOME`、`WILLY_OBABEL_BIN`、`WILLY_CSH_BIN`
+等白名单变量覆盖发现结果；详细优先级和旧变量兼容规则见
+[`docs/environment_registry_design.md`](docs/environment_registry_design.md)。Sobtop 与 Packmol 为项目内置工具；OPLS-AA 的 Open Babel/C shell/BOSS 必须通过预检。
 
 ### 检查环境
 
@@ -110,6 +119,7 @@ Agent 会给出方案确认；紧随方案回复“运行”“开始运行”�
 ```bash
 # 确保 config.json 已配置好
 python3 run_pipeline.py          # Gaussian16 后端
+python3 run_pipeline.py g09      # Gaussian09 后端
 python3 run_pipeline.py orca     # ORCA 后端
 ```
 
@@ -127,7 +137,6 @@ python3 run_pipeline.py orca     # ORCA 后端
 | EC | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 碳酸乙烯酯 |
 | EMC | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 碳酸甲乙酯 |
 | TTE | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 含氟醚 |
-| DMAA | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 二甲基乙酰胺 |
 
 LLM 支持中文别名映射：输入"锂离子"自动识别为 Li，"硝酸根"→NO3，依此类推。
 
@@ -156,10 +165,10 @@ AutomizedSimulations/
 │   ├── agent_topology.py   ← Layer 2 拓扑修复 Agent
 │   ├── agent_simulation.py ← Layer 3 模拟修复 Agent
 │   ├── agent_run.py        ← 只读运行助理
-│   ├── toolist_global.py   ← Layer 0 工具（10 个）
+│   ├── toolist_global.py   ← Layer 0 工具（11 个）
 │   ├── toolist_quantum.py  ← Layer 1 工具（8 个）
 │   ├── toolist_topology.py ← Layer 2 工具（6 个）
-│   ├── toolist_simulation.py ← Layer 3 工具（13 个）
+│   ├── toolist_simulation.py ← Layer 3 工具（14 个）
 │   ├── toolist_run.py      ← 只读运行工具（9 个）
 │   ├── action_contract.py  ← 工具效果与确认契约
 │   ├── recovery_policy.py  ← 失败恢复白名单与重试上限
@@ -171,10 +180,10 @@ AutomizedSimulations/
 │   ├── run_registry.py / run_store.py / run_provenance.py ← run 审计、事务与溯源
 │   ├── process_lifecycle.py ← 受管外部进程生命周期
 │   ├── frontend_api.py      ← 前端专用后端 API
-│   ├── quantum/            ← 量子化学 (g16/ORCA)
+│   ├── quantum/            ← 量子化学 (g16/g09/ORCA)
 │   ├── topology/           ← 拓扑生成 (Sobtop)
 │   └── simulation/         ← MD 模拟 (GROMACS)
-├── vendor/                 ← 内置依赖 (Packmol, OpenBabel, Sobtop)
+├── vendor/                 ← 内置依赖 (Packmol, Open Babel, Sobtop, Multiwfn)
 ├── struct/                 ← 分子结构文件 (.gjf)
 ├── md_run/<run_id>/         ← 隔离运行产物与审计记录
 ├── docs/                   ← 文档 (详见 docs/README.md 索引)
@@ -182,19 +191,21 @@ AutomizedSimulations/
 │   ├── document_registry.md ← 文档状态与维护规范
 │   ├── Willy.md           ← 架构文档
 │   ├── knowledge.md        ← 分子知识库
+│   ├── knowledge_mdrun.md  ← GROMACS 诊断知识库
 │   ├── ERR_WARN_Build.md   ← Error/Warning 协议
 │   ├── naming_convention.md ← 命名规范
-│   ├── reconstruction.md   ← 重构检查清单
 │   ├── quantum_design.md   ← 量子层设计
 │   ├── topology_design.md  ← 拓扑层设计
 │   ├── status_api.md       ← 前端接口
 │   ├── employees.md        ← 团队分工与共识
 │   ├── simulation_design.md ← 模拟设计
-│   ├── postprocessing_design.md ← 后处理设计
+│   ├── environment_registry_design.md ← 外部环境设计
+│   ├── remote_execution_design.md ← 远程执行设计
+│   ├── gateway.md           ← 托管 LLM 网关设计
+│   ├── revision_strategy.md ← 修订路线与重构清单
 │   ├── testing_strategy.md ← 测试与发布门禁
 │   ├── run_assistant_design.md ← 运行助理计划
-│   ├── project_gap_analysis.md ← 问题台账
-│   └── lithium-salts.md    ← 锂盐体系调研
+│   └── project_gap_analysis.md ← 问题台账
 └── benchmarks/             ← LLM 评分测试
 ```
 

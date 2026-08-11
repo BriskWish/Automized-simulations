@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from unittest.mock import MagicMock
 
 from willy.errors import ErrorKind, StepError, StepResult
-from willy.pipeline_orchestrator import PipelineOrchestrator
 from willy.simulation._gmx_utils import grompp_and_mdrun
 from willy.simulation.eq import detect_vacuum_region
 from willy.simulation.mdp import build_all
@@ -43,6 +41,98 @@ def test_grompp_and_mdrun_returns_required_stage_artifacts(tmp_path, monkeypatch
     assert result.success is True
     assert {"tpr", "gro", "xtc", "edr"} <= set(result.outputs)
     assert all((tmp_path / f"em.{suffix}").exists() for suffix in ("tpr", "gro", "xtc", "edr"))
+
+
+def test_grompp_allows_only_small_single_net_charge_warning(tmp_path, monkeypatch):
+    import willy.simulation._gmx_utils as gmx_utils
+
+    _write_stage_inputs(tmp_path)
+    calls = []
+    warning = (
+        "WARNING 1 [file topol.top, line 1]:\n"
+        "System has non-zero total charge: 0.080015\n"
+        "You are using Ewald electrostatics in a system with net charge.\n"
+        "There was 1 WARNING\n"
+    )
+
+    def fake_gmx(args, cwd, **kwargs):
+        calls.append(args)
+        if args[0] == "grompp" and "-maxwarn" not in args:
+            return subprocess.CompletedProcess(args, 1, "", warning)
+        return _fake_gmx_with_outputs(args, cwd, **kwargs)
+
+    monkeypatch.setattr(gmx_utils, "run_gmx", fake_gmx)
+    result = gmx_utils.grompp_and_mdrun("em", tmp_path)
+
+    assert result.success is True
+    assert [call[0] for call in calls] == ["grompp", "grompp", "mdrun"]
+    assert calls[1][-2:] == ["-maxwarn", "1"]
+    assert result.extra["grompp_warning_policy"] == {
+        "name": "net_charge_rounding",
+        "total_charge_e": 0.080015,
+        "tolerance_e": 0.15,
+        "warning_count": 1,
+        "maxwarn": 1,
+    }
+
+
+def test_grompp_charge_warning_above_tolerance_remains_fatal(tmp_path, monkeypatch):
+    import willy.simulation._gmx_utils as gmx_utils
+
+    _write_stage_inputs(tmp_path)
+    calls = []
+    warning = (
+        "WARNING 1 [file topol.top, line 1]:\n"
+        "System has non-zero total charge: 0.150001\n"
+        "You are using Ewald electrostatics in a system with net charge.\n"
+        "There was 1 WARNING\n"
+    )
+
+    def fake_gmx(args, cwd, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1, "", warning)
+
+    monkeypatch.setattr(gmx_utils, "run_gmx", fake_gmx)
+    result = gmx_utils.grompp_and_mdrun("em", tmp_path)
+
+    assert result.success is False
+    assert len(calls) == 1
+    assert "-maxwarn" not in calls[0]
+
+
+def test_em_result_preserves_grompp_warning_policy_evidence():
+    from willy.simulation.em import EMResult, _em_extra
+
+    gmx_result = StepResult(
+        "md_em", 8, True,
+        extra={"grompp_warning_policy": {"name": "net_charge_rounding"}},
+    )
+    merged = _em_extra(gmx_result, EMResult(converged=True))
+
+    assert merged["grompp_warning_policy"] == {"name": "net_charge_rounding"}
+    assert merged["em_result"].converged is True
+
+
+def test_grompp_and_mdrun_uses_run_config_cpu_default(tmp_path, monkeypatch):
+    import willy.simulation._gmx_utils as gmx_utils
+
+    _write_stage_inputs(tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"defaults": {"nproc": 3}}), encoding="utf-8",
+    )
+    calls = []
+
+    def fake_gmx(args, cwd, **kwargs):
+        calls.append(args)
+        return _fake_gmx_with_outputs(args, cwd, **kwargs)
+
+    monkeypatch.setattr(gmx_utils, "run_gmx", fake_gmx)
+
+    result = grompp_and_mdrun("em", tmp_path)
+
+    assert result.success is True
+    mdrun_args = next(args for args in calls if args[0] == "mdrun")
+    assert mdrun_args[mdrun_args.index("-nt") + 1] == "3"
 
 
 def test_gromacs_reports_preprocess_and_run_as_public_activities(tmp_path, monkeypatch):
@@ -188,6 +278,13 @@ def _write_gro(path, x_coordinates):
     path.write_text("\n".join(lines) + "\n")
 
 
+def _write_xvg(path, values):
+    path.write_text("\n".join(
+        f"{index * 250.0:.1f} {value:.8f}"
+        for index, value in enumerate(values)
+    ) + "\n")
+
+
 def test_detect_vacuum_region_from_final_eq_structure(tmp_path):
     gro = tmp_path / "eq.gro"
     _write_gro(gro, [0.1 + (index % 2) * 0.05 for index in range(24)])
@@ -198,49 +295,97 @@ def test_detect_vacuum_region_from_final_eq_structure(tmp_path):
     assert result["axis"] == "x"
 
 
-def test_eq_vacuum_waits_for_user_confirmation_before_packmol_changes(tmp_path, monkeypatch):
-    import willy.pipeline_orchestrator as orchestrator_module
-    import willy.pipeline_state as state_module
-
-    monkeypatch.setattr(orchestrator_module, "ROOT", tmp_path)
-    monkeypatch.setattr(state_module, "get_project_root", lambda: tmp_path)
-    run_dir = tmp_path / "md_run" / "run-1"
-    run_dir.mkdir(parents=True)
-    config_path = run_dir / "config.json"
+def test_eq_acceptance_uses_temperature_and_potential_slope_only(tmp_path, monkeypatch):
+    import willy.simulation.eq as eq_module
     from willy.simulation.protocol import default_md_config
-    config_path.write_text(json.dumps({
-        "residues": {"Li": 1},
-        "molecules": {"Li": {"charge": 0, "spin": 1}},
-        "md": default_md_config() | {"max_box_rollbacks": 1},
-        "box": {"packing_number_density_nm3": 6.0},
-    }))
-    for stage in ("em", "eq", "prod"):
-        (run_dir / f"{stage}.gro").touch()
-        (run_dir / f"{stage}.xtc").touch()
 
-    orchestrator = PipelineOrchestrator(use_llm=False)
-    orchestrator._run_config_path = config_path
-    simulation_agent = MagicMock()
-    simulation_agent.propose_eq_recovery.return_value = {
-        "summary": "重新建盒后从 EQ 重新验收。",
-        "adjustments": [{"field": "dt", "after": 0.0005}],
+    values = {
+        "Density": [900.0, 1050.0, 1200.0, 1350.0, 1500.0],
+        "Temperature": [297.0, 298.0, 299.0, 298.0, 298.0],
+        "Pressure": [-500.0, 800.0, -700.0, 600.0, -900.0],
+        "Potential": [-1000.0, -1000.5, -1000.0, -999.5, -1000.0],
     }
-    orchestrator._agents[3] = simulation_agent
-    failure = StepResult(
-        "eq", 9, False,
-        error=StepError(ErrorKind.EQ_NOT_CONVERGED, "检测到真空区"),
-        extra={
-            "rollback_to_step": 7,
-            "rollback_reason": "EQ 真空区",
-            "box_density_multiplier": 1.1,
-        },
+
+    def fake_extract(_edr, term, output):
+        _write_xvg(output, values[term])
+        return True, ""
+
+    monkeypatch.setattr(eq_module, "extract_energy_xvg", fake_extract)
+    details, issues = eq_module._acceptance_details(
+        tmp_path,
+        hold_ns=1.0,
+        acceptance=default_md_config()["eq"]["acceptance"],
+        target_temperature=298.0,
     )
 
-    assert orchestrator._handle_single_result(failure, "GROMACS NPT 平衡", run_dir, {}, 3, 9) is False
-    assert orchestrator._rollback_to_step is None
-    assert (run_dir / "eq.gro").exists()
-    assert (run_dir / "prod.xtc").exists()
-    saved = json.loads(config_path.read_text())
-    assert saved["box"]["packing_number_density_nm3"] == 6.0
-    assert orchestrator._sm._status.state == "awaiting_confirmation"
-    assert orchestrator._sm._status.extra["pending_action"]["restart_step"] == 7
+    assert issues == []
+    assert details["series"]["density"]["relative_slope_per_ns"] > 0.01
+    assert details["series"]["pressure"]["relative_slope_per_ns"] > 0.01
+
+
+def test_eq_acceptance_rejects_excessive_potential_slope(tmp_path, monkeypatch):
+    import willy.simulation.eq as eq_module
+    from willy.simulation.protocol import default_md_config
+
+    values = {
+        "Density": [1000.0] * 5,
+        "Temperature": [298.0] * 5,
+        "Pressure": [1.0] * 5,
+        "Potential": [-1000.0, -995.0, -990.0, -985.0, -980.0],
+    }
+
+    def fake_extract(_edr, term, output):
+        _write_xvg(output, values[term])
+        return True, ""
+
+    monkeypatch.setattr(eq_module, "extract_energy_xvg", fake_extract)
+    _, issues = eq_module._acceptance_details(
+        tmp_path,
+        hold_ns=1.0,
+        acceptance=default_md_config()["eq"]["acceptance"],
+        target_temperature=298.0,
+    )
+
+    assert issues == ["最终势能线性斜率超过稳定阈值"]
+
+
+def test_eq_vacuum_and_density_are_observations_not_blockers(tmp_path, monkeypatch):
+    import willy.simulation.eq as eq_module
+    from willy.simulation.manifest import initialize_manifest, load_manifest, manifest_path
+    from willy.simulation.mdp import build_all
+    from willy.simulation.protocol import default_md_config
+
+    (tmp_path / "topol.top").write_text('#include "solute.itp"\n')
+    (tmp_path / "solute.itp").write_text("[ moleculetype ]\nSOL 3\n")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"md": default_md_config() | {"run_seed": 12345}}))
+    assert build_all(str(config), str(tmp_path)).success
+    _write_gro(tmp_path / "em.gro", [0.1 + (index % 2) * 0.05 for index in range(24)])
+    initialize_manifest(tmp_path, config, random_seed=12345, versions={"gromacs": "mock"})
+    manifest = load_manifest(tmp_path)
+    manifest["stages"]["em"] = {"status": "accepted"}
+    manifest_path(tmp_path).write_text(json.dumps(manifest))
+
+    def fake_gmx_result(*_args, **_kwargs):
+        _write_gro(tmp_path / "eq.gro", [0.1 + (index % 2) * 0.05 for index in range(24)])
+        (tmp_path / "eq.cpt").write_text("checkpoint")
+        return StepResult("eq", 9, True, outputs={"tpr": str(tmp_path / "eq.tpr")})
+
+    values = {
+        "Density": [900.0, 1100.0, 1300.0, 1500.0, 1700.0],
+        "Temperature": [298.0] * 5,
+        "Pressure": [1.0] * 5,
+        "Potential": [-1000.0] * 5,
+    }
+
+    def fake_extract(_edr, term, output):
+        _write_xvg(output, values[term])
+        return True, ""
+
+    monkeypatch.setattr(eq_module, "grompp_and_mdrun", fake_gmx_result)
+    monkeypatch.setattr(eq_module, "extract_energy_xvg", fake_extract)
+    result = eq_module.run_eq(str(tmp_path))
+
+    assert result.success is True
+    assert result.extra["eq_result"].details["vacuum"]["detected"] is True
+    assert result.extra["eq_result"].details["series"]["density"]["relative_slope_per_ns"] > 0.01

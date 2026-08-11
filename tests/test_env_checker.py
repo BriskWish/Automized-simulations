@@ -163,7 +163,7 @@ class TestDependenciesDefinition:
             for m in d.needed_by:
                 modules.add(m)
         assert {
-            "struct_g16", "sp_g16", "struct_orca", "sp_orca", "chg_resp",
+            "struct_g16", "sp_g16", "struct_g09", "sp_g09", "struct_orca", "sp_orca", "chg_resp",
             "topo_gaff", "topo_opls", "box",
         } <= modules
 
@@ -175,6 +175,12 @@ class TestDependenciesDefinition:
         )
         assert by_name["packmol"].needed_by == list(
             EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency("packmol")
+        )
+        assert by_name["Open Babel"].needed_by == list(
+            EXECUTION_MODULE_REGISTRY.modules_for_tool("obabel")
+        )
+        assert by_name["C shell"].needed_by == list(
+            EXECUTION_MODULE_REGISTRY.modules_for_tool("csh")
         )
         assert all(
             EXECUTION_MODULE_REGISTRY.has_module(module_id)
@@ -208,7 +214,7 @@ class TestCheckAll:
     def test_check_all_result_statuses_valid(self):
         """每个结果的状态应为有效值。"""
         report = check_all()
-        valid_statuses = {"ok", "missing", "no_exec"}
+        valid_statuses = {"ok", "missing", "no_exec", "misconfigured", "runtime_unavailable"}
         for r in report.results:
             assert r.status in valid_statuses, \
                 f"{r.name}: 无效状态 '{r.status}'"
@@ -235,7 +241,7 @@ class TestCheckModule:
     def test_all_modules_work(self):
         """所有 referenced 模块应可检查且不崩溃。"""
         valid_modules = {
-            "struct_g16", "sp_g16", "struct_orca", "sp_orca", "chg_resp",
+            "struct_g16", "sp_g16", "struct_g09", "sp_g09", "struct_orca", "sp_orca", "chg_resp",
             "topo_gaff", "topo_opls", "box",
         }
         for mod in valid_modules:
@@ -254,7 +260,7 @@ class TestCheckModule:
         monkeypatch.delenv("BOSSdir", raising=False)
         monkeypatch.delenv("WILLY_BOSS_HOME", raising=False)
 
-        resolved = env_registry.resolve_tool("boss")
+        resolved = env_registry.resolve_tool("boss", project_root=tmp_path)
 
         assert resolved.available
         assert resolved.home == default.resolve()
@@ -268,6 +274,19 @@ class TestCheckModule:
 
         assert check_env_ready() == []
         mock_check.assert_called_once_with("struct_g16")
+
+    @patch("willy.env_checker.check_module")
+    def test_g09_gaussian_helper_uses_its_registered_step_name(self, mock_check):
+        mock_check.return_value.failed_strs.return_value = []
+        from willy.quantum.struct_g09 import check_env_ready
+
+        assert check_env_ready() == []
+        mock_check.assert_called_once_with("struct_g09")
+
+    def test_g09_modules_require_only_g09_tools(self):
+        report = check_module("struct_g09")
+
+        assert {item.name for item in report.results} == {"g09", "g09_formchk"}
 
 
 # ============================================================

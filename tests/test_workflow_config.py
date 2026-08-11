@@ -30,6 +30,34 @@ def test_valid_v2_config_passes():
     assert validate_config(_config()) == []
 
 
+@pytest.mark.parametrize("value", (0, -1, 1.5, "8", True, 4097))
+def test_nproc_must_be_a_bounded_positive_integer(value):
+    config = _config()
+    config["defaults"] = {"mem": "5GB", "nproc": value}
+
+    assert any("defaults.nproc" in issue for issue in validate_config(config))
+
+
+def test_molecule_nproc_can_override_global_default():
+    config = _config()
+    config["defaults"] = {"mem": "5GB", "nproc": 8}
+    config["molecules"]["A"]["nproc"] = 2
+
+    assert validate_config(config) == []
+
+
+def test_execution_defaults_to_explicit_local_profileless_mode():
+    result = _apply_defaults({"residues": {"A": 1}, "molecules": {"A": {"charge": 0, "spin": 1}}})
+
+    assert result["execution"] == {
+        "md": {
+            "backend": "local",
+            "profile": None,
+            "retain_remote_run": True,
+        }
+    }
+
+
 def test_outer_schema_keeps_unknown_extensions_but_reports_them_structurally():
     config = _config()
     config["future_extension"] = {"keep": True}
@@ -54,6 +82,55 @@ def test_outer_schema_rejects_malformed_nested_sections_before_defaults():
     assert "molecules.A 必须是对象" in validation.issues
     assert "defaults 必须是对象" in issues
     assert "molecules.A 必须是对象" in issues
+
+
+def test_execution_schema_rejects_private_connection_fields():
+    config = _config()
+    config["execution"] = {
+        "md": {
+            "backend": "ssh",
+            "profile": "lab_gpu",
+            "retain_remote_run": True,
+            "ssh_host_alias": "must-not-be-here",
+        }
+    }
+
+    issues = validate_config(config)
+
+    assert "execution.md 包含不允许的字段" in issues
+
+
+def test_execution_can_explicitly_stop_a_trial_after_eq():
+    config = _config()
+    config["execution"] = {
+        "md": {"backend": "local", "profile": None, "retain_remote_run": True},
+        "stop_after_stage": "eq",
+    }
+
+    assert validate_config(config) == []
+
+
+@pytest.mark.parametrize("value", ("prod", "em", "", 9))
+def test_execution_rejects_any_stop_scope_other_than_eq(value):
+    config = _config()
+    config["execution"] = {
+        "md": {"backend": "local", "profile": None, "retain_remote_run": True},
+        "stop_after_stage": value,
+    }
+
+    assert "execution.stop_after_stage 仅允许 eq 或 null" in validate_config(config)
+
+
+def test_unknown_remote_profile_is_rejected_without_affecting_local_mode(tmp_path, monkeypatch):
+    missing = tmp_path / "missing" / "remote_profiles.json"
+    monkeypatch.setenv("WILLY_REMOTE_PROFILES_FILE", str(missing))
+    remote = _config()
+    remote["execution"] = {
+        "md": {"backend": "ssh", "profile": "lab_gpu", "retain_remote_run": True}
+    }
+
+    assert any("profile" in issue for issue in validate_config(remote))
+    assert validate_config(_config()) == []
 
 
 def test_apply_config_rejects_invalid_outer_shape_without_writing(tmp_project_root, monkeypatch):
@@ -142,7 +219,7 @@ def test_defaults_create_schema_v2_without_legacy_fields():
     assert md["eq"]["segments_ns"]["hold_target"] == 2.0
     assert md["prod"]["duration_ns"] == 10.0
     assert "eq_ns" not in md and "prod_ns" not in md
-    assert result["box"]["target_mass_density_g_cm3"] == 1.5
+    assert result["box"]["target_mass_density_g_cm3"] == 0.7
     assert "packing_number_density_nm3" not in result["box"]
 
 

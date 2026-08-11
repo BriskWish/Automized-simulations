@@ -208,7 +208,7 @@ class RunAssistant:
     ) -> dict[str, Any]:
         """Load only public run facts likely to answer this request."""
         requested = set(route.facts) | _prefetch_categories(message)
-        facts: dict[str, Any] = {"status": self.registry.get_run_status(run_id)}
+        facts: dict[str, Any] = {"status": self.registry.get_run_status(run_id, reconcile=False)}
         if "error" in requested or route.mode == "llm":
             facts["error_context"] = self.registry.explain_error(run_id)
         if "eta" in requested or route.mode == "llm":

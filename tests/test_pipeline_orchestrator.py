@@ -11,13 +11,25 @@ test_pipeline_orchestrator.py —— PipelineOrchestrator 错误处理测试。
 """
 
 import json
+from hashlib import sha256
 import pytest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch, PropertyMock
 
 from willy.errors import StepResult, StepError, ErrorKind
 from willy.pipeline_orchestrator import PipelineOrchestrator
+from willy.run_metadata import load_run_manifest
 from willy.step_registry import STEP_REGISTRY
+
+
+def test_cli_accepts_g09_backend():
+    from run_pipeline import _parse_args
+
+    no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id = _parse_args(["g09"])
+
+    assert (no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id) == (
+        False, "g09", None, None, None, None,
+    )
 
 
 # ============================================================
@@ -78,6 +90,14 @@ class TestPipelineOrchestratorInit:
         orch = PipelineOrchestrator(backend="orca", use_llm=False)
         assert orch.backend == "orca"
 
+    def test_g09_backend_is_a_supported_distinct_backend(self):
+        orch = PipelineOrchestrator(backend="g09", use_llm=False)
+        assert orch.backend == "g09"
+
+    def test_unknown_quantum_backend_is_rejected(self):
+        with pytest.raises(ValueError, match="g16、g09 或 orca"):
+            PipelineOrchestrator(backend="gaussian", use_llm=False)
+
     def test_configured_model_is_injected_into_all_repair_agents(self, monkeypatch):
         import willy.pipeline_orchestrator as po
         from willy.llm_config import LLMSettings
@@ -127,6 +147,7 @@ class TestPipelineOrchestratorInit:
         assert orch._resume_run_dir == Path("/tmp/md_previous")
 
 
+
 # ============================================================
 # Public repair updates
 # ============================================================
@@ -164,6 +185,14 @@ class TestBuildSteps:
         orch = PipelineOrchestrator(backend="orca", use_llm=False)
         steps = orch._build_steps(Path("/tmp/run"))
         assert len(steps) == 10
+
+    def test_g09_backend_builds_its_own_quantum_modules(self):
+        orch = PipelineOrchestrator(backend="g09", use_llm=False)
+        steps = orch._build_steps(Path("/tmp/run"))
+
+        assert len(steps) == 10
+        assert [step[2] for step in steps[:2]] == ["struct_g09", "sp_g09"]
+        assert steps[0][0] == "g09 优化 + formchk"
 
     def test_final_three_steps_are_gromacs_execution(self):
         orch = PipelineOrchestrator(backend="g16", use_llm=False)
@@ -253,6 +282,32 @@ class TestBuildSteps:
 
 
 class TestPublicQuantumProgress:
+    def test_g09_progress_callbacks_are_labeled_g09(self, tmp_path, monkeypatch):
+        import willy.pipeline_orchestrator as po
+        from willy.quantum import struct_g09
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"molecules": {"Li": {}}, "defaults": {}}))
+        (tmp_path / "Li.gjf").write_text("geometry")
+        monkeypatch.setattr(struct_g09, "check_env_ready", lambda: [])
+        monkeypatch.setattr(
+            struct_g09, "run_one", lambda name, *_args: StepResult("struct_g09", 1, True),
+        )
+
+        activities = []
+        results = struct_g09.run_all(str(config_path), str(tmp_path), activities.append)
+
+        assert [(item["tool"], item["target"], item["current"], item["total"]) for item in activities] == [
+            ("G09", "Li", 1, 1),
+        ]
+        assert [result.step_name for result in results] == ["struct_g09"]
+
+        sp_activities = []
+        po._g09_sp_and_mol2(str(config_path), sp_activities.append, work_dir=tmp_path)
+        assert [(item["tool"], item["operation"], item["target"]) for item in sp_activities] == [
+            ("G09", "单点计算与 mol2 转换", "Li"),
+        ]
+
     def test_g16_orca_resp_and_step2_callbacks_are_structured(self, tmp_path, monkeypatch):
         import willy.pipeline_orchestrator as po
         from willy.quantum import chg_resp, struct_g16, struct_orca
@@ -263,6 +318,7 @@ class TestPublicQuantumProgress:
         }))
         for name in ("Li", "NO3"):
             (tmp_path / f"{name}.gjf").write_text("geometry")
+            (tmp_path / f"{name}.inp").write_text("! B3LYP def2-SVP Opt\n* xyz 0 1\nH 0 0 0\n*\n")
 
         monkeypatch.setattr(struct_g16, "check_env_ready", lambda: [])
         monkeypatch.setattr(struct_g16, "run_one", lambda name, *_: StepResult("struct_g16", 1, True))
@@ -337,7 +393,7 @@ class TestRunWorkspace:
         struct_dir = root / "struct"
         struct_dir.mkdir(parents=True)
         source_gjf = struct_dir / "Li.gjf"
-        source_gjf.write_text("source geometry")
+        source_gjf.write_text("#p b3lyp/6-31g\n\nLi\n\n1 1\nLi 0 0 0\n")
         source_fchk = struct_dir / "Li.fchk"
         source_fchk.write_text("optimized geometry")
         from willy.simulation.protocol import default_md_config
@@ -360,6 +416,13 @@ class TestRunWorkspace:
         assert saved_config["residues"] == source_config["residues"]
         assert saved_config["molecules"] == source_config["molecules"]
         assert saved_config["md"]["run_seed"] > 0
+        assert saved_config["execution"]["md"] == {
+            "backend": "local",
+            "profile": None,
+            "retain_remote_run": True,
+        }
+        manifest = load_run_manifest(run_dir)["sections"]["registry"]["data"]
+        assert manifest["config_sha256"] == sha256(snapshot.read_bytes()).hexdigest()
         assert (run_dir / "Li.fchk").read_text() == "optimized geometry"
         assert source_fchk.read_text() == "optimized geometry"
 
@@ -371,7 +434,7 @@ class TestRunWorkspace:
         root = tmp_path / "project"
         struct_dir = root / "struct"
         struct_dir.mkdir(parents=True)
-        (struct_dir / "Li.gjf").write_text("source geometry")
+        (struct_dir / "Li.gjf").write_text("#p b3lyp/6-31g\n\nLi\n\n1 1\nLi 0 0 0\n")
         (root / "config.json").write_text(json.dumps({
             "residues": {"Li": 1},
             "molecules": {"Li": {"charge": 1, "spin": 1}},
@@ -387,7 +450,7 @@ class TestRunWorkspace:
         snapshot = orch._prepare_run_directory(run_dir)
 
         assert snapshot == run_dir / "config.json"
-        assert (run_dir / "Li.gjf").read_text() == "source geometry"
+        assert (run_dir / "Li.gjf").read_text() == "#p b3lyp/6-31g\n\nLi\n\n1 1\nLi 0 0 0\n"
         assert not (run_dir / "Li.fchk").exists()
         assert not orch._sm._status.error
 
@@ -407,7 +470,7 @@ class TestRunWorkspace:
         monkeypatch.setattr(po, "ROOT", root)
 
         orch = PipelineOrchestrator(backend="g16", use_llm=False)
-        with pytest.raises(ValueError, match="缺少量子输入.*Li"):
+        with pytest.raises(ValueError, match="Li 缺少 .gjf 原始输入"):
             orch._prepare_run_directory(root / "md_run" / "run-1")
 
 
@@ -417,6 +480,38 @@ class TestRunWorkspace:
 
 class TestSinglePointMol2Contract:
     """SP 成功不等于 Step 2 成功；必须同时生成可用 .mol2。"""
+
+    def test_g16_singlepoint_inherits_molecule_resource_override(self, tmp_path, monkeypatch):
+        import willy.pipeline_orchestrator as po
+        from willy.quantum import fchk_mol2, singlepoint_g16
+
+        struct_dir = tmp_path / "struct"
+        struct_dir.mkdir()
+        (struct_dir / "Li.fchk").write_text("optimization result")
+        opt_fchk = struct_dir / "Li_opt.fchk"
+        opt_fchk.write_text("single point result")
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "molecules": {"Li": {"charge": 1, "spin": 1, "mem": "9GB", "nproc": 3}},
+            "defaults": {"mem": "5GB", "nproc": 8},
+        }))
+        calls = []
+
+        def fake_sp(*args, **kwargs):
+            calls.append((args, kwargs))
+            return StepResult("sp_g16", 2, True, outputs={"fchk": str(opt_fchk)})
+
+        monkeypatch.setattr(singlepoint_g16, "run", fake_sp)
+        monkeypatch.setattr(
+            fchk_mol2, "convert",
+            lambda *_args: StepResult("fchk_mol2", 2, True, outputs={"mol2": str(struct_dir / "Li.mol2")}),
+        )
+
+        result = po._g16_sp_and_mol2(str(config_path), work_dir=struct_dir)
+
+        assert result[0].success is True
+        assert calls[0][1]["mem"] == "9GB"
+        assert calls[0][1]["nproc"] == 3
 
     def test_g16_mol2_failure_marks_step_2_failed(self, tmp_path, monkeypatch):
         import willy.pipeline_orchestrator as po
@@ -779,6 +874,7 @@ class TestInvokeAgent:
     def test_confirmed_eq_action_reruns_eq_before_prod(self, tmp_path, monkeypatch):
         """An approved action rewrites MDPs then needs accepted EQ before PROD."""
         import willy.pipeline_orchestrator as po
+        import willy.simulation.visualization as visualization
         from willy.pipeline_state import PipelineStateMachine
         from willy.run_registry import RunRegistry
         from willy.simulation.pending_action import create_eq_pending_action, public_pending_action
@@ -792,6 +888,11 @@ class TestInvokeAgent:
             "residues": {"Li": 1},
             "molecules": {"Li": {"charge": 0, "spin": 1}},
             "md": default_md_config(),
+        }))
+        # This recovery fixture models an already-created legacy run whose MD
+        # evidence remains in md_manifest.json; new runs are v2 by default.
+        (run_dir / "manifest.json").write_text(json.dumps({
+            "run_id": run_dir.name, "artifacts": [], "total_steps": 10,
         }))
         registry = RunRegistry(tmp_path)
         registry.register_run(run_dir, backend="g16", total_steps=10)
@@ -842,6 +943,13 @@ class TestInvokeAgent:
         monkeypatch.setattr(
             "willy.simulation.mdp.build_all",
             lambda **_kwargs: StepResult("mdp", 6, True),
+        )
+        monkeypatch.setattr(
+            visualization,
+            "convert_stage_gro_to_pdb",
+            lambda run_dir, stage, **_kwargs: visualization.VisualizationConversionResult(
+                stage, True, run_dir / "visualization" / f"{stage}.pdb"
+            ),
         )
 
         orchestrator = po.PipelineOrchestrator(
@@ -909,6 +1017,63 @@ class TestInvokeAgent:
         assert 9 not in orch._sm._status.done_steps
         assert orch._sm._status.state == "aborted"
 
+    def test_eq_only_scope_stops_after_accepted_eq_without_starting_prod(self, tmp_path, monkeypatch):
+        """A declared EQ-only trial remains an accepted partial workflow."""
+        import willy.pipeline_state as pstate
+        from willy.simulation import manifest as simulation_manifest
+
+        monkeypatch.setattr(pstate, "get_project_root", lambda: tmp_path)
+        monkeypatch.setattr(simulation_manifest, "record_box_attempt", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(simulation_manifest, "box_parameters_changed", lambda *_args, **_kwargs: True)
+        run_dir = tmp_path / "md_run" / "md_eq_only"
+        run_dir.mkdir(parents=True)
+        config_path = run_dir / "config.json"
+        config_path.write_text("{}")
+        orch = PipelineOrchestrator(backend="g16", use_llm=False)
+        orch._stop_after_step = 9
+        monkeypatch.setattr(orch, "_prepare_run_directory", lambda _: config_path)
+        monkeypatch.setattr(orch, "_completion_contract_failure", lambda *_args: None)
+        monkeypatch.setattr(orch, "_prod_visualization_contract_failure", lambda *_args: None)
+        monkeypatch.setattr(orch, "_prod_intermediate_cleanup_contract_failure", lambda *_args: None)
+        monkeypatch.setattr(orch, "_schedule_stage_visualization", lambda *_args: None)
+        prod_calls = 0
+
+        def prod_step():
+            nonlocal prod_calls
+            prod_calls += 1
+            return StepResult("prod", 10, True, target_type="stage", target="prod")
+
+        steps = [
+            (f"step-{index}", lambda index=index: StepResult(f"step-{index}", index, True), None, False, 1)
+            for index in range(1, 10)
+        ] + [("PROD", prod_step, None, False, 3)]
+        monkeypatch.setattr(orch, "_build_steps", lambda _: steps)
+
+        assert orch.run(run_dir=run_dir) is True
+        assert prod_calls == 0
+        assert orch._sm._status.state == "done"
+        assert orch._sm._status.step == 9
+        assert orch._sm._status.done_steps == list(range(1, 10))
+        assert orch._sm._status.extra["completion_scope"] == {
+            "mode": "through_eq", "step": 9, "stage": "eq",
+        }
+
+    def test_run_registry_projects_only_the_fixed_eq_completion_scope(self, tmp_path):
+        """RunRegistry must retain the scoped completion marker for the UI."""
+        from willy.run_registry import RunRegistry
+
+        registry = RunRegistry(tmp_path)
+        status = registry._public_status_payload({
+            "state": "done", "step": 9, "step_label": "EQ", "layer": "simulation",
+            "error": "", "error_kind": "", "activity": {}, "started_at": "", "updated_at": "",
+            "state_revision": 3, "total_steps": 10, "done_steps": list(range(1, 10)),
+            "extra": {"completion_scope": {"mode": "through_eq", "step": 9, "stage": "eq"}},
+        }, "md__202608100002")
+
+        assert status["extra"]["completion_scope"] == {
+            "mode": "through_eq", "step": 9, "stage": "eq",
+        }
+
     def test_run_reexecutes_step_two_after_upstream_repair(self, tmp_path, monkeypatch):
         """The rerun runs Step 2 itself and only then permits downstream steps."""
         import willy.pipeline_state as pstate
@@ -963,6 +1128,7 @@ class TestInvokeAgent:
         # placeholder Step 8-10 functions.  Dedicated tests below exercise
         # the real MD manifest completion gate.
         monkeypatch.setattr(orch, "_completion_contract_failure", lambda *_args: None)
+        monkeypatch.setattr(orch, "_prod_visualization_contract_failure", lambda *_args: None)
 
         assert orch.run(run_dir=run_dir) is True
         assert step_two_calls == 2

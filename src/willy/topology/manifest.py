@@ -15,6 +15,13 @@ import json
 import os
 import tempfile
 
+from willy.run_metadata import (
+    RUN_MANIFEST_FILENAME,
+    load_run_metadata_section,
+    load_run_manifest,
+    update_run_manifest_section,
+)
+
 
 MANIFEST_FILENAME = "topology_manifest.json"
 _MANIFEST_LOCK_FILENAME = ".topology_manifest.lock"
@@ -38,6 +45,7 @@ class TopologyManifestComponent:
     opt_steps: int = 0
     itp: str | None = None
     assembly_itp: str | None = None
+    atomtype_namespace: dict[str, str] | None = None
     gro: str | None = None
     success: bool = False
     validated: bool = False
@@ -45,7 +53,23 @@ class TopologyManifestComponent:
 
 
 def manifest_path(workspace: str | Path) -> Path:
+    """Return the legacy topology-only manifest location.
+
+    This name remains part of the compatibility surface for old runs.  New
+    unified runs keep the same payload in the private ``topology`` section of
+    ``run_manifest.json`` instead.
+    """
     return Path(workspace) / MANIFEST_FILENAME
+
+
+def unified_manifest_path(workspace: str | Path) -> Path:
+    """Return the schema-v2 unified run metadata location."""
+    return Path(workspace) / RUN_MANIFEST_FILENAME
+
+
+def manifest_exists(workspace: str | Path) -> bool:
+    """Whether either supported topology manifest representation is present."""
+    return unified_manifest_path(workspace).is_file() or manifest_path(workspace).is_file()
 
 
 @contextmanager
@@ -94,8 +118,14 @@ def write_manifest(
     components: list[TopologyManifestComponent],
     retry_ledger: dict[str, int] | None = None,
 ) -> Path:
-    """Atomically persist the Step 4 input/output record in the run directory."""
-    path = manifest_path(workspace)
+    """Persist the Step 4 input/output record in the active representation.
+
+    During rollout a run without ``run_manifest.json`` remains wholly legacy.
+    Once a unified manifest exists, topology owns only its private section and
+    uses its revision as a compare-and-swap guard.  The legacy file is never
+    created or overwritten for a unified run.
+    """
+    directory = Path(workspace)
     payload = {
         "version": 3,
         "backend": backend,
@@ -103,6 +133,24 @@ def write_manifest(
         "components": [asdict(component) for component in components],
         "retry_ledger": retry_ledger or {},
     }
+
+    if unified_manifest_path(directory).is_file():
+        current = load_run_manifest(directory)
+        section = current["sections"]["topology"]
+        update_run_manifest_section(
+            directory,
+            "topology",
+            payload,
+            expected_section_revision=section["revision"],
+        )
+        return unified_manifest_path(directory)
+
+    return _write_legacy_manifest(directory, payload)
+
+
+def _write_legacy_manifest(directory: Path, payload: dict[str, Any]) -> Path:
+    """Atomically persist a legacy topology-only manifest."""
+    path = manifest_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".topology_manifest.", suffix=".tmp", dir=path.parent)
     try:
@@ -117,9 +165,13 @@ def write_manifest(
 
 
 def load_manifest(workspace: str | Path) -> dict[str, Any]:
-    path = manifest_path(workspace)
-    with path.open() as handle:
-        return json.load(handle)
+    """Load topology data, preferring schema-v2 with legacy read fallback.
+
+    The shared compatibility reader permits legacy fallback only when the
+    unified manifest is absent.  A malformed or incomplete unified document
+    remains authoritative rather than silently reviving stale topology data.
+    """
+    return load_run_metadata_section(workspace, "topology")
 
 
 def component_for_name(manifest: dict[str, Any], molecule_name: str) -> dict[str, Any] | None:

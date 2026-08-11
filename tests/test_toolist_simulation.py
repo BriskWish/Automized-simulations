@@ -27,10 +27,10 @@ class TestSimulationToolDefinitions:
         from willy.toolist_simulation import SIMULATION_TOOLS
         return SIMULATION_TOOLS
 
-    def test_thirteen_tools_defined(self, sim_tools):
-        """应有 13 个工具定义，不暴露不完整的跳过分子功能。"""
+    def test_fourteen_tools_defined(self, sim_tools):
+        """应有 14 个工具定义，不暴露不完整的跳过分子功能。"""
         names = {t["function"]["name"] for t in sim_tools}
-        assert len(names) == 13, f"期望 13 个工具, 实际 {len(names)}: {names}"
+        assert len(names) == 14, f"期望 14 个工具, 实际 {len(names)}: {names}"
 
     def test_all_tool_names_present(self, sim_tools):
         """所有必需工具应存在。"""
@@ -49,6 +49,7 @@ class TestSimulationToolDefinitions:
             "tools_diagnose_error_simulation",
             "tools_modify_config_simulation",
             "tools_migrate_md_config_simulation",
+            "tools_lookup_mdrun_knowledge",
         }
         missing = required - names
         assert not missing, f"缺少工具: {missing}"
@@ -349,11 +350,15 @@ class TestModifyConfigSimulation:
     def test_reports_config_delta_after_the_run_snapshot_is_updated(self, tmp_project_root):
         from willy.toolist_simulation import handle_simulation_tool_call
 
+        config_path = tmp_project_root / "config.json"
+        config = json.loads(config_path.read_text())
+        config["md"]["eq"]["tau_p"] = 1.0
+        config_path.write_text(json.dumps(config))
         observed = []
         result = handle_simulation_tool_call(
             "tools_modify_config_simulation",
             {"tau_t": 2.0, "eq_tau_p": 2.0},
-            config_path=str(tmp_project_root / "config.json"),
+            config_path=str(config_path),
             on_config_updated=lambda before, after, fields: observed.append((before, after, fields)),
             protocol_change_authorized=True,
         )

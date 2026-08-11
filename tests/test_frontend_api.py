@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
+from html import unescape
 import json
 import stat
 
@@ -52,7 +54,7 @@ def test_clean_stop_unlinks_only_known_root_artifacts(tmp_path, monkeypatch):
     assert not (tmp_path / "model.pdb").exists()
 
 
-def test_reconcile_stale_latest_run_marks_only_transient_status_aborted(tmp_path, monkeypatch):
+def test_reconcile_stale_latest_run_marks_transient_status_aborted_with_audit(tmp_path, monkeypatch):
     from willy.simulation.manifest import request_safe_stop
 
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
@@ -72,7 +74,82 @@ def test_reconcile_stale_latest_run_marks_only_transient_status_aborted(tmp_path
     assert not (run_dir / "stop.request").exists()
     events = (run_dir / "events.jsonl").read_text()
     assert "run_aborted_after_process_exit" in events
+    assert '"source": "stale_reconciliation"' in events
     assert "当前工序" not in frontend_api.get_run_summary_markdown(run_dir.name)
+
+
+def test_frontend_polling_does_not_reconcile_or_mutate_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_dir = _record_run_status(tmp_path, "md_read_only_202608020001", {
+        "state": "running", "step": 9, "activity": {},
+    })
+    monkeypatch.setattr(frontend_api, "get_active_run_id", lambda: run_dir.name)
+
+    with patch.object(frontend_api, "reconcile_stale_pipeline_state") as reconcile:
+        assert frontend_api.get_latest_run_control_state() == "running"
+
+    reconcile.assert_not_called()
+    assert RunRegistry(tmp_path).get_run_status(run_dir.name, reconcile=False)["state"] == "running"
+
+
+def test_legacy_pipeline_group_keeps_controls_in_running_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    (tmp_path / ".pipeline.pid").write_text("4242")
+    monkeypatch.setattr(frontend_api, "pipeline_launch_is_active", lambda root: False)
+    monkeypatch.setattr(frontend_api, "_legacy_runner_pid_is_alive", lambda pid: False)
+    monkeypatch.setattr(frontend_api, "_legacy_pipeline_group_is_alive", lambda pgid: pgid == 4242)
+
+    assert frontend_api.is_pipeline_running()
+    assert (tmp_path / ".pipeline.pid").is_file()
+
+
+def test_reconcile_skips_run_with_fresh_gromacs_eta_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_dir = _record_run_status(tmp_path, "md_live_202608020001", {
+        "state": "running", "step": 9,
+        "activity": {
+            "tool": "GROMACS", "operation": "运行模拟",
+            "target_type": "stage", "target": "eq", "current": 2, "total": 2,
+        },
+    })
+    observed_at = datetime.now(timezone.utc).isoformat()
+    (run_dir / "mdrun_eta.json").write_text(json.dumps({
+        "schema_version": 2,
+        "stage": "eq",
+        "status": "waiting",
+        "observed_at": observed_at,
+        "process_alive": True,
+        "source": "gmx_verbose",
+    }))
+    monkeypatch.setattr(frontend_api, "is_pipeline_running", lambda: False)
+
+    assert frontend_api.reconcile_stale_pipeline_state() is None
+    status = RunRegistry(tmp_path).get_run_status(run_dir.name, reconcile=False)
+    assert status["state"] == "running"
+    assert "run_aborted_after_process_exit" not in (run_dir / "events.jsonl").read_text()
+
+
+def test_reconcile_abandons_abort_when_revision_advances_during_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_dir = _record_run_status(tmp_path, "md_race_202608020001", {
+        "state": "running", "step": 9, "activity": {},
+    })
+    monkeypatch.setattr(frontend_api, "is_pipeline_running", lambda: False)
+    registry = RunRegistry(tmp_path)
+    original = registry.get_run_status
+    calls = {"count": 0}
+
+    def get_status(run_id, *, reconcile=True):
+        calls["count"] += 1
+        status = original(run_id, reconcile=reconcile)
+        if calls["count"] == 2:
+            status["state_revision"] += 1
+        return status
+
+    monkeypatch.setattr(frontend_api.RunRegistry, "get_run_status", lambda self, run_id, **kwargs: get_status(run_id, **kwargs))
+
+    assert frontend_api.reconcile_stale_pipeline_state() is None
+    assert RunRegistry(tmp_path).get_run_status(run_dir.name, reconcile=False)["state"] == "running"
 
 
 def test_stopping_status_uses_public_checkpoint_message(tmp_path, monkeypatch):
@@ -215,10 +292,15 @@ def test_pending_action_never_leaks_from_old_run_to_newest_run(tmp_path, monkeyp
 def test_run_panel_snapshot_resolves_the_run_once_for_status_and_action(monkeypatch):
     calls = []
     monkeypatch.setattr(frontend_api, "latest_run_id", lambda: "md_current")
+
+    def fake_summary(run_id, *, include_error=True):
+        calls.append(("summary", run_id, include_error))
+        return "状态摘要" if include_error else "实时状态摘要"
+
     monkeypatch.setattr(
         frontend_api,
         "get_run_summary_markdown",
-        lambda run_id: calls.append(("summary", run_id)) or "状态摘要",
+        fake_summary,
     )
     monkeypatch.setattr(
         frontend_api,
@@ -231,9 +313,17 @@ def test_run_panel_snapshot_resolves_the_run_once_for_status_and_action(monkeypa
     assert snapshot == {
         "run_id": "md_current",
         "summary": "状态摘要",
+        "live_summary": "实时状态摘要",
         "pending_action": {"action_id": "act-1"},
+        "error_event": None,
+        "status_event_id": "md_current:status:unavailable:none:act-1:none",
+        "timeline_events": True,
     }
-    assert calls == [("summary", "md_current"), ("action", "md_current")]
+    assert calls == [
+        ("summary", "md_current", True),
+        ("summary", "md_current", False),
+        ("action", "md_current"),
+    ]
 
 
 def test_active_pipeline_run_wins_over_newer_historical_index_entry(tmp_path, monkeypatch):
@@ -534,9 +624,10 @@ def test_invalid_revised_proposal_preserves_original_waiting_action(tmp_path, mo
         original["action_id"], "把方案改为更长的保温段", run_id,
     )
 
-    assert "未通过校验" in reply
+    assert "未通过校验：调整项格式无效：需要 adjustments 数组" in reply
     assert frontend_api.get_pending_action(run_id)["action_id"] == original["action_id"]
     assert RunRegistry(tmp_path).get_run_status(run_id)["state"] == "awaiting_confirmation"
+    assert '"result": "rejected_validation"' in (run_dir / "decision_trace.jsonl").read_text()
 
 
 def test_pipeline_launch_receipt_does_not_repeat_the_proposed_plan(tmp_path, monkeypatch):
@@ -556,9 +647,13 @@ def test_pipeline_launch_receipt_does_not_repeat_the_proposed_plan(tmp_path, mon
             self.target()
 
     monkeypatch.setattr(agent_config, "ROOT", tmp_path)
+    (tmp_path / "struct").mkdir()
+    (tmp_path / "struct" / "Li.gjf").write_text("#p b3lyp/6-31g\n\nLi\n\n1 1\nLi 0 0 0\n")
     config = {
         "backend": "g16",
         "residues": {"Li": 100},
+        "molecules": {"Li": {"charge": 1, "spin": 1}},
+        "non_neutral_confirmed": True,
     }
     monkeypatch.setattr(agent_config, "validate_config", lambda config: [])
     monkeypatch.setattr(agent_config, "apply_config", lambda config: tmp_path / "config.json")
@@ -645,7 +740,7 @@ def test_llm_config_is_persisted_locally_without_leaking_to_ui(tmp_path, monkeyp
         "new-secret-key", "http://localhost:8000/v1", "local-model",
     )
 
-    assert message == "OpenAI-compatible LLM 配置已保存到本机 .env。请重启应用后生效。"
+    assert message == "OpenAI-compatible LLM 配置已保存到本机 .env。"
     assert "new-secret-key" not in message
     assert (tmp_path / ".env").read_text() == (
         "OTHER_SETTING=keep\n"
@@ -677,6 +772,88 @@ def test_llm_config_notice_shows_the_loaded_model_or_a_safe_fallback(monkeypatch
 
     monkeypatch.setattr(frontend_api, "load_llm_settings", lambda _root: None)
     assert frontend_api.get_llm_config_notice().endswith("当前模型：*当前无可用模型*。")
+
+
+def test_managed_mode_persists_only_the_mode_and_never_an_endpoint_or_registration_credential(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(frontend_api, "_refresh_agent_llm_client", lambda: None)
+    (tmp_path / ".env").write_text("OTHER_SETTING=keep\nWILLY_LLM_API_KEY=byok-secret\n")
+
+    message = frontend_api.save_llm_mode("managed")
+
+    saved = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert message == "已选择托管 LLM 网关。"
+    assert "WILLY_LLM_MODE=managed" in saved
+    assert "byok-secret" in saved
+    assert "gateway.example" not in saved
+    assert "invite" not in saved.lower()
+
+    assert frontend_api.save_llm_mode("byok") == "已选择自带 API Key。"
+    assert "WILLY_LLM_MODE" not in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_selecting_managed_mode_does_not_create_device_identity_until_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(frontend_api, "_refresh_agent_llm_client", lambda: None)
+    (tmp_path / "managed_gateway.json").write_text(
+        '{"schema_version":1,"profile_id":"home-gateway","label":"Home","base_url":"http://127.0.0.1:8789","model":"willy-default"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        frontend_api,
+        "ManagedIdentityStore",
+        lambda: (_ for _ in ()).throw(AssertionError("selection must not create an identity")),
+    )
+
+    assert frontend_api.save_llm_mode("managed") == "已选择托管 LLM 网关。"
+
+
+def test_managed_status_and_notice_are_redacted_when_profile_is_unavailable(monkeypatch):
+    from willy.managed_gateway import ManagedGatewayError
+
+    monkeypatch.setattr(frontend_api, "load_managed_gateway_profile", lambda _root: (_ for _ in ()).throw(ManagedGatewayError("managed_profile_missing")))
+    status = frontend_api.get_managed_gateway_status()
+    assert status == {
+        "ok": False,
+        "code": "managed_profile_missing",
+        "message": "托管网关配置尚不可用，请联系部署者。",
+    }
+
+    managed = SimpleNamespace(model="willy-default", provider_mode="managed")
+    monkeypatch.setattr(frontend_api, "load_llm_settings", lambda _root: managed)
+    notice = frontend_api.get_llm_config_notice()
+    assert "设备私钥只保存在本机" in notice
+    assert "willy-default" in notice
+    assert "API-key" not in notice
+
+
+def test_managed_connection_check_uses_the_device_provider_and_hides_protocol_details(monkeypatch):
+    from willy.managed_gateway import ManagedGatewayError
+
+    profile = SimpleNamespace(profile_id="home-gateway", model="willy-default")
+    settings = SimpleNamespace(model="willy-default", provider_mode="managed", managed_profile=profile)
+    monkeypatch.setattr(frontend_api, "load_llm_settings", lambda _root: settings)
+    monkeypatch.setattr(
+        frontend_api,
+        "managed_gateway_usage_snapshot",
+        lambda _profile: {
+            "daily": {"settled_tokens": 125, "reserved_tokens": 25, "limit": 1_000_000},
+            "monthly": {"settled_tokens": 5_000, "reserved_tokens": 0, "limit": 10_000_000},
+        },
+    )
+
+    result = frontend_api.test_managed_gateway_connection()
+    assert result["ok"] is True
+    assert "本日剩余 Token：999,850" in result["suggestion"]
+    assert "本月剩余 Token：9,995,000" in result["suggestion"]
+
+    monkeypatch.setattr(
+        frontend_api,
+        "managed_gateway_usage_snapshot",
+        lambda _profile: (_ for _ in ()).throw(ManagedGatewayError("managed_device_not_registered")),
+    )
+    denied = frontend_api.test_managed_gateway_connection()
+    assert denied["code"] == "managed_not_registered"
 
 
 class _ConnectionError(Exception):
@@ -943,6 +1120,9 @@ def test_visualization_scans_only_pdb_and_mol2_from_current_run_directory(tmp_pa
     html = frontend_api.render_run_visualization_html("Li.mol2")
     assert "&quot;mol2&quot;" in html
     assert "Li.mol2" in html
+    assert 'class="structure-viewer-frame"' in html
+    assert "height:43.2rem" in html
+    assert '<div class="structure-viewer-name">Li.mol2</div>' in html
     assert str(run_dir) not in html
     assert "engine.log" not in str(frontend_api.get_run_visualization_choices())
     assert "linked-outside.pdb" not in frontend_api.get_run_visualization_choices()
@@ -971,15 +1151,71 @@ def test_visualization_prefers_active_lock_then_newest_numbered_run_directory(tm
     assert frontend_api.get_run_visualization_choices() == ["oldest.pdb"]
 
 
+def test_visualization_run_and_file_choices_are_scoped_to_the_selected_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    older = tmp_path / "md_run" / "md__202608040002"
+    newer = tmp_path / "md_run" / "md__202608040010"
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    (older / "eq.pdb").write_text("ATOM      1  LI  LI  A   1       0.000   0.000   0.000\n")
+    (older / "model.mol2").write_text("@<TRIPOS>MOLECULE\nOLDER\n")
+    (newer / "prod.pdb").write_text("ATOM      1  NA  NA  A   1       0.000   0.000   0.000\n")
+
+    monkeypatch.setattr(frontend_api, "get_active_run_id", lambda: None)
+    assert frontend_api.get_run_visualization_run_choices() == [
+        "md__202608040010", "md__202608040002",
+    ]
+    assert frontend_api.get_run_visualization_file_choices("md__202608040002") == [
+        "eq.pdb", "model.mol2",
+    ]
+    assert frontend_api.get_run_visualization_file_choices("md__202608040010") == ["prod.pdb"]
+
+    older_data = frontend_api.get_run_visualization_data(
+        "model.mol2", "md__202608040002"
+    )
+    assert older_data is not None
+    assert "OLDER" in older_data["content"]
+    assert frontend_api.get_run_visualization_data("model.mol2", "md__202608040010") is None
+
+
 def test_visualization_style_uses_balanced_defaults_and_clamps_user_values():
+    pdb_data = (
+        "ATOM      1  H4  MOL A   1       0.000   0.000   0.000  1.00  0.00              \n"
+        "ATOM      2  F10 MOL A   1       0.000   0.000   1.000  1.00  0.00              \n"
+    )
+    normalized_pdb = frontend_api._pdb_with_explicit_elements(pdb_data)
+    assert normalized_pdb.splitlines()[0][12:16].strip() == "H"
+    assert normalized_pdb.splitlines()[1][12:16].strip() == "F"
+    assert normalized_pdb.splitlines()[0][76:78] == " H"
+    assert normalized_pdb.splitlines()[1][76:78] == " F"
+
+    conflicting_pdb = (
+        "ATOM      1  H4  MOL A   1       0.000   0.000   0.000  1.00  0.00           F  \n"
+        "ATOM      2  Li100MOL A   1       0.000   0.000   1.000  1.00  0.00           O  \n"
+    )
+    normalized_conflicting = frontend_api._pdb_with_explicit_elements(conflicting_pdb)
+    assert normalized_conflicting.splitlines()[0][76:78] == " H"
+    assert normalized_conflicting.splitlines()[1][76:78] == "Li"
+
     html = frontend_api._render_viewer_html(
         "ATOM      1  LI  LI  A   1       0.000   0.000   0.000\n",
         "pdb",
         1,
         "Li",
     )
+    viewer_source = unescape(html)
     assert "radius:0.22" in html
-    assert "scale:0.35" in html
+    assert f"scale:{frontend_api.DEFAULT_SPHERE_SCALE * 0.5:.2f}" in html
+    assert 'v.addModel(' in viewer_source
+    assert '{keepH:true}' in viewer_source
+    assert 'var elementColors={' in viewer_source
+    assert 'stick:{radius:0.22,color:color}' in viewer_source
+    assert 'var metalCations=["Li","Na","Mg","Ca","Zn"]' in viewer_source
+    assert 'model.selectedAtoms({}).forEach(function(atom){' in viewer_source
+    assert (
+        'v.setStyle({serial:atom.serial},{sphere:{scale:0.17,color:color||"#909090"}});'
+        in viewer_source
+    )
 
     html = frontend_api._render_viewer_html(
         "ATOM      1  LI  LI  A   1       0.000   0.000   0.000\n",
@@ -989,8 +1225,35 @@ def test_visualization_style_uses_balanced_defaults_and_clamps_user_values():
         sphere_scale=9,
         stick_radius=-1,
     )
+    viewer_source = unescape(html)
     assert "radius:0.08" in html
-    assert "scale:0.65" in html
+    assert f"scale:{frontend_api.VIEWER_SPHERE_SCALE_RANGE[1] * 0.5:.2f}" in html
+    assert 'v.setStyle({serial:atom.serial},{sphere:{scale:0.33,color:color||"#909090"}});' in viewer_source
+
+
+def test_visualization_legend_lists_only_elements_present_in_pdb_and_mol2():
+    pdb_data = (
+        "ATOM      1  Li1 MOL A   1       0.000   0.000   0.000  1.00  0.00              \n"
+        "ATOM      2  O1  MOL A   1       0.000   0.000   1.000  1.00  0.00              \n"
+    )
+    mol2_data = (
+        "@<TRIPOS>MOLECULE\nDemo\n"
+        "@<TRIPOS>ATOM\n"
+        "1 Na1 0.0 0.0 0.0 Na 1 MOL\n"
+        "2 C1 1.0 0.0 0.0 C.3 1 MOL\n"
+        "@<TRIPOS>BOND\n"
+    )
+
+    assert frontend_api._viewer_legend_elements(pdb_data, "pdb") == ["O", "Li"]
+    assert frontend_api._viewer_legend_elements(mol2_data, "mol2") == ["C", "Na"]
+    html = frontend_api._viewer_legend_html(pdb_data, "pdb")
+    assert 'aria-label="原子颜色图例"' in html
+    assert "O 氧" in html
+    assert "Li 锂" in html
+    assert "C 碳" not in html
+    assert "原子颜色：" not in html
+    assert "justify-content:center" in html
+    assert "radial-gradient(circle at 30% 28%" in html
 
 
 def test_run_assistant_status_renders_only_public_chinese_activity(tmp_path, monkeypatch):
@@ -1150,3 +1413,140 @@ def test_run_assistant_status_ignores_an_orphan_root_status(tmp_path, monkeypatc
 
     assert "正在使用 GROMACS 进行运行模拟" in markdown
     assert "不应显示的根状态错误" not in markdown
+
+
+def test_execution_profile_snapshot_degrades_without_remote_registry(monkeypatch):
+    imports = []
+    monkeypatch.setattr(
+        frontend_api.importlib,
+        "import_module",
+        lambda name: imports.append(name) or (_ for _ in ()).throw(ModuleNotFoundError(name)),
+    )
+    monkeypatch.setattr(
+        frontend_api.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not start a process")),
+    )
+
+    snapshot = frontend_api.get_execution_profile_snapshot("ssh", None)
+    context = frontend_api.get_execution_profile_proposal_context("ssh", None)
+
+    assert imports == [
+        "willy.remote_registry",
+        "willy.remote_registry",
+    ]
+    assert snapshot["registry_state"] == "unavailable"
+    assert snapshot["selected_mode"] == "ssh"
+    assert snapshot["selected_profile_id"] == "ssh-not-configured"
+    assert [profile["mode"] for profile in snapshot["profiles"]] == ["local", "ssh", "slurm"]
+    assert context["available"] is False
+    assert "不会发起连接或提交任务" in context["summary"]
+
+
+def test_execution_profile_snapshot_redacts_remote_registry_fields(monkeypatch):
+    raw_host = "compute-01.internal.example"
+    raw_path = "/srv/cluster/private-key"
+    raw_command = "sbatch --account=secret"
+    module = SimpleNamespace(
+        get_public_execution_snapshot=lambda: {
+            "profiles": [
+                {
+                    "profile_id": "research-cluster",
+                    "mode": "slurm",
+                    "available": True,
+                    "connection_state": "ready",
+                    "host": raw_host,
+                    "key_path": raw_path,
+                    "command": raw_command,
+                    "label": raw_host,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(frontend_api.importlib, "import_module", lambda _name: module)
+
+    snapshot = frontend_api.get_execution_profile_snapshot("slurm", "research-cluster")
+    rendered = str(snapshot)
+
+    assert snapshot["registry_state"] == "ready"
+    assert snapshot["selected_mode"] == "slurm"
+    assert snapshot["selected_profile_id"] == "research-cluster"
+    assert snapshot["profiles"][0] == {
+        "profile_id": "research-cluster",
+        "mode": "slurm",
+        "label": "Slurm 调度",
+        "available": True,
+        "connection_state": "unknown",
+    }
+    assert raw_host not in rendered
+    assert raw_path not in rendered
+    assert raw_command not in rendered
+
+
+def test_execution_profile_snapshot_adapts_initial_capability_map(monkeypatch):
+    raw_host = "gpu-login.internal.example"
+    module = SimpleNamespace(
+        public_remote_capabilities=lambda: {
+            "available": True,
+            "profiles": {
+                "Lab_GPU": {
+                    "profile": "Lab_GPU",
+                    "launcher": "direct",
+                    "transfer": "rsync",
+                    "gpu_policy": "required",
+                    "host": raw_host,
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(frontend_api.importlib, "import_module", lambda _name: module)
+
+    snapshot = frontend_api.get_execution_profile_snapshot("ssh", "Lab_GPU")
+
+    assert snapshot["selected_profile_id"] == "Lab_GPU"
+    assert snapshot["profiles"] == [
+        {
+            "profile_id": "Lab_GPU",
+            "mode": "ssh",
+            "label": "SSH 执行",
+            "available": True,
+            "connection_state": "unknown",
+        },
+        {
+            "profile_id": "local-default",
+            "mode": "local",
+            "label": "本机执行",
+            "available": True,
+            "connection_state": "ready",
+        },
+        {
+            "profile_id": "slurm-not-configured",
+            "mode": "slurm",
+            "label": "Slurm 调度",
+            "available": False,
+            "connection_state": "not_configured",
+        },
+    ]
+    assert "已在本机登记，尚未进行连接预检" in snapshot["summary"]
+    assert raw_host not in str(snapshot)
+
+
+def test_execution_profile_context_is_non_persistent_and_selection_scoped(monkeypatch):
+    module = SimpleNamespace(
+        get_public_execution_snapshot=lambda: {
+            "profiles": [
+                {"profile_id": "ssh-default", "mode": "ssh", "available": True},
+            ],
+        },
+    )
+    monkeypatch.setattr(frontend_api.importlib, "import_module", lambda _name: module)
+
+    context = frontend_api.get_execution_profile_proposal_context("ssh", "ssh-default")
+
+    assert context == {
+        "execution_mode": "ssh",
+        "execution_profile_id": "ssh-default",
+        "available": True,
+        "summary": "已选择SSH 执行配置，已在本机登记，尚未进行连接预检。连接详情已隐藏；此页面不会发起连接或提交任务。",
+    }
+    assert not hasattr(frontend_api, "set_execution_profile")

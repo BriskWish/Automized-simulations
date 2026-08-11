@@ -24,6 +24,12 @@ LLM 输出统一 JSON 格式，`error` 和 `warnings` 使用固定英文 type，
 | `invalid_molecule` | 分子不在 registry | refresh_structs ×2 → 仍失败则返回，列出 available |
 | `invalid_value` | 参数越界 | 返回 suggestion，ask user |
 | `ambiguous` | 输入模糊 (如"锂盐100溶剂200") | 返回 suggestion，ask user |
+| `invalid_quantum_input` | 所选后端的原始输入缺失或格式不完整 | 返回后端、文件类型与公开格式问题；不生成方案 |
+| `charge_imbalance` | 审计后的体系净电荷不为零且未明确补偿/非中性策略 | 返回净电荷与补充策略提示；不生成方案 |
+
+配置阶段的 `charge_imbalance` 仍是阻塞错误；它不等同于 LigParGen 四位小数电荷在
+GROMACS `grompp` 中产生的累计舍入。对后者，模拟执行器只允许单一 Ewald 净电荷 warning
+且 `abs(total_charge) <= 0.15e`，超过阈值或伴随其他 warning 仍以输入契约失败记录。
 
 ```json
 {"error": {"type": "invalid_molecule", "detail": "SDBT not found", "available": ["Li","FEC",...]}}
@@ -36,11 +42,10 @@ LLM 输出统一 JSON 格式，`error` 和 `warnings` 使用固定英文 type，
 
 | type | 条件 | 展示文案 |
 |------|------|------|
-| `charge_imbalance` | 净电荷 ≠ 0 | "⚠️ 电荷警告: 净电荷 +50" |
 | `compute_heavy` | 分子数 > 10000 | "⚠️ 算力警告: 体系共 N 个分子..." |
 
 ```json
-{"error": null, "warnings": [{"type": "charge_imbalance", "detail": "Net charge +50"}], "molecules": {...}, ...}
+{"error": null, "warnings": [{"type": "compute_heavy", "detail": "Total 20000 molecules"}], "molecules": {...}, ...}
 ```
 
 **App 处理**：在方案确认卡片中逐条渲染警告。

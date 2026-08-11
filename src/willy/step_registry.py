@@ -179,15 +179,25 @@ PROD_STEP = STEP_REGISTRY.by_id("simulation_prod").index
 # compatible facade for callers that still invoke ``ensure(module_id)``.
 EXECUTION_MODULE_REGISTRY = ExecutionModuleRegistry(STEP_REGISTRY, (
     ExecutionModuleDefinition("struct_g16", "quantum_optimize", ("g16", "formchk")),
+    ExecutionModuleDefinition("struct_g09", "quantum_optimize", ("g09", "g09_formchk")),
     ExecutionModuleDefinition("struct_orca", "quantum_optimize", ("orca", "orca_2mkl")),
-    ExecutionModuleDefinition("sp_g16", "quantum_singlepoint_mol2", ("g16", "formchk", "multiwfn")),
-    ExecutionModuleDefinition("sp_orca", "quantum_singlepoint_mol2", ("orca", "orca_2mkl", "multiwfn")),
-    ExecutionModuleDefinition("chg_resp", "quantum_resp", ("multiwfn",)),
+    ExecutionModuleDefinition(
+        "sp_g16", "quantum_singlepoint_mol2", ("g16", "formchk"), ("multiwfn",),
+    ),
+    ExecutionModuleDefinition(
+        "sp_g09", "quantum_singlepoint_mol2", ("g09", "g09_formchk"), ("multiwfn",),
+    ),
+    ExecutionModuleDefinition(
+        "sp_orca", "quantum_singlepoint_mol2", ("orca", "orca_2mkl"), ("multiwfn",),
+    ),
+    ExecutionModuleDefinition("chg_resp", "quantum_resp", (), ("multiwfn",)),
     ExecutionModuleDefinition(
         "topo_gaff", "topology_parameterize", (),
         ("sobtop", "atomtype", "sobtop_ini", "sobtop_lj_parameters", "sobtop_bonded_parameters", "obabel", "openbabel", "coordgen"),
     ),
-    ExecutionModuleDefinition("topo_opls", "topology_parameterize", ("ligpargen", "boss")),
+    ExecutionModuleDefinition(
+        "topo_opls", "topology_parameterize", ("ligpargen", "boss", "obabel", "csh"),
+    ),
     ExecutionModuleDefinition("mdp", "simulation_mdp"),
     ExecutionModuleDefinition("box", "simulation_box", ("gmx",), ("packmol",)),
     ExecutionModuleDefinition("gromacs_em", "simulation_em", ("gmx",)),

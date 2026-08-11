@@ -1,7 +1,7 @@
 # 运行助理开发方案
 
-> 状态：Phase A 与性能/可靠性升级核心实现完成；EQ 失败后的提案、替代方案、明确授权和受控重跑已实现；实际建盒审计查询已实现；真实目标体系验收待补；Phase B-D 规划中
-> 最后核验：2026-08-04
+> 状态：Phase A 与性能/可靠性升级核心实现完成；EQ 失败后的提案、替代方案、明确授权和受控重跑已实现；实际建盒审计查询已实现。当前版本的成熟方案只验收受支持 profile 十步完成且最终无错误；科学体系预测、后处理/分析和远程执行不在本版本范围内。Phase B-D 仍为后续增强，项目说明助理待设计。
+> 最后核验：2026-08-11
 > 责任边界：0 号负责跨层契约和验收；3 号负责运行控制与模拟执行接口；4 号负责前端交互；各层工程师负责本层失败报告的准确性。
 
 ## 1. 决策与目标
@@ -30,7 +30,7 @@
 
 ## 2. 当前基线与差距
 
-当前 `PipelineOrchestrator` 已具备单次运行工作区：为每个运行创建 `md_run/<run_id>/`，将配置快照及本次需要的 `.gjf` 或可复用 Step 1 中间产物复制进去，并使量子、拓扑和模拟步骤在同一工作区读写产物。新任务总是从 Step 1 开始，不能继承根目录 `status.json` 的完成步骤；续跑必须由受控调用方显式传入原运行目录和步骤。缺少中间产物但存在 `.gjf` 时会正常执行 Step 1，不产生前端错误；失败时仍由所属 LayerAgent 处理。
+当前 `PipelineOrchestrator` 已具备单次运行工作区：为每个运行创建 `md_run/<run_id>/`，将配置快照及与后端匹配的原始输入（G16/G09 `.gjf`、ORCA `.inp`）复制进去，并可额外复制 Step 1 中间产物。原始输入在方案和启动时均会审计；中间产物不能替代它。新任务总是从 Step 1 开始，不能继承根目录 `status.json` 的完成步骤；续跑必须由受控调用方显式传入原运行目录和步骤。缺少中间产物但原始输入完整时会正常执行 Step 1，不产生前端错误；失败时仍由所属 LayerAgent 处理。
 
 Phase A 之前的基线与目标如下：
 
@@ -39,11 +39,11 @@ Phase A 之前的基线与目标如下：
 | 运行身份 | 启动后再推导 `run_dir` | 已实现启动时原子预占锁并立即返回稳定 `run_id` |
 | 状态 | 根目录单一 `status.json`，只代表当前/最近运行 | 已实现每 run 的独立状态快照；根文件不作为运行事实 |
 | 事件 | 无可追加的事件记录 | 已实现 `events.jsonl`：状态变化、步骤结果的公开摘要 |
-| 配置来源 | 运行目录有 `config.json` 快照 | 已实现配置和量子输入（`.gjf`、`.fchk`/`.molden`）哈希、后端和产物登记；代码/依赖版本待补 |
+| 配置来源 | 运行目录有 `config.json` 快照 | 已实现配置和量子输入（`.gjf`/`.inp`、`.fchk`/`.molden`）哈希、后端和产物登记；代码/依赖版本待补 |
 | 用户操作 | 前端以启动/停止为主 | 先只读，后以 ActionProposal + 显式确认执行 |
 | 日志与产物 | 文件存在于运行目录但缺少统一查询 API | 原始日志仅保留给开发排障，不经 UI 或 LLM 工具读取 |
 
-初版已提供历史列表和只读运行观察。EQ 协议调整的受控重跑已落地：失败后只创建待确认动作，方案会列出允许复审的 EQ 参数；`awaiting_confirmation` 仅表示“LLM 已返回当前方案、尚未得到用户明确确认”，不能回退为未知、重试中或运行中。只有当前工程仍携带 `awaiting_confirmation` 动作时，用户提出明确的参数或阶段修正才能请求替代方案、无歧义批准语才能启动受控重跑；其他状态下的同类文本仍只读解释，不具备控制权限。替代方案会生成新的 `action_id`，原方案失效，配置在再次明确确认前保持不变；确认接口接受“确认”“同意该方案并重跑”等无歧义表达，且在成功保留启动锁后立即写入 `retrying`，随后由受控子进程流转到 `running`。启动失败时恢复原 `awaiting_confirmation` 快照。当前受限动作只允许从 Step 9 重跑 EQ，或在真空区等必须重建初始盒子的情形从 Step 7 依次重跑 Box、EM、EQ、PROD；不开放任意 run、任意路径或任意步骤的通用 resume。
+初版已提供历史列表和只读运行观察。EQ 协议调整的受控重跑已落地：失败后只创建待确认动作，方案会列出允许复审的 EQ 参数；`awaiting_confirmation` 仅表示“LLM 已返回当前方案、尚未得到用户明确确认”，不能回退为未知、重试中或运行中。诊断证据同时支持多个可能原因时，动作可含最多 3 个相互独立的候选方案；每项公开可能原因、证据摘要、核心修改和重跑起点。用户回复“方案1/方案一/选择方案1”只选择该项并保持等待；回复“确认方案1/确认方案一”才同时选择并授权执行。未选择时的“确认”不启动任何进程。只有当前工程仍携带 `awaiting_confirmation` 动作时，用户提出明确的参数或阶段修正才能请求替代方案、无歧义批准语才能启动受控重跑；其他状态下的同类文本仍只读解释，不具备控制权限。替代方案会生成新的 `action_id`，原方案失效，配置在再次明确确认前保持不变；确认接口在成功保留启动锁后立即写入 `retrying`，随后由受控子进程流转到 `running`。启动失败时恢复原 `awaiting_confirmation` 快照。当前受限动作只允许从 Step 9 重跑 EQ；真空区和密度只作为诊断证据，不会强制回到 Step 7 重建盒子。不开放任意 run、任意路径或任意步骤的通用 resume。替代方案若未通过后端校验，运行助理将显示脱敏的具体原因而非统一失败文案，原动作保持可见、可继续修改或确认；拒绝原因来自服务器的字段/范围/快照校验，不是 LLM 对运行结果的解释。
 
 ## 3. 运行数据契约
 
@@ -54,19 +54,21 @@ md_run/
   index.json                         # 运行摘要索引，原子写入
   <run_id>/
     config.json                      # 启动时冻结的配置快照
-    manifest.json                    # RunRegistry 的公开运行审计元数据和产物清单
-    md_manifest.json                 # 模拟层私有的阶段许可、指纹与 checkpoint
-    topology_manifest.json           # 拓扑层私有的 Step 4/5 组件计划
+    run_manifest.json                # v2：registry 公开 section 与四个私有 section
+    manifest.json                    # 仅历史 run 的兼容公开 manifest
+    md_manifest.json                 # 仅历史 run 的兼容 MD manifest
+    topology_manifest.json           # 仅历史 run 的兼容拓扑 manifest
     status.json                      # 此运行最新状态
     events.jsonl                     # 追加式审计事件
-    input/ or *.gjf, *.fchk, *.molden # 已冻结的量子输入（实现可以保持现有平铺布局）
+    logs/structured.jsonl             # 持续追加的脱敏结构化运行事件
+    input/ or *.gjf, *.inp, *.fchk, *.molden # 已冻结的量子输入（实现可以保持现有平铺布局）
     logs/                            # 外部程序和控制器日志
     artifacts/ or step outputs       # 计算产物（实现可逐步迁移）
 ```
 
-第一版不要求移动已存在的运行产物，但必须让其公开路径由 `manifest.json` 描述；不允许 UI 或 LLM 用任意文件名扫描项目根目录。`md_manifest.json` 和 `topology_manifest.json` 分别是模拟层与拓扑层的私有执行契约，运行助理不从中推断公开状态。唯一受限例外是 `tools_get_box_parameters_run`：它只读取 `md_manifest.json.box_attempts` 的最近一条，并按固定白名单返回建盒策略、目标/实际密度、请求/实际盒矢量、角度、体积和原子数；不返回路径、命令、日志、阶段许可、checkpoint 或其他私有字段。
+新 run 不移动既有科学产物，但所有低频 metadata 写入 `run_manifest.json`。不允许 UI 或 LLM 用任意文件名扫描项目根目录。`registry` 是唯一公共投影；`provenance`、`topology`、`simulation`、`protocol` 均是私有 section，由各自层级按 section revision/CAS 管理，运行助理不从中推断公开状态。历史拆分 manifest 只读兼容，终态迁移默认保留旧文件。唯一受限例外是 `tools_get_box_parameters_run`：它只读取 simulation section 的 `box_attempts` 最近一条，并按固定白名单返回建盒策略、目标/实际密度、实际盒矢量、角度、体积和原子数；不返回路径、命令、日志、阶段许可、checkpoint 或其他私有字段。
 
-### 3.1 RunRegistry `manifest.json` 最小字段
+### 3.1 RunRegistry `registry` section 最小字段
 
 ```json
 {
@@ -83,13 +85,15 @@ md_run/
 }
 ```
 
-`parent_run_id` 仅在从旧运行创建新运行（fork）时填写。恢复原运行与创建 fork 是两种不同动作：前者通常不修改配置快照，后者必须生成新的 `run_id` 和新的快照。已批准的 EQ 协议调整是受限例外：其私有动作记录保存审批前配置哈希，只有确认后才原子改写同一 run 的配置快照，并由下一个 MD 阶段将该版本归档到 `md_manifest.json` 的配置修订记录。
+`parent_run_id` 仅在从旧运行创建新运行（fork）时填写。恢复原运行与创建 fork 是两种不同动作：前者通常不修改配置快照，后者必须生成新的 `run_id` 和新的快照。已批准的 EQ 协议调整是受限例外：其私有动作记录保存审批前配置哈希，只有确认后才原子改写同一 run 的配置快照，并由下一个 MD 阶段将该版本归档到 simulation section 的配置修订记录。
 
 ### 3.2 状态与事件
 
 `status.json` 继续使用 `PipelineStatus` 的稳定字段。Phase A 的 run 级快照增加顶层 `run_id`，步骤 ID 复用既有 `step` 字段；独立 `attempt_id` 和可定位的 `error_ref` 留给后续阶段。根目录旧 `status.json` 不作为运行事实来源；未绑定 run 的启动冲突或启动失败仅写入独立 `startup_audit.json`。
 
 每个 `events.jsonl` 记录 `timestamp`、`event_type`、`run_id`、`details`。公开 `details` 仅记录 activity、完成状态和摘要错误，不含 Agent 动作、原始日志、命令行、绝对路径或底层诊断；EQ 的等待、替代提案和确认均以受限状态事件记录，替代事件为 `pending_action_revised`。
+
+`logs/structured.jsonl` 是 run-local 的内部执行流，不替代公开 `events.jsonl`、`decision_trace.jsonl` 或 `process_lifecycle.jsonl`。每条记录含 `schema_version`、UTC `timestamp`、共享 `sequence`、`event_code`、`level`、`run_id`，并按需记录步骤/层、结果、错误类别、动作/策略/模型/Prompt 标识、受控参数字段、耗时和逻辑产物引用。编排器与 GROMACS 运行期间追加步骤、状态和进程事件；mdrun 心跳按现有低频周期追加。路径、命令、原始输出、完整提示词和密钥类字段统一脱敏，写入失败不改变步骤结果。
 
 写入约束：状态和索引采用原子替换；事件采用单行追加并加锁；任何写入失败不得阻断原始计算步骤，但必须记录为可见的运行管理告警。
 
@@ -105,19 +109,26 @@ md_run/
 | `list_run_artifacts` | 已注册产物及类型、大小、产生步骤 | 仅 manifest 已登记条目 |
 | `explain_run_error` | 当前公开工序进度和摘要错误 | 只读，不触发重试 |
 | `get_run_config` | 当前运行冻结配置 | 读取该 run 的 `config.json` 快照 |
-| `get_box_parameters_run` | 最近一次 Packmol 的建盒策略、目标/实际质量密度、实际盒矢量和体积 | 仅固定白名单的 `md_manifest.json.box_attempts[-1]`，不推断平衡密度 |
-| `get_run_environment` | 外部软件可用性和发现来源摘要 | 读取脱敏 `environment_report.json`，不返回路径或变量值 |
+| `get_box_parameters_run` | 最近一次 Packmol 的建盒策略、目标/实际质量密度、实际盒矢量和体积 | 仅固定白名单的 simulation section `box_attempts[-1]`，不推断平衡密度 |
+| `get_run_environment` | 外部软件可用性和发现来源摘要 | 读取脱敏 provenance section 的 capabilities；历史 run 回退 `provenance.json`/`environment_report.json`，不返回路径或变量值 |
 | `get_md_eta_run` | GROMACS 当前阶段的 ETA 或运行心跳 | 仅读取脱敏 `mdrun_eta.json`，不触发刷新；ETA 仅在 `mdrun -v` 已给出有效剩余时长或 GROMACS 2025 `will finish <ctime>` 预测时返回，其他情况只说明心跳与最近阶段产物更新 |
 
 LLM 的系统提示必须明确：不运行 shell，不编辑源代码、配置或数据集，不执行未确认动作，不把缺失信息编造成运行结果。它只能基于工具返回的公开 `run_id`、状态、工序报告和产物摘要作答；不得请求或展示原始日志、stderr、命令行、绝对路径或 Agent 底层诊断。ETA 是 GROMACS 在 `eta_observed_at` 时报告的运行时预测，必须原样说明其观测时刻，不能把它表述为保证的结束时刻，也不能按阶段总时长、步骤或文件更新时间自行推算。工具提供 `_local` 时间字段时，助理必须优先使用，未经转换的 ISO 时间一律视为内部 UTC。唯一受控例外是等待确认的 EQ：用户明确提出替代调整时，后端将受限上下文交给 Simulation Agent 生成新 proposal；LLM 仍不能直接写配置、启动或确认动作。
 
-### 4.1 策展经验库（Phase B 待实现）
+### 4.1 MD 运行知识库（本轮已实现，维护契约）
 
-运行助理当前没有、也不得通过任意路径读取 `docs/`。已验证案例先维护在 [`knowledge.md`](knowledge.md) 的“已验证运行诊断经验”章节；它是后续经验工具的人工审阅来源，不是当前 Phase A 的运行时输入。
+本轮为 **Simulation Agent 的 EQ 失败 proposal** 建立受限的 GROMACS 运行知识检索；它不是 Run Assistant 的通用文档读取能力，运行助理及其 9 个只读工具仍不得读取任意 `docs/` 路径。知识源固定为 [`knowledge_mdrun.md`](knowledge_mdrun.md)，初始覆盖 GROMACS User Guide 的三类经人工整理条目：运行时错误、`mdrun` 运行特性、`.mdp` 参数。条目保存来源 URL、章节、适用条件、受限事实和兼容性提醒，但不保存原始页面全文或可执行命令。
 
-Phase B 应新增只读 `tools_lookup_experience_run`。该工具只能根据当前已选 run 的公开步骤、错误类别和已公开配置，返回白名单化案例中的：适用签名、已验证事实、不可作出的结论、建议补充证据和需用户确认的下一步。不得返回文档全文、原始日志、命令行、绝对路径或未匹配案例。
+本轮已按以下顺序实现并通过 5 个专门测试及完整回归；下列条目同时是后续维护的验收契约：
 
-经验条目至少须包含 `case_id`、适用范围、证据、可得结论、禁止外推、建议动作和维护日期。工具匹配到条目时仍必须先说明它是历史经验；当前 run 缺少必要证据时应明确“无足够证据匹配”，不能把经验改写为该 run 的诊断事实。经验工具永远只提供建议，配置修改、重试或创建派生运行仍必须走确认式控制。
+1. 已建立受版本控制的 Markdown 条目格式和解析器，只公开稳定的 `number + name` 索引；所有内容由本地受控解析器读取，运行期间不联网抓取文档。
+2. 已接入只读 `tools_lookup_mdrun_knowledge`。模型只能用条目数字和条目名称成对请求；处理器验证二者匹配、单次至多 3 条，返回白名单字段而不返回 Markdown 原文、路径、日志或命令。
+3. 已在每个 proposal 调用内限制 2 次知识工具调用；一次调用结束后新的真实失败由新的 proposal 调用重新计数。重复提问、同一等待方案的渲染或用户替代要求不会在一次调用内部增加预算。除该工具外，proposal 阶段不暴露任何可写或执行工具。
+4. 已将错误类型、阶段、脱敏证据、冻结配置和标记为“未验证”的 Agent 假设注入 proposal prompt；不预选原因或条目。模型自行从索引中判断是否检索，再生成最多 3 个相互独立、待用户确认的方案。
+5. 已为每个候选方案写入受限来源元数据：`knowledge_status`、实际读取并验证过的 `knowledge_entries`、`advice_source` 和版本兼容提示。没有命中、知识源不可用或模型未检索时，前端明确显示“LLM 未经知识库验证的推断”，不会伪装为文档结论。
+6. 已覆盖索引/名称校验、三条上限、两轮预算、工具不可写、虚假条目剥离、命中/未命中公开字段、pending-action 选择/替换/确认门禁及 UI 来源文案；2026-08-11 当前完整回归为 806 passed、9 skipped（收集 815 条）。
+
+知识条目只是诊断参考，不替代当前 run 的验收事实、ErrorKind、阶段许可或人工确认。文档来源的参数示例可能与实际安装的 GROMACS 版本不完全适配；命中时仍须展示兼容性提醒，用户确认后才可应用受限参数修改。
 
 ## 5. 受控操作模型
 
@@ -163,7 +174,7 @@ src/willy/agent_run.py          # 运行问题的只读对话编排
 src/willy/toolist_run.py        # 只读 LLM tool schema 与 handler
 ```
 
-已完成：`PipelineOrchestrator` 在创建 run 时注册 manifest、写入脱敏外部工具能力报告，并在每个状态转换时同步 run 状态和事件；GROMACS `mdrun -v` 的 ETA 与阶段产物心跳会被归约为 `mdrun_eta.json`，并每 15 秒刷新 run 内状态快照而不扩张事件流。`RunRegistry` 以只读、安全字段和本地化展示时间供运行助理查询；`frontend_api.py` 只经 `RunRegistry` 读取运行信息；`app.py` 保留欢迎语为运行助理对话框的首个气泡，再将当前 run 的工程状态及待确认调整作为其下独立、可替换的信息气泡，并将普通问答作为后续独立气泡。可用 ETA 在状态气泡中简写为“当前步骤预计结束：<本地时间>”。状态与待确认动作必须从同一个当前 `run_id` 快照读取，绝不扫描历史等待项；定时信息不会累积到浏览器对话历史或传入 LLM。浏览器内的普通对话也绑定该 run，工程切换后先重置为欢迎消息再向 LLM 传递上下文。确认停止会公开 `stopping` 与最终 `aborted`，运行助理只解释该持久化事实，不执行停止操作。为保证高影响控制不经模型推断，文本“中止”“暂停”“稍后”等只保留工程当前状态；只有独立的“中止流水线”按钮经第二次点击才调用停止入口。`agent_run.py` 和其 tool list 仍严格只读。`agent_run.py` 是按请求创建的无状态 Agent；对话历史仅保留在浏览器会话，不作为运行事实或审计记录。
+已完成：`PipelineOrchestrator` 在创建 run 时注册 manifest、写入脱敏外部工具能力报告，并在每个状态转换时同步 run 状态和事件；GROMACS `mdrun -v` 的 ETA 与阶段产物心跳会被归约为 `mdrun_eta.json`，并每 15 秒刷新 run 内状态快照而不扩张事件流。`RunRegistry` 以只读、安全字段和本地化展示时间供运行助理查询；`frontend_api.py` 只经 `RunRegistry` 读取运行信息。`app.py` 将欢迎语固定为对话框的第一个独立气泡，并关闭 Gradio 对连续助理消息的视觉合并。浏览器会话维护同一 run 的显示时间线：当前状态卡由 `status_event_id` 绑定 run、状态、步骤、待确认动作和公开错误事件；同一身份内 ETA、心跳或进度文字只原位刷新。身份改变时，旧状态卡封存为历史，随后新建当前状态卡；公开错误以 `run_id + state_revision`、待确认调整以 `run_id + action_id` 各自作为独立、去重且持久的事件气泡。状态卡、错误和方案在当前会话内不再合并或截断；切换 run 时一并清空并从欢迎语和新 run 状态重新开始。可用 ETA 在状态气泡中简写为“当前步骤预计结束：<本地时间>”。状态、公开错误与待确认动作必须从同一个当前 `run_id` 快照读取，绝不扫描历史等待项；状态和事件气泡属于显示历史，不传入 LLM。浏览器内的普通对话也绑定该 run，工程切换后先重置为欢迎消息再向 LLM 传递上下文。确认停止会公开 `stopping` 与最终 `aborted`，运行助理只解释该持久化事实，不执行停止操作。为保证高影响控制不经模型推断，文本“中止”“暂停”“稍后”等只保留工程当前状态；只有独立的“中止流水线”按钮经第二次点击才调用停止入口。`agent_run.py` 和其 tool list 仍严格只读。`agent_run.py` 是按请求创建的无状态 Agent；对话历史仅保留在浏览器会话，不作为运行事实或审计记录。
 
 `agent_run.py` 与其 tool list 保持严格只读。唯一的控制例外位于 `frontend_api.revise_pending_action`：它仅在同一 run 处于 `awaiting_confirmation` 时生成并校验替代 `pending_action`，不写 `config.json`、MDP、阶段许可或进程；替换后的动作必须由用户再次明确确认。
 
@@ -176,6 +187,14 @@ src/willy/toolist_run.py        # 只读 LLM tool schema 与 handler
 改造点：把各层 `StepResult`、error、日志引用和 Agent action 标准化写入事件；实现白名单化 `tools_lookup_experience_run`，将经审阅的案例与当前 run 的公开证据匹配；Config Agent 支持与运行助理不同的对话模式及多轮上下文摘要。
 
 验收：运行助理工程状态和对话对同一错误给出相同的公开摘要；经验命中必须附带适用边界和待验证条件，未命中不得臆造案例；`step_id`、`ErrorKind` 和证据引用仅供内部 LayerAgent 处理，不能向用户暴露；Advisor 建议与实际 run 配置一致，并能说明建议的前提。
+
+### Phase B.1：项目说明与架构问答（规划）
+
+当前方案助理只接收配置生成所需的分子与协议事实，运行助理只接收单个 `run_id` 的公开运行事实；二者均没有仓库源码或项目文档读取能力。用户询问“本项目的架构、状态机、manifest、工具边界或已实现能力”时，模型可以给出一般性说明，但不能保证是当前项目的真实事实。
+
+后续新增独立的 **项目说明助理（Project Assistant）**，不扩大方案助理、运行助理或 LayerAgent 的权限。它只读受控的项目知识索引，初始白名单为 `README.md`、`docs/Willy.md`、`docs/employees.md`、`docs/status_api.md`、`docs/run_assistant_design.md` 和 `docs/document_registry.md`；索引记录文档 ID、版本/哈希、章节标题和脱敏片段。模型只能通过白名单检索工具按文档和章节读取有限片段，不能读取任意路径、源码、运行目录、密钥、环境变量、原始日志或未登记文档，也不能执行、修改配置或修改源代码。
+
+回答必须区分“已实现事实”和“规划事项”，引用文档名称与章节；索引与源文档哈希不一致、没有命中或问题需要源码级证据时，应明确说明无法确认，而不是推测。验收应覆盖：架构问题命中正确章节、计划与已实现能力不混淆、越权路径/源码读取被拒绝、文档更新后索引失效提示，以及任意问题均不产生写入或进程副作用。
 
 ### Phase C：确认式运行控制
 

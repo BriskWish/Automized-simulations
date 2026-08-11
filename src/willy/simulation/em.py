@@ -38,6 +38,14 @@ class EMResult:
     log_tail: str = ""
 
 
+def _em_extra(gmx_result: StepResult, em_result: EMResult, **fields: object) -> dict[str, object]:
+    """Keep common grompp/`mdrun` policy evidence with the EM result."""
+    extra = dict(gmx_result.extra)
+    extra["em_result"] = em_result
+    extra.update(fields)
+    return extra
+
+
 def run_em(work_dir: str = None,
            mdp: str = None,
            conf: str = None,
@@ -113,7 +121,10 @@ def run_em(work_dir: str = None,
             outputs=outputs,
             artifacts=gmx_result.artifacts,
             duration_s=duration,
-            extra={"em_result": EMResult(converged=True, fmax=fmax, steps=nsteps, tpr=tpr)},
+            extra=_em_extra(
+                gmx_result,
+                EMResult(converged=True, fmax=fmax, steps=nsteps, tpr=tpr),
+            ),
         )
         record_stage_execution(preparation, success=True, outputs=outputs, details=result.extra)
         return result
@@ -127,7 +138,10 @@ def run_em(work_dir: str = None,
             outputs=outputs,
             artifacts=gmx_result.artifacts,
             duration_s=duration,
-            extra={"em_result": EMResult(converged=True, fmax=0.0, steps=0, tpr=tpr)},
+            extra=_em_extra(
+                gmx_result,
+                EMResult(converged=True, fmax=0.0, steps=0, tpr=tpr),
+            ),
         )
         record_stage_execution(preparation, success=True, outputs=outputs, details=result.extra)
         return result
@@ -143,11 +157,12 @@ def run_em(work_dir: str = None,
         outputs={"tpr": tpr},
         artifacts=gmx_result.artifacts,
         duration_s=duration,
-        extra={
-            "em_result": EMResult(converged=False, log_tail=tail, tpr=tpr),
-            "rollback_to_step": PACKMOL_STEP,
-            "rollback_reason": "EM 未收敛，需要从 Packmol 初始盒子重新开始",
-        },
+        extra=_em_extra(
+            gmx_result,
+            EMResult(converged=False, log_tail=tail, tpr=tpr),
+            rollback_to_step=PACKMOL_STEP,
+            rollback_reason="EM 未收敛，需要从 Packmol 初始盒子重新开始",
+        ),
     )
     record_stage_execution(preparation, success=False, outputs=result.outputs, details=result.extra, error=result.error)
     return result

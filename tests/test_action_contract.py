@@ -35,9 +35,9 @@ def _proposal(**overrides) -> ActionProposal:
 
 def test_default_catalog_covers_every_schema_and_declares_effects():
     catalog = build_default_tool_catalog()
-    assert len(catalog.declarations()) == 46
+    assert len(catalog.declarations()) == 50
     names = {declaration.tool_name for declaration in catalog.declarations()}
-    assert len(names) == 46
+    assert len(names) == 50
     assert all(isinstance(declaration.effect, ActionEffect) for declaration in catalog.declarations())
     assert catalog.require("tools_get_status_run").is_read_only
     assert catalog.require("tools_retry_eq").requires_confirmation

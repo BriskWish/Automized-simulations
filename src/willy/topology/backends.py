@@ -13,7 +13,7 @@ from willy.config_store import write_json
 from willy.topology.manifest import (
     TopologyManifestComponent,
     load_manifest,
-    manifest_path,
+    manifest_exists,
     write_manifest,
 )
 from willy.topology.validation import validate_topology_files, validate_topology_output_name
@@ -258,7 +258,7 @@ def dispatch_topology(
             "current": 0, "total": total,
         })
     retry_ledger: dict[str, int] = {}
-    if manifest_path(run_dir).is_file():
+    if manifest_exists(run_dir):
         try:
             existing_manifest = load_manifest(run_dir)
             if (existing_manifest.get("backend"), existing_manifest.get("forcefield_family")) == (

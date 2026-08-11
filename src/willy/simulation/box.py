@@ -10,6 +10,7 @@ Packmol .inp 文件生成器。
 from dataclasses import dataclass
 from typing import List, Literal, Optional
 from pathlib import Path
+from hashlib import sha256
 import subprocess
 import math
 import json
@@ -21,7 +22,7 @@ from willy.env_registry import EnvironmentRegistryError, build_tool_env, require
 from willy.step_registry import PACKMOL_STEP
 
 
-DEFAULT_TARGET_MASS_DENSITY_G_CM3 = 1.5
+DEFAULT_TARGET_MASS_DENSITY_G_CM3 = 0.7
 _AMU_TO_GRAM = 1.66053906660e-24
 _CM3_TO_NM3 = 1.0e21
 _PBC_LENGTH_TOLERANCE_ANGSTROM = 0.02
@@ -170,6 +171,65 @@ def _mass_density_g_cm3(total_mass_amu: float, volume_nm3: float) -> float:
     return total_mass_amu * _AMU_TO_GRAM * _CM3_TO_NM3 / volume_nm3
 
 
+def _output_fingerprint(path: Path) -> dict:
+    """Return bounded evidence that one Packmol output was freshly produced."""
+    if not path.exists():
+        return {"exists": False, "kind": "missing"}
+    if not path.is_file():
+        return {"exists": True, "kind": "non_regular"}
+    try:
+        hasher = sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(block)
+        stat = path.stat()
+    except OSError:
+        return {"exists": True, "kind": "unreadable"}
+    return {
+        "exists": True,
+        "kind": "file",
+        "size_bytes": stat.st_size,
+        "sha256": hasher.hexdigest(),
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _box_execution_evidence(
+    *,
+    output_name: str,
+    requested_box_vectors: list[float] | None,
+    output_before: dict,
+    output_removed: bool,
+    failure_stage: str = "",
+    returncode: int | None = None,
+    output_after: dict | None = None,
+    expected_atoms: int | None = None,
+    actual_atoms: int | None = None,
+    actual_box_vectors: tuple[float, float, float] | None = None,
+    actual_box_angles: tuple[float, float, float] | None = None,
+) -> dict:
+    """Build private, log-free evidence for one Packmol invocation."""
+    evidence = {
+        "output_name": output_name,
+        "requested_box_vectors_angstrom": requested_box_vectors or [],
+        "output_before": output_before,
+        "output_removed_before_run": output_removed,
+        "failure_stage": failure_stage,
+        "returncode": returncode,
+    }
+    if output_after is not None:
+        evidence["output_after"] = output_after
+    if expected_atoms is not None:
+        evidence["expected_atoms"] = expected_atoms
+    if actual_atoms is not None:
+        evidence["actual_atoms"] = actual_atoms
+    if actual_box_vectors is not None:
+        evidence["actual_box_vectors_angstrom"] = list(actual_box_vectors)
+    if actual_box_angles is not None:
+        evidence["actual_box_angles_degrees"] = list(actual_box_angles)
+    return evidence
+
+
 # ============================================================
 # 生成器层
 # ============================================================
@@ -231,7 +291,7 @@ class InpGenerator:
                 packing_number_density_nm3=cfg.packing_number_density_nm3,
             )
             print(
-                "[box] 初始体积将由使用默认1.5g/cm3的密度猜测"
+                "[box] 初始体积将由使用默认0.7g/cm3的密度猜测"
                 if target_density == DEFAULT_TARGET_MASS_DENSITY_G_CM3
                 else f"[box] 初始体积由目标质量密度 {target_density:g} g/cm3 估算"
             )
@@ -344,10 +404,75 @@ class InpGenerator:
         import time as _time
         _start = _time.time()
 
-        if inp_path is None:
-            inp_path = self.write()
+        out_path = Path(self.config.output_dir) / f"{self.config.output_name}.pdb"
+        output_before = _output_fingerprint(out_path)
+        output_removed = False
+
+        if out_path.exists() and not out_path.is_file():
+            return StepResult(
+                step_name="box", step_index=PACKMOL_STEP, success=False,
+                error=StepError(
+                    kind=ErrorKind.INPUT_CONTRACT,
+                    message="Packmol 输出路径不是普通文件",
+                    hint="检查当前运行目录中的 model.pdb 路径",
+                ),
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=None,
+                    output_before=output_before,
+                    output_removed=False,
+                    failure_stage="output_path",
+                )},
+                duration_s=_time.time() - _start,
+            )
+
+        # A prior retry may have left a plausible-looking model.pdb behind.
+        # The current process must prove that it produced its own output.
+        if out_path.is_file():
+            try:
+                out_path.unlink()
+                output_removed = True
+            except OSError as exc:
+                return StepResult(
+                    step_name="box", step_index=PACKMOL_STEP, success=False,
+                    error=StepError(
+                        kind=ErrorKind.PACKMOL_FAILED,
+                        message=f"无法清理上一次 Packmol 输出: {exc}",
+                        hint="检查当前运行目录的写入权限",
+                    ),
+                    extra={"box_execution": _box_execution_evidence(
+                        output_name=out_path.name,
+                        requested_box_vectors=None,
+                        output_before=output_before,
+                        output_removed=False,
+                        failure_stage="output_cleanup",
+                    )},
+                    duration_s=_time.time() - _start,
+                )
+
+        try:
+            if inp_path is None:
+                inp_path = self.write()
+            requested = self.box_plan()
+        except (OSError, ValueError) as exc:
+            return StepResult(
+                step_name="box", step_index=PACKMOL_STEP, success=False,
+                error=StepError(
+                    kind=ErrorKind.INPUT_CONTRACT,
+                    message=f"无法生成 Packmol 输入: {exc}",
+                ),
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=None,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="input_generation",
+                )},
+                duration_s=_time.time() - _start,
+            )
 
         self._inp_path = Path(inp_path)
+        requested_vectors = [requested.box_size_angstrom] * 3
 
         # Packmol seeks on its input stream; ``-i`` is required because a
         # piped stdin fails with "Illegal seek" in the bundled Fortran build.
@@ -369,6 +494,13 @@ class InpGenerator:
                                 message="Packmol 超时 (300s)",
                                 hint="增大 tolerance 或降低密度以减少 packing 难度"),
                 artifacts=[str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="timeout",
+                )},
                 duration_s=_time.time() - _start,
             )
         except OSError as exc:
@@ -376,10 +508,17 @@ class InpGenerator:
                 step_name="box", step_index=PACKMOL_STEP, success=False,
                 error=StepError(
                     kind=ErrorKind.DEPENDENCY_MISSING,
-                    message=f"Packmol 无法启动: {exc}",
-                    hint="确认 Packmol 可执行文件存在且已接入当前 PATH",
+                                message=f"Packmol 无法启动: {exc}",
+                                hint="确认 Packmol 可执行文件存在且已接入当前 PATH",
                 ),
                 artifacts=[str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="process_start",
+                )},
                 duration_s=_time.time() - _start,
             )
 
@@ -389,24 +528,41 @@ class InpGenerator:
             print(result.stderr)
             return StepResult(
                 step_name="box", step_index=PACKMOL_STEP, success=False,
-                error=StepError(kind=ErrorKind.UNKNOWN,
-                                message="Packmol 盒子构建失败",
+                error=StepError(kind=ErrorKind.PACKMOL_FAILED,
+                                message=f"Packmol 以退出码 {result.returncode} 结束",
                                 raw_output=raw,
                                 hint="增大 box_size、降低密度、或增大 tolerance"),
                 artifacts=[str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="process_exit",
+                    returncode=result.returncode,
+                    output_after=_output_fingerprint(out_path),
+                )},
                 duration_s=_time.time() - _start,
             )
 
-        out_path = Path(self.config.output_dir) / f"{self.config.output_name}.pdb"
         if not out_path.is_file() or out_path.stat().st_size <= 0:
             return StepResult(
                 step_name="box", step_index=PACKMOL_STEP, success=False,
                 error=StepError(
-                    kind=ErrorKind.ENGINE_FAILURE,
-                    message="Packmol 返回成功但 model.pdb 缺失或为空",
-                    hint="检查 Packmol 输出路径、磁盘空间和输入 .inp",
+                    kind=ErrorKind.PACKMOL_FAILED,
+                                message="Packmol 返回成功但 model.pdb 缺失或为空",
+                                hint="检查 Packmol 输出路径、磁盘空间和输入 .inp",
                 ),
                 artifacts=[str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="output_missing",
+                    returncode=result.returncode,
+                    output_after=_output_fingerprint(out_path),
+                )},
                 duration_s=_time.time() - _start,
             )
         expected_atoms = sum(_pdb_atom_count(Path(component.pdb)) * component.count for component in self.config.components)
@@ -416,14 +572,24 @@ class InpGenerator:
                 step_name="box", step_index=PACKMOL_STEP, success=False,
                 error=StepError(
                     kind=ErrorKind.INPUT_CONTRACT,
-                    message=f"Packmol 原子数不一致: 期望 {expected_atoms}，实际 {actual_atoms}",
-                    hint="检查各组分 PDB、residues 计数和 Packmol 输出",
+                                message=f"Packmol 原子数不一致: 期望 {expected_atoms}，实际 {actual_atoms}",
+                                hint="检查各组分 PDB、residues 计数和 Packmol 输出",
                 ),
                 artifacts=[str(out_path), str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="atom_count",
+                    returncode=result.returncode,
+                    output_after=_output_fingerprint(out_path),
+                    expected_atoms=expected_atoms,
+                    actual_atoms=actual_atoms,
+                )},
                 duration_s=_time.time() - _start,
             )
         try:
-            requested = self.box_plan()
             actual_vectors, actual_angles = _pdb_cryst1(out_path)
         except ValueError as exc:
             return StepResult(
@@ -431,10 +597,21 @@ class InpGenerator:
                 error=StepError(
                     kind=ErrorKind.INPUT_CONTRACT,
                     message="Packmol 输出缺少有效的周期盒矢量",
-                    hint="检查 Packmol pbc 设置和输出 PDB 的 CRYST1 记录",
-                    raw_output=str(exc),
+                                hint="检查 Packmol pbc 设置和输出 PDB 的 CRYST1 记录",
+                                raw_output=str(exc),
                 ),
                 artifacts=[str(out_path), str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="periodic_cell_parse",
+                    returncode=result.returncode,
+                    output_after=_output_fingerprint(out_path),
+                    expected_atoms=expected_atoms,
+                    actual_atoms=actual_atoms,
+                )},
                 duration_s=_time.time() - _start,
             )
         if (
@@ -447,9 +624,22 @@ class InpGenerator:
                 error=StepError(
                     kind=ErrorKind.INPUT_CONTRACT,
                     message="Packmol 输出盒矢量与请求的周期盒不一致",
-                    hint="请检查 Packmol pbc 设置，重新生成初始盒子",
+                                hint="请检查 Packmol pbc 设置，重新生成初始盒子",
                 ),
                 artifacts=[str(out_path), str(self._inp_path)],
+                extra={"box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    failure_stage="periodic_cell_mismatch",
+                    returncode=result.returncode,
+                    output_after=_output_fingerprint(out_path),
+                    expected_atoms=expected_atoms,
+                    actual_atoms=actual_atoms,
+                    actual_box_vectors=actual_vectors,
+                    actual_box_angles=actual_angles,
+                )},
                 duration_s=_time.time() - _start,
             )
         actual_volume_nm3 = (
@@ -491,7 +681,21 @@ class InpGenerator:
             outputs={"pdb": str(out_path), "inp": str(self._inp_path)},
             artifacts=[str(out_path), str(self._inp_path)],
             duration_s=duration,
-            extra={"box_parameters": parameters},
+            extra={
+                "box_parameters": parameters,
+                "box_execution": _box_execution_evidence(
+                    output_name=out_path.name,
+                    requested_box_vectors=requested_vectors,
+                    output_before=output_before,
+                    output_removed=output_removed,
+                    returncode=result.returncode,
+                    output_after=_output_fingerprint(out_path),
+                    expected_atoms=expected_atoms,
+                    actual_atoms=actual_atoms,
+                    actual_box_vectors=actual_vectors,
+                    actual_box_angles=actual_angles,
+                ),
+            },
         )
 
 
@@ -607,31 +811,42 @@ def validate_box_preflight(config_path: str | Path, workspace: str | Path) -> St
     """Validate residues, topology, ITP includes, coordinates, and total charge."""
     config_file = Path(config_path)
     directory = Path(workspace)
+    output_before = _output_fingerprint(directory / "model.pdb")
+
+    def _failure(message: str, *, missing: list[str] | None = None) -> StepResult:
+        """Return a bounded preflight result that can be audited after exit."""
+        evidence = _box_execution_evidence(
+            output_name="model.pdb",
+            requested_box_vectors=None,
+            output_before=output_before,
+            output_removed=False,
+            failure_stage="preflight",
+        )
+        evidence["preflight_issues"] = list(missing or [message])
+        return StepResult(
+            "box", PACKMOL_STEP, False,
+            error=StepError(ErrorKind.INPUT_CONTRACT, message),
+            extra={"box_execution": evidence},
+        )
+
     try:
         data = json.loads(config_file.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        return StepResult("box", PACKMOL_STEP, False, error=StepError(ErrorKind.INPUT_CONTRACT, f"无法读取配置: {exc}"))
+        return _failure(f"无法读取配置: {exc}")
     residues = data.get("residues", {})
     molecules = data.get("molecules", {})
     box = data.get("box", {})
     if not isinstance(residues, dict) or not residues:
-        return StepResult("box", PACKMOL_STEP, False, error=StepError(ErrorKind.INPUT_CONTRACT, "residues 不能为空"))
+        return _failure("residues 不能为空")
     if isinstance(box, dict) and "density" in box:
-        return StepResult(
-            "box", PACKMOL_STEP, False,
-            error=StepError(ErrorKind.INPUT_CONTRACT, "旧 box.density 不可执行；请迁移为 packing_number_density_nm3"),
-        )
+        return _failure("旧 box.density 不可执行；请迁移为 packing_number_density_nm3")
     topol = directory / "topol.top"
     if not topol.is_file() or topol.stat().st_size <= 0:
-        return StepResult("box", PACKMOL_STEP, False, error=StepError(ErrorKind.INPUT_CONTRACT, "缺少非空 topol.top"))
+        return _failure("缺少非空 topol.top")
     topol_molecules = _topol_molecules(topol)
     if topol_molecules != {name: int(count) for name, count in residues.items()}:
-        return StepResult(
-            "box", PACKMOL_STEP, False,
-            error=StepError(
-                ErrorKind.INPUT_CONTRACT,
-                f"topol.top [ molecules ] 与 residues 不一致: {topol_molecules} != {residues}",
-            ),
+        return _failure(
+            f"topol.top [ molecules ] 与 residues 不一致: {topol_molecules} != {residues}"
         )
     missing = []
     for include in _topol_includes(topol):
@@ -643,10 +858,7 @@ def validate_box_preflight(config_path: str | Path, workspace: str | Path) -> St
         if not ((directory / f"{name}.pdb").is_file() or (directory / f"{name}.gro").is_file()):
             missing.append(f"{name}.pdb/.gro")
     if missing:
-        return StepResult(
-            "box", PACKMOL_STEP, False,
-            error=StepError(ErrorKind.INPUT_CONTRACT, "建盒前置文件不完整: " + ", ".join(missing)),
-        )
+        return _failure("建盒前置文件不完整: " + ", ".join(missing), missing=missing)
     try:
         charge = sum(float(residues[name]) * float(molecules[name].get("charge", 0)) for name in residues)
     except (TypeError, ValueError, AttributeError):
@@ -656,9 +868,8 @@ def validate_box_preflight(config_path: str | Path, workspace: str | Path) -> St
         isinstance(compensation, dict) and bool(compensation.get("confirmed") or compensation.get("strategy"))
     )
     if abs(charge) > 1e-8 and not confirmed:
-        return StepResult(
-            "box", PACKMOL_STEP, False,
-            error=StepError(ErrorKind.INPUT_CONTRACT, f"体系总电荷 {charge:+g}，需确认非中性体系或提供补偿离子方案"),
+        return _failure(
+            f"体系总电荷 {charge:+g}，需确认非中性体系或提供补偿离子方案"
         )
     return StepResult(
         "box", PACKMOL_STEP, True,

@@ -19,7 +19,7 @@ from willy.topology.manifest import (
     TopologyManifestComponent,
     component_for_name,
     load_manifest,
-    manifest_path,
+    manifest_exists,
     write_manifest,
 )
 
@@ -53,7 +53,7 @@ TOPOLOGY_TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_retry_top_assembly",
-            "description": "基于当前 run_dir 的 topology_manifest.json 重试主拓扑组装。",
+            "description": "基于当前 run_dir 的拓扑 manifest 重试主拓扑组装。",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -182,7 +182,7 @@ def _retry_backend(workspace: Path, molecule_name: str, backend_name: str) -> St
                               "error": result.error.message if result.error else "重试失败"})
             _write_manifest_dict(workspace, manifest)
             return result
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         return StepResult("topology_tool", 4, False, error=StepError(ErrorKind.FILE_NOT_FOUND, f"无法读取 manifest: {exc}"))
 
 
@@ -200,10 +200,10 @@ def handle_topology_tool_call(
     if tool_name == "tools_diagnose_error_topology":
         raw = args.get("raw_output", "")
         entry = None
-        if workspace is not None and args.get("molecule_name") and manifest_path(workspace).is_file():
+        if workspace is not None and args.get("molecule_name") and manifest_exists(workspace):
             try:
                 entry = component_for_name(load_manifest(workspace), args["molecule_name"])
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError, ValueError):
                 pass
         issues: list[str] = []
         hint = "检查 manifest 中记录的本次 .mol2/.chg 和后端日志。"
@@ -247,7 +247,7 @@ def handle_topology_tool_call(
                     return _tool_failure(reason, ErrorKind.RETRY_LIMIT_EXCEEDED)
                 _write_manifest_dict(workspace, manifest)
                 return json.dumps(build(config_path=str(active_config), topo_dir=str(workspace)).to_dict(), ensure_ascii=False)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
             return _tool_failure(f"无法读取 manifest: {exc}", ErrorKind.FILE_NOT_FOUND)
     if tool_name == "tools_modify_config_topology":
         try:
@@ -261,7 +261,7 @@ def handle_topology_tool_call(
         normalized, issues, _ = normalize_topology_config(topology)
         if issues:
             return json.dumps({"ok": False, "error": "; ".join(issues)}, ensure_ascii=False)
-        if manifest_path(workspace).is_file():
+        if manifest_exists(workspace):
             try:
                 with manifest_lock(workspace):
                     manifest = load_manifest(workspace)
@@ -278,7 +278,7 @@ def handle_topology_tool_call(
                         if "default_opt_steps" in args:
                             entry["opt_steps"] = normalized["default_opt_steps"]
                     _write_manifest_dict(workspace, manifest)
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
                 return json.dumps({"ok": False, "error": f"无法读取 manifest: {exc}"}, ensure_ascii=False)
         config["topology"] = normalized
         write_json(active_config, config)
