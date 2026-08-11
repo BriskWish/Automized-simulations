@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 import os
+import re
 import shutil
 import subprocess
 
@@ -101,6 +102,103 @@ class EnvironmentRegistryError(RuntimeError):
     """Raised when a caller asks to execute a tool that is not usable."""
 
 
+@dataclass(frozen=True)
+class RuntimeProbeResult:
+    """Bounded result of starting an executable without running a workflow."""
+
+    status: str
+    classification: str
+    public_reason: str = ""
+    returncode: int | None = None
+    raw_output: str = ""
+
+
+_LOADER_FAILURE_PATTERNS = (
+    re.compile(r"GLIBC_[0-9.]+.*not found", re.IGNORECASE),
+    re.compile(r"error while loading shared libraries", re.IGNORECASE),
+    re.compile(r"cannot open shared object file", re.IGNORECASE),
+    re.compile(r"wrong ELF class", re.IGNORECASE),
+    re.compile(r"Exec format error", re.IGNORECASE),
+    re.compile(r"cannot execute binary file", re.IGNORECASE),
+)
+
+
+def probe_executable_runtime(
+    executable: str | Path,
+    *,
+    label: str = "运行工具",
+    probe_args: tuple[str, ...] = ("-h",),
+    timeout: float = 3.0,
+) -> RuntimeProbeResult:
+    """Check that an executable can be loaded without running a scientific job.
+
+    A non-zero return code is acceptable when the program started and merely
+    rejected the probe arguments. Dynamic-loader signatures, start errors and
+    timeouts are classified as runtime failures. Raw output is private and is
+    bounded for run-local diagnostics only.
+    """
+    path = Path(executable).expanduser()
+    if not path.exists():
+        return RuntimeProbeResult(
+            MISSING, "missing", f"{label} 可执行文件不存在",
+        )
+    if not path.is_file():
+        return RuntimeProbeResult(
+            MISCONFIGURED, "misconfigured", f"{label} 配置项不是普通文件",
+        )
+    if not os.access(path, os.X_OK):
+        return RuntimeProbeResult(
+            NOT_EXECUTABLE, "not_executable", f"{label} 没有执行权限",
+        )
+    try:
+        probe = subprocess.run(
+            [str(path), *probe_args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(path.parent),
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raw = " ".join(
+            str(value) for value in (exc.stdout, exc.stderr) if value
+        )[-500:]
+        return RuntimeProbeResult(
+            RUNTIME_UNAVAILABLE, "timeout",
+            f"{label} 启动探针超时",
+            raw_output=raw,
+        )
+    except OSError as exc:
+        return RuntimeProbeResult(
+            RUNTIME_UNAVAILABLE, "process_start",
+            f"{label} 无法在当前系统启动",
+            raw_output=str(exc)[-500:],
+        )
+
+    raw = "\n".join(
+        value for value in (probe.stdout or "", probe.stderr or "") if value
+    )[-500:]
+    if probe.returncode < 0:
+        return RuntimeProbeResult(
+            RUNTIME_UNAVAILABLE, "signal_exit",
+            f"{label} 启动时被系统信号终止",
+            returncode=probe.returncode,
+            raw_output=raw,
+        )
+    if any(pattern.search(raw) for pattern in _LOADER_FAILURE_PATTERNS):
+        return RuntimeProbeResult(
+            RUNTIME_UNAVAILABLE, "loader_failure",
+            f"{label} 与当前系统运行库不兼容",
+            returncode=probe.returncode,
+            raw_output=raw,
+        )
+    return RuntimeProbeResult(
+        AVAILABLE, "started", returncode=probe.returncode,
+    )
+
+
 TOOL_SPECS: dict[str, ToolSpec] = {
     "g16": ToolSpec("g16", "Gaussian 16", "g16", "WILLY_G16_BIN"),
     "formchk": ToolSpec("formchk", "Gaussian formchk", "formchk", "WILLY_FORMCHK_BIN"),
@@ -116,6 +214,7 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         "WILLY_ORCA_HOME", ("ORCA_DIR",),
     ),
     "multiwfn": ToolSpec("multiwfn", "Multiwfn", "Multiwfn"),
+    "packmol": ToolSpec("packmol", "Packmol", "packmol"),
     "gmx": ToolSpec("gmx", "GROMACS", "gmx", "WILLY_GMX_BIN"),
     "ligpargen": ToolSpec("ligpargen", "LigParGen", "LigParGen", "WILLY_LIGPARGEN_BIN"),
     "obabel": ToolSpec("obabel", "Open Babel", "obabel", "WILLY_OBABEL_BIN"),
@@ -294,6 +393,32 @@ def _resolve_multiwfn(project_root: str | Path | None) -> ResolvedTool:
     )
 
 
+def _resolve_packmol(project_root: str | Path | None) -> ResolvedTool:
+    """Resolve and start-probe Willy's bundled Packmol executable."""
+    spec = TOOL_SPECS["packmol"]
+    bundled = _project_root(project_root) / "vendor" / "packmol"
+    result = _binary_result(spec, str(bundled), "bundled", strict=False)
+    if not result.available:
+        return result
+    probe = probe_executable_runtime(result.executable, label=spec.label)
+    if probe.status != AVAILABLE:
+        return ResolvedTool(
+            result.tool_id,
+            result.label,
+            probe.status,
+            executable=result.executable,
+            home=result.executable.parent if result.executable else None,
+            source=result.source,
+            public_reason=probe.public_reason,
+        )
+    return ResolvedTool(
+        **{
+            **result.__dict__,
+            "home": result.executable.parent if result.executable else None,
+        },
+    )
+
+
 def _resolve_boss(project_root: str | Path | None) -> ResolvedTool:
     spec = TOOL_SPECS["boss"]
     value, source = _configured_value(spec.home_env, project_root)
@@ -355,6 +480,8 @@ def resolve_tool(tool_id: str, project_root: str | Path | None = None) -> Resolv
         return _verify_boss_runtime(_resolve_boss(project_root))
     if tool_id == "multiwfn":
         return _resolve_multiwfn(project_root)
+    if tool_id == "packmol":
+        return _resolve_packmol(project_root)
     if tool_id in {"orca", "orca_2mkl"}:
         return _resolve_orca_helper(spec, project_root)
     return _resolve_binary(spec, project_root)

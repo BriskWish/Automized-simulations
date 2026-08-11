@@ -185,6 +185,31 @@ def test_escalated_protocol_change_tells_user_the_run_was_not_modified(tmp_path,
     assert "当前运行未改写" in markdown
 
 
+def test_escalated_runtime_failure_shows_recovery_conclusion(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_id = "md_runtime_202608110001"
+    _record_run_status(tmp_path, run_id, {
+        "state": "escalated",
+        "step": 7,
+        "error_kind": "runtime_unavailable",
+        "error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+        "escalation": {
+            "layer": "simulation",
+            "step": "Packmol 盒子构建",
+            "error_kind": "runtime_unavailable",
+            "attempts_made": 0,
+            "actions_tried": ["检测到运行环境不可用，未执行自动参数修复"],
+            "recommendation": "请安装与当前系统兼容的 Packmol 后重新提交。",
+        },
+    })
+
+    markdown = frontend_api.get_run_summary_markdown(run_id)
+
+    assert "自动修复：未执行参数调整" in markdown
+    assert "处理建议：请安装与当前系统兼容的 Packmol 后重新提交。" in markdown
+    assert "第 1/3 次" not in markdown
+
+
 def test_awaiting_confirmation_summary_explains_the_llm_and_user_boundary(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     run_id = "md_waiting_202608020001"
@@ -792,7 +817,7 @@ def test_managed_mode_persists_only_the_mode_and_never_an_endpoint_or_registrati
     assert "WILLY_LLM_MODE" not in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
-def test_selecting_managed_mode_does_not_create_device_identity_until_request(tmp_path, monkeypatch):
+def test_selecting_managed_mode_does_not_create_device_identity_until_ui_registration(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     monkeypatch.setattr(frontend_api, "_refresh_agent_llm_client", lambda: None)
     (tmp_path / "managed_gateway.json").write_text(
@@ -802,7 +827,7 @@ def test_selecting_managed_mode_does_not_create_device_identity_until_request(tm
     monkeypatch.setattr(
         frontend_api,
         "ManagedIdentityStore",
-        lambda: (_ for _ in ()).throw(AssertionError("selection must not create an identity")),
+        lambda: (_ for _ in ()).throw(AssertionError("mode persistence must not create an identity")),
     )
 
     assert frontend_api.save_llm_mode("managed") == "已选择托管 LLM 网关。"

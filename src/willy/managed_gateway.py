@@ -221,7 +221,9 @@ def _request_json(
 ) -> Mapping[str, object]:
     request_headers = {"Accept": "application/json", **dict(headers or {})}
     try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_S, follow_redirects=False) as client:
+        # The gateway profile is deployment-owned. Do not let a user's global
+        # HTTP(S) proxy silently redirect a private registration request.
+        with httpx.Client(timeout=_REQUEST_TIMEOUT_S, follow_redirects=False, trust_env=False) as client:
             response = client.request(
                 method,
                 f"{profile.base_url}{path}",

@@ -21,16 +21,23 @@
     },
     {
       "id": "packmol-linux-runtime",
-      "distribution_status": "evidence_pending",
-      "source_url": "https://m3g.github.io/packmol/",
-      "version": "unverified",
+      "distribution_status": "release_ready",
+      "source_url": "https://github.com/m3g/packmol/releases/tag/v21.2.3",
+      "version": "21.2.3",
       "upstream_license_basis": {
-        "license": "GNU General Public License (exact binary notice pending)",
-        "evidence_url": "https://m3g.github.io/packmol/packmol2.pdf"
+        "license": "MIT",
+        "evidence_url": "https://github.com/m3g/packmol/blob/v21.2.3/LICENSE"
       },
-      "license_files": [],
+      "license_files": ["PACKMOL_LICENSE.txt"],
+      "build_provenance": {
+        "source_tarball_sha256": "b26af58d407b1c8d786aa6c2bb6bfa40d741aaa0424db51300fdd6fd66dd4813",
+        "builder": "Ubuntu 20.04 x86_64, glibc 2.31, gfortran 9.4.0",
+        "flags": "-O3 -march=x86-64 -mtune=generic -funroll-loops",
+        "max_glibc_symbol": "GLIBC_2.29"
+      },
       "files": [
-        {"path": "packmol", "size_bytes": 426608, "sha256": "ad7b697b0865c053bdb435bc45405c53d224307c4ee863f8bbc075e9992fe5ab"}
+        {"path": "packmol", "size_bytes": 427424, "sha256": "b4ec513ea4c950a2af763f60233cd4d20ef705562aa700b3e9daaf6c1addb818"},
+        {"path": "PACKMOL_LICENSE.txt", "size_bytes": 1118, "sha256": "b7f87d528cc3b9b8d8724ec67ed47754e05fb984a63e2cb6dd3167e62df86af7"}
       ]
     },
     {

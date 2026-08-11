@@ -373,6 +373,12 @@ class PipelineStateMachine:
     def set_escalated(self, escalation: dict):
         """进入 ESCALATED 状态。"""
         self._set_state(State.ESCALATED)
+        # Retry counters describe an active repair attempt only. Once the run
+        # is escalated, the durable escalation payload is the sole source of
+        # truth for attempts made; retaining retrying metadata misleads the UI.
+        self._status.agent = ""
+        self._status.retry_n = 0
+        self._status.retry_max = 0
         # Raw engine output is intentionally retained only in the in-memory
         # LayerAgent context, never in the public status snapshot.
         allowed = {
@@ -518,6 +524,7 @@ class PipelineStateMachine:
             "error": status.error,
             "error_kind": status.error_kind,
             "repair": _public_repair(status),
+            "escalation": _public_escalation(status.escalation),
             "activity": dict(status.activity),
             "started_at": status.started_at,
             "updated_at": status.updated_at,
@@ -721,3 +728,37 @@ def _public_repair(status: PipelineStatus) -> dict:
         "max_attempts": max(0, int(status.retry_max)),
         "adjustments": adjustments,
     }
+
+
+def _public_escalation(value: object) -> dict:
+    """Project a recovery conclusion without exposing logs, paths, or prompts."""
+    if not isinstance(value, dict):
+        return {}
+
+    def clean(item: object, limit: int) -> str:
+        text = str(item or "").replace("\n", " ").replace("\r", " ").strip()
+        if not text or "/" in text or "\\" in text or ".." in text:
+            return ""
+        return text[:limit]
+
+    attempts = value.get("attempts_made", 0)
+    if isinstance(attempts, bool):
+        attempts = 0
+    try:
+        attempts = max(0, min(int(attempts), 99))
+    except (TypeError, ValueError):
+        attempts = 0
+    actions = [
+        text for text in (clean(item, 160) for item in value.get("actions_tried", []))
+        if text
+    ][:8] if isinstance(value.get("actions_tried"), list) else []
+    public = {
+        "layer": clean(value.get("layer"), 80),
+        "step": clean(value.get("step"), 120),
+        "error_kind": clean(value.get("error_kind"), 80),
+        "attempts_made": attempts,
+        "actions_tried": actions,
+        "recommendation": clean(value.get("recommendation"), 300),
+        "backup_plan": clean(value.get("backup_plan"), 300),
+    }
+    return {key: item for key, item in public.items() if item not in ("", [])}

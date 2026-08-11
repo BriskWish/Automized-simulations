@@ -71,6 +71,38 @@ def test_registration_sends_only_a_public_key_and_persists_a_private_machine_ide
     assert stat.S_IMODE(store.path.parent.stat().st_mode) == 0o700
 
 
+def test_gateway_registration_does_not_inherit_environment_proxies(tmp_path, monkeypatch):
+    import willy.managed_gateway as managed_gateway
+
+    captured = {}
+
+    class Response:
+        status_code = 202
+
+        @staticmethod
+        def json():
+            return {"device_id": "f" * 32, "status": "approved"}
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setattr(managed_gateway.httpx, "Client", Client)
+
+    assert request_managed_registration(_profile(), store=ManagedIdentityStore(tmp_path / "identity.json")) == "approved"
+    assert captured["trust_env"] is False
+
+
 def test_token_exchange_is_signed_cached_and_refreshed_before_expiry(tmp_path):
     profile = _profile()
     store = ManagedIdentityStore(tmp_path / "identity.json")

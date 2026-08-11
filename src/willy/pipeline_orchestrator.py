@@ -22,7 +22,7 @@ from typing import Optional
 
 from willy._paths import get_project_root
 from willy.config_store import copy_file, write_json
-from willy.env_checker import ensure
+from willy.env_checker import EnvironmentDependencyError, ensure
 from willy.errors import StepResult, StepError, ErrorKind, public_error_summary
 from willy.layer_agent import LayerAgent
 from willy.llm_config import LLMConfigError, configured_llm_client
@@ -509,9 +509,33 @@ class PipelineOrchestrator:
             if dep_module:
                 try:
                     ensure(dep_module)
-                except RuntimeError as e:
-                    self._set_public_error(ErrorKind.DEPENDENCY_MISSING)
-                    self._sm.transition(State.ABORTED)
+                except EnvironmentDependencyError as exc:
+                    error_kind = self._environment_error_kind(exc)
+                    result = StepResult(
+                        step_name=label,
+                        step_index=i,
+                        success=False,
+                        error=StepError(
+                            kind=error_kind,
+                            message="当前步骤的运行环境预检未通过",
+                            hint="安装或重新编译与当前系统兼容的运行工具后重新提交",
+                        ),
+                        extra={
+                            "dependency_preflight": {
+                                "module": dep_module,
+                                "failures": [
+                                    {"name": item.name, "status": item.status}
+                                    for item in exc.report.failed()
+                                ],
+                                "automatic_retry_allowed": False,
+                            },
+                            "automatic_retry_allowed": False,
+                        },
+                    )
+                    self._record_step_result(result, label, source="environment_preflight")
+                    self._escalate_nonretryable_environment_failure(
+                        result, label, run_dir, source="environment_preflight",
+                    )
                     return False
 
             print(f"\n{'='*60}\n  {i}/{len(steps)} {label}\n{'='*60}")
@@ -732,10 +756,34 @@ class PipelineOrchestrator:
             if dep_module:
                 try:
                     ensure(dep_module)
-                except RuntimeError:
-                    self._set_public_error(ErrorKind.DEPENDENCY_MISSING)
-                    self._sm.transition(State.ABORTED)
-                    record_execution(False, "重跑依赖不可用", ErrorKind.DEPENDENCY_MISSING.value)
+                except EnvironmentDependencyError as exc:
+                    error_kind = self._environment_error_kind(exc)
+                    failure = StepResult(
+                        step_name=label,
+                        step_index=step_i,
+                        success=False,
+                        error=StepError(
+                            kind=error_kind,
+                            message="确认重跑的运行环境预检未通过",
+                            hint="安装或重新编译与当前系统兼容的运行工具后重新提交",
+                        ),
+                        extra={
+                            "dependency_preflight": {
+                                "module": dep_module,
+                                "failures": [
+                                    {"name": item.name, "status": item.status}
+                                    for item in exc.report.failed()
+                                ],
+                                "automatic_retry_allowed": False,
+                            },
+                            "automatic_retry_allowed": False,
+                        },
+                    )
+                    self._record_step_result(failure, label, source="environment_preflight")
+                    self._escalate_nonretryable_environment_failure(
+                        failure, label, run_dir, source="environment_preflight",
+                    )
+                    record_execution(False, "确认重跑依赖不可用", error_kind.value)
                     return False
             result = func()
             if self._abort_if_stop_requested(run_dir):
@@ -937,6 +985,172 @@ class PipelineOrchestrator:
             kind.value if isinstance(kind, ErrorKind) else "unknown",
         )
 
+    @staticmethod
+    def _environment_error_kind(exc: EnvironmentDependencyError) -> ErrorKind:
+        return (
+            ErrorKind.RUNTIME_UNAVAILABLE
+            if exc.runtime_unavailable
+            else ErrorKind.DEPENDENCY_MISSING
+        )
+
+    @staticmethod
+    def _is_nonretryable_environment_error(result: StepResult) -> bool:
+        return bool(result.error and result.error.kind in {
+            ErrorKind.DEPENDENCY_MISSING,
+            ErrorKind.DEPENDENCY_NO_EXEC,
+            ErrorKind.RUNTIME_UNAVAILABLE,
+        })
+
+    def _escalate_nonretryable_environment_failure(
+        self,
+        result: StepResult,
+        label: str,
+        run_dir: Path,
+        *,
+        source: str,
+    ) -> bool:
+        """End an immutable environment failure without inventing an LLM retry."""
+        error = result.error or StepError(ErrorKind.DEPENDENCY_MISSING)
+        self._set_public_error(error, result.target)
+        action = "检测到运行环境不可用，未执行自动参数修复"
+        self._sm.add_action(action)
+        recommendation = (
+            "当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；"
+            "请安装或重新编译与当前系统兼容的运行工具后重新提交。"
+        )
+        escalation = {
+            "layer": STEP_REGISTRY.layer_for(result.step_index),
+            "step": result.step_name or label,
+            "error_kind": error.kind.value,
+            "attempts_made": 0,
+            "actions_tried": [action],
+            "recommendation": recommendation,
+            "backup_plan": "保留当前输入和私有执行证据；修复运行环境后从失败步骤重新运行。",
+        }
+        self._record_agent_decision({
+            "layer": STEP_REGISTRY.layer_for(result.step_index),
+            "step": result.step_index,
+            "error_kind": error.kind.value,
+            "candidate_tools": [],
+            "result": source,
+            "success": False,
+            "attempt": 0,
+        })
+        if self._run_registry is not None:
+            append_structured_event(
+                run_dir,
+                "recovery_finalized",
+                step=result.step_index,
+                step_name=label,
+                layer=STEP_REGISTRY.layer_for(result.step_index),
+                source=source,
+                outcome="blocked_environment",
+                error_kind=error.kind.value,
+                message_code="recovery.environment_blocked",
+            )
+        self._sm.set_escalated(escalation)
+        print(f"[{label}] 🆘 运行环境不可用，未调用 LLM 自动修复")
+        return False
+
+    def _escalate_agent_exception(
+        self,
+        result: StepResult,
+        label: str,
+        run_dir: Path,
+        agent: LayerAgent,
+        exc: Exception,
+    ) -> bool:
+        """Finalize an Agent boundary failure instead of leaving ``retrying`` stale."""
+        error = result.error or StepError(ErrorKind.UNKNOWN)
+        self._set_public_error(error, result.target)
+        action = "自动修复服务异常，未应用任何参数调整"
+        self._sm.add_action(action)
+        attempts = max(0, int(self._sm._status.retry_n))
+        escalation = {
+            "layer": agent.name,
+            "step": result.step_name or label,
+            "error_kind": error.kind.value,
+            "attempts_made": attempts,
+            "actions_tried": [action],
+            "recommendation": (
+                "自动修复服务未能完成诊断，当前模拟参数未被改写。"
+                "请检查 LLM 连接或稍后重新提交此步骤。"
+            ),
+            "backup_plan": "保留当前输入和私有错误证据；恢复服务后从失败步骤重新运行。",
+        }
+        self._record_agent_decision({
+            "layer": agent.name,
+            "step": result.step_index,
+            "error_kind": error.kind.value,
+            "candidate_tools": [],
+            "model_id": self.llm_model,
+            "prompt_version": agent.prompt_version,
+            "result": "agent_exception",
+            "success": False,
+            "attempt": attempts,
+        })
+        if self._run_registry is not None:
+            append_structured_event(
+                run_dir,
+                "recovery_finalized",
+                step=result.step_index,
+                step_name=label,
+                layer=STEP_REGISTRY.layer_for(result.step_index),
+                source="agent_exception",
+                outcome="escalated",
+                error_kind=error.kind.value,
+                message_code="recovery.agent_exception",
+            )
+        self._sm.set_escalated(escalation)
+        print(f"[{label}] 🆘 自动修复服务异常（{type(exc).__name__}），已升级到用户")
+        return False
+
+    def _escalate_agent_unavailable(
+        self,
+        result: StepResult,
+        label: str,
+        run_dir: Path,
+        layer_index: int,
+    ) -> bool:
+        """Persist a terminal result when no repair Agent is configured."""
+        error = result.error or StepError(ErrorKind.UNKNOWN)
+        self._set_public_error(error, result.target)
+        action = "当前层没有可用自动修复 Agent，未应用任何参数调整"
+        self._sm.add_action(action)
+        layer = STEP_REGISTRY.layer_for(result.step_index) or f"layer_{layer_index}"
+        escalation = {
+            "layer": layer,
+            "step": result.step_name or label,
+            "error_kind": error.kind.value,
+            "attempts_made": 0,
+            "actions_tried": [action],
+            "recommendation": "当前层没有可用自动修复服务，请人工处理失败步骤后重新运行。",
+            "backup_plan": "保留当前输入和私有错误证据；修复后从失败步骤重新运行。",
+        }
+        self._record_agent_decision({
+            "layer": layer,
+            "step": result.step_index,
+            "error_kind": error.kind.value,
+            "candidate_tools": [],
+            "result": "agent_unavailable",
+            "success": False,
+            "attempt": 0,
+        })
+        if self._run_registry is not None:
+            append_structured_event(
+                run_dir,
+                "recovery_finalized",
+                step=result.step_index,
+                step_name=label,
+                layer=layer,
+                source="agent_unavailable",
+                outcome="escalated",
+                error_kind=error.kind.value,
+                message_code="recovery.agent_unavailable",
+            )
+        self._sm.set_escalated(escalation)
+        return False
+
     def _record_simulation_config_update(
         self,
         before: dict,
@@ -1049,6 +1263,15 @@ class PipelineOrchestrator:
                 print(f"  [{err.kind.value}] {err.message[:100]}")
                 if err.hint: print(f"    → {err.hint}")
 
+        blocked_environment = next(
+            (item for item in failed if self._is_nonretryable_environment_error(item)),
+            None,
+        )
+        if blocked_environment is not None:
+            return self._escalate_nonretryable_environment_failure(
+                blocked_environment, label, run_dir, source="environment_execution",
+            )
+
         if not self.use_llm or layer_index is None:
             self._sm.transition(State.ABORTED)
             return False
@@ -1091,6 +1314,11 @@ class PipelineOrchestrator:
         else:
             self._set_public_error(ErrorKind.UNKNOWN, result.target)
             print(f"[{label}] ❌ 失败（无详细错误信息）")
+
+        if self._is_nonretryable_environment_error(result):
+            return self._escalate_nonretryable_environment_failure(
+                result, label, run_dir, source="environment_execution",
+            )
 
         # EQ protocol or acceptance failures are never auto-repaired.  The
         # model may diagnose and propose a bounded change, but the run remains
@@ -1367,8 +1595,7 @@ class PipelineOrchestrator:
         agent = self._agents.get(layer_index)
         if agent is None:
             print(f"[{label}] ⚠ 无可用 Agent（层 {layer_index}），跳过自动修复")
-            self._sm.transition(State.ABORTED)
-            return False
+            return self._escalate_agent_unavailable(step_result, label, run_dir, layer_index)
 
         print(f"\n[{label}] 🤖 调用 {agent.name} Agent 进行自动修复...")
 
@@ -1376,9 +1603,6 @@ class PipelineOrchestrator:
         # state must follow the item being repaired rather than retaining the
         # first failure selected by _handle_batch_result().
         self._set_public_error(step_result.error or ErrorKind.UNKNOWN, step_result.target)
-
-        # 进入 RETRYING
-        self._sm.start_retry(agent.name, 0, agent.max_retries)
 
         flat_artifacts: dict[str, str] = {}
         for k, v in artifacts.items():
@@ -1393,13 +1617,18 @@ class PipelineOrchestrator:
             if v:
                 flat_artifacts[k] = str(v)
 
-        repair_result = agent.handle_failure(
-            step_result=step_result,
-            config_path=str(self._run_config_path or (run_dir / "config.json")),
-            run_dir=str(run_dir),
-            artifacts=flat_artifacts,
-            state_machine=self._sm,
-        )
+        try:
+            repair_result = agent.handle_failure(
+                step_result=step_result,
+                config_path=str(self._run_config_path or (run_dir / "config.json")),
+                run_dir=str(run_dir),
+                artifacts=flat_artifacts,
+                state_machine=self._sm,
+            )
+        except Exception as exc:
+            return self._escalate_agent_exception(
+                step_result, label, run_dir, agent, exc,
+            )
 
         if self._abort_if_stop_requested(run_dir):
             return False

@@ -1,8 +1,10 @@
 # Willy 测试策略与质量门禁
 
 > 维护角色：6 号测试工程师
-> 最后更新：2026-08-11
-> 当前基线：2026-08-11 完整 `pytest -q` 为 806 passed、9 skipped（收集 815 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 833 条记录）。本轮新增托管网关的服务端名额自助申请、前 50 名自动批准、默认 grant、重复公钥去重、待审批过期释放、来源节流、固定上游、设备签名/nonce、撤销、过期/篡改令牌、白名单、额度账本、超时预留、回环管理员控制面、客户端私有身份文件、令牌刷新、设备状态/剩余 Token 查询和客户端到实际 ASGI 网关的协议契约；同时覆盖 schema-v2 `run_manifest.json` 的 section CAS、新旧格式读取、终态非破坏性迁移、环境能力和 MDP 协议 metadata 收敛、当前版本远程任务页的本地固定/输入冻结边界，以及可视化元素图例、PDB 原子前缀解析、氢原子保留和图例/画面统一色表。模拟验收同时覆盖温度均值、势能归一化线性斜率、真空区/密度非阻塞行为、净电荷容差边界，以及 Packmol 残留输出隔离、前置/进程结构化证据和证据门控，并新增 OPLS 专属的 LigParGen GRO 五列残基字段恢复和结构化日志回归；外部工具和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
+> 最后更新：2026-08-12
+> 当前基线：2026-08-12 完整 `pytest -q` 为 816 passed、9 skipped（收集 825 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 843 条记录）。本轮新增托管网关的服务端名额自助申请、前 50 名自动批准、默认 grant、重复公钥去重、待审批过期释放、来源节流、固定上游、设备签名/nonce、撤销、过期/篡改令牌、白名单、额度账本、超时预留、回环管理员控制面、客户端私有身份文件、令牌刷新、设备状态/剩余 Token 查询、客户端到实际 ASGI 网关的协议契约，以及客户端部署包对部署 profile、虚拟环境和本地运行态的隔离；同时覆盖 schema-v2 `run_manifest.json` 的 section CAS、新旧格式读取、终态非破坏性迁移、环境能力和 MDP 协议 metadata 收敛、当前版本远程任务页的本地固定/输入冻结边界，以及可视化元素图例、PDB 原子前缀解析、氢原子保留和图例/画面统一色表。模拟验收同时覆盖温度均值、势能归一化线性斜率、真空区/密度非阻塞行为、净电荷容差边界，以及 Packmol 残留输出隔离、前置/进程结构化证据和证据门控，并新增 OPLS 专属的 LigParGen GRO 五列残基字段恢复、结构化日志，以及 Packmol ABI/终态升级回归；外部工具和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
+
+> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **816 passed、9 skipped**（收集 825 条 pytest），测试台账为 **825 pytest + 18 LLM = 843 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要和前端建议，以及客户端部署包的本地运行态隔离均已有本地回归；目标机仍需使用兼容 Packmol 构建进行真实复测。
 
 ## 1. 目标与原则
 
@@ -172,7 +174,7 @@ Step 4 发现 Li、NO3、TFSI 受 OPLS 后端限制，ORCA+LigParGen/BOSS 因相
 旧判定停在 Step 1；二者均不构成失败后可宣称支持的组合。完整十步和已修复 ORCA
 组合 profile 仍属于 R1/R2 未完成项。
 
-当前完整默认回归为 `799 passed, 9 skipped`；`compileall`、测试台账生成（`808 pytest + 18 LLM`）和 18 个 mock LLM eval 场景均通过，mock eval 均分为 `86.2/100`。通过的最终隔离发布批次见 [`tests/reports/baselines/regression-20260811-r5/batch_report.json`](../tests/reports/baselines/regression-20260811-r5/batch_report.json)，其中仅记录版本、配置 SHA-256、阶段结论、JUnit 计数摘要和产物哈希，不含原始日志或密钥。内置 Multiwfn 的固定解析、fchk→xyz、RESP `.chg`、非零退出映射、配置哈希和 Sobtop 可选菜单不回退 PATH 均纳入回归；本次还覆盖 LigParGen 临时前缀从最终 GRO 五列残基字段恢复。首个临时快照因 vendor 文件在副本创建期间发生完整性漂移而失败，已保留为 [`regression-20260811/batch_report.json`](../tests/reports/baselines/regression-20260811/batch_report.json) 审计记录；重新复制一致快照后通过。托管服务检查已改为设备令牌交换和 `/api/v1/me/usage` 查询，直接返回连接状态及本日/本月剩余 Token，不再调用 Chat Completions；前 50 个历史唯一注册设备可由服务端原子自动批准并收到默认 grant，管理员页显示自动批准窗口。直接 BYOK 连接测试仍为显式 opt-in，未纳入默认发布结论。Playwright/Chromium 使用 `/tmp` 隔离运行时完成了 1 条浏览器 E2E：fake executor + 临时 Gradio 服务验证首屏、公开错误气泡、待确认、确认、等待、停止二次确认和工程切换；该测试不访问 `md_run/`。
+该段为历史快照（2026-08-10）。当前默认回归、台账和 Packmol 运行时失败处理以本文开头的最新基线及 6.12 的修复说明为准。
 
 托管网关的客户端、配置页和 ASGI 接口现已收敛为服务端限额的自助申请：不再导入或接收邀请码，重复公钥不重复占位，待审批申请过期后释放名额。完整 pytest、应用导入和测试台账生成恢复为本轮门禁。该离线覆盖不构成真实跨机器 TLS、上游服务或公网反自动化验收。本段是 2026-08-10 的历史快照；后续串行四 profile 的 R2 证据和新缺口见 6.4。
 
@@ -184,9 +186,12 @@ Step 4 发现 Li、NO3、TFSI 受 OPLS 后端限制，ORCA+LigParGen/BOSS 因相
 `execution.stop_after_stage`。批次报告为
 `md_run/acceptance_batch_20260811001217.json`，原始受管输出为同名 `.log`。
 
+> **运行编号作用域：** `run_id` 只在单台机器/单个运行根目录内唯一；下表的 `md__202608110001`
+> 是本机历史批次编号，不与目标机本次同名 run 共享结果。跨机器登记必须同时记录主机或批次报告。
+
 | Profile | Run | 结果 | 阻塞位置与公开证据 |
 |---|---|---|---|
-| G16 + Sobtop | `md__202608110001` | **通过** | 10/10 完成，EM、7 ns EQ 和 2 ns PROD 均结束；`status.json` 为 `done`，`done_steps=[1..10]`。结构检查约每 5 分钟，EQ 约每 20 分钟读取；EQ 中间温度从约 `337.2 K` 降至 `326.7 K`，未出现 fatal error。 |
+| G16 + Sobtop（本机历史批次） | `md__202608110001` | **通过** | 10/10 完成，EM、7 ns EQ 和 2 ns PROD 均结束；`status.json` 为 `done`，`done_steps=[1..10]`。结构检查约每 5 分钟，EQ 约每 20 分钟读取；EQ 中间温度从约 `337.2 K` 降至 `326.7 K`，未出现 fatal error。 |
 | ORCA + Sobtop | `md__202608110002` | 历史阻塞；修复后待重跑 | 历史批次 Step 2：5 个 ORCA `*_opt.fchk` 均生成，但 `fchk→mol2` 均报缺少 `MxBond` 字段；`done_steps=[1]`，未进入 RESP、拓扑或 MD。 |
 | G16 + LigParGen/BOSS | `md__202608110003` | 历史阻塞；修复后待重跑 | 历史批次 Step 5：3 个分子均成功生成 LigParGen `.itp/.gro`，但 `FEC.itp` 与其他 ITP 对 `opls_806` 的参数定义冲突，未进入 MD。 |
 | ORCA + LigParGen/BOSS | `md__202608110004` | 历史阻塞；修复后待重跑 | 历史批次 Step 2：EC/FEC/EMC 的 ORCA `*_opt.fchk` 均因缺少 `MxBond` 无法转为 `.mol2`，未进入 LigParGen 或 MD。 |
@@ -256,3 +261,84 @@ ORCA profile，根目录 `config.json` 已恢复。
 
 这两条证据关闭了此前的 Step 8 grompp 阻塞。它们只覆盖中性 EC/FEC/EMC 组合；离子 OPLS、G09
 可靠全链路、科学体系预测和后处理/分析均不属于本版本公开能力。该段仅作为历史修复记录。
+
+### 6.8 2026-08-11 第二台受控验收机：环境自动发现预检
+
+在第二台受控 Ubuntu 20.04.6 验收机的项目检出中，使用 Python 3.11.7 的项目虚拟环境，确认根目录
+不存在 `.env`，并显式清除 `WILLY_G16_BIN`、`WILLY_FORMCHK_BIN` 与 `WILLY_GMX_BIN`。在仅加载
+软件厂商标准环境（oneAPI `setvars.sh`、Gaussian `g16.profile`，以及将 GROMACS 安装目录加入 `PATH`）后，
+`willy.env_registry.resolve_tool()` 将 `g16`、`formchk`、`gmx` 全部解析为 `available`，来源均为 `path`。
+GROMACS 在加载 oneAPI 前因缺少 MKL 动态库不可运行，加载后可被正常发现。
+
+**结果：通过（环境自动发现）。** 此记录只证明 Willy 不依赖 `WILLY_*` 显式路径即可消费正确初始化的
+运行环境；不证明磁盘扫描能力，也不证明 G16、formchk 或 GROMACS 已完成真实执行。后续真实进程、产物和
+超时结果必须另行登记，G-01 与 G-03 维持开放。
+
+### 6.9 2026-08-11 本机网关健康检查
+
+本机 `managed_gateway.json` 的 loopback 部署描述指向 `http://127.0.0.1:8789`。绕过环境代理后，
+只读 `GET /healthz` 返回 HTTP 200 和 `{"status":"ok"}`；经代理访问返回 502，仅作为代理路径
+异常记录，不作为网关本身故障。该检查没有读取或记录任何设备身份、访问令牌、上游 Key 或管理员秘密。
+
+**结果：通过（本机监听健康端点）。** 真实双机 TLS、远程客户端部署描述、设备注册/令牌交换和真实
+上游 tool-calling 仍未验收，不能直接据此启动远程完整 E2E。
+
+### 6.10 2026-08-11 第二台受控验收机：真实 BYOK DeepSeek 工具调用
+
+目标机保存的 BYOK 配置使用 DeepSeek OpenAI-compatible 端点与 `deepseek-v4-pro`。模型列表同时暴露
+`deepseek-v4-flash`。最小普通
+Chat Completions 请求返回标准单 choice，证明网络、鉴权和基础响应兼容；Willy 的受限连接检查要求
+模型强制调用空参数工具时，服务拒绝 `tool_choice`，原因是当前 thinking 模式不支持该字段。
+
+**结果：不通过（工具调用契约不兼容）。** 这不是网络、Key 或 Base URL 失败，且不记录 Key、原始
+prompt、原始响应或服务端错误体。该配置不能作为当前需要受控 function calling 的 Config Agent
+端到端验收模型；应改用支持 `tool_choice` 的非 thinking 模型/模式，或在后续版本为该类服务设计
+经过评审的非强制工具调用兼容策略。随后在同一 `deepseek-v4-pro` 配置下仅提供工具定义并使用
+默认自动选择时，模型返回了 `willy_connection_check` 工具调用；这证明实际 Agent 的自动工具调用路径
+可用，而配置页的强制选择检查过窄。目标机的 GPT 中转站配置已被此 BYOK 保存覆盖，尚无可复测证据。
+
+**后续修改建议：** 配置页连接测试应提供工具定义但使用自动工具选择，仍必须校验响应中确实包含
+`willy_connection_check`，不能以普通文本响应判定成功；同时将服务端明确拒绝强制工具选择的响应归类为
+`tool_call_unsupported`，向用户提示“当前模型/思考模式不支持强制工具调用”，不要笼统显示为协议错误。
+该兼容策略需要单独的回归测试，不能改变实际 Agent 的动作契约或绕过工具调用校验。
+
+### 6.11 2026-08-11 第二台受控验收机：GPT 中转站 BYOK
+
+目标机随后将 `.env` 更新为 GPT 中转站地址 `https://api.forza0310.cn/v1` 和模型
+`gpt-5.6-terra`。首次测试因目标机保存的 Key 与本机不一致而返回 `authentication`；开发者随后
+在目标机重新保存正确配置并复测，报告连接测试成功。未记录 Key、Authorization、原始响应或完整异常。
+
+**结果：通过（人工复测）。** 当前 GPT 中转站配置已具备普通连接和工具调用验收证据；首次失败只作为
+配置复制错误的诊断记录保留。连接测试严格性修改仍待实现：应使用自动工具选择但校验实际返回的
+`willy_connection_check`，并将服务端明确拒绝强制选择归类为 `tool_call_unsupported`。
+
+### 6.12 2026-08-11 第二台受控验收机：Packmol 运行时 ABI 不兼容
+
+目标机真实端到端运行 `md__202608110001`（`100 Li / 50 NO3 / 50 TFSI / 200 DME / 400 TTE`，
+PROD 目标 2 ns）时，Step 1--6 已完成，Step 7 Packmol 进程退出，未生成 `model.pdb`。私有
+`run_manifest.json` 的执行记录为 `failure_stage=process_exit`、`returncode=1`；工具版本快照显示
+随项目提供的 `vendor/packmol` 需要 `GLIBC_2.34`，目标机运行时为 `GLIBC_2.31`。
+
+**结果：不通过（外部运行时依赖不兼容）。** 该证据指向 Packmol 二进制与宿主 libc ABI 不兼容，
+不是初始密度、盒边长、Packmol 输入几何或分子数量导致的建盒失败；因此不能通过调整盒参数解决。
+本地已在 Step 7 前增加受控最小启动/ABI 探针，并把此类错误归类为 `runtime_unavailable`；目标机仍需
+提供兼容构建并重新运行，才能关闭该真实环境缺口。
+
+**编排与前端观察：** 历史运行曾错误进入 `retrying`（第 1/3 次），`agent_retrying` 的 `adjustments`
+为空且没有升级摘要。该问题已在本地修复：未执行真实修复前不创建 retry 计数；Packmol ABI/启动失败不调用
+LLM，不启动参数重试，直接写入脱敏决策记录、`runtime_unavailable` 和终态 `escalated`，前端展示失败操作、
+“未执行参数调整”和兼容环境建议。目标机复测仍是人工验收项。
+
+### 6.13 2026-08-12 Packmol Ubuntu 20.04 兼容构建与最小 smoke
+
+为修复 6.12 的 ABI 阻塞，使用官方 `v21.2.3` 源码 tarball（SHA-256
+`b26af58d407b1c8d786aa6c2bb6bfa40d741aaa0424db51300fdd6fd66dd4813`）在 Ubuntu 20.04
+x86_64/glibc 2.31、gfortran 9.4.0 上串行构建。Packmol 的 Makefile 默认携带 `-march=native`，
+发行构建显式替换为 `-O3 -march=x86-64 -mtune=generic -funroll-loops`；生成的 `vendor/packmol`
+SHA-256 为 `b4ec513ea4c950a2af763f60233cd4d20ef705562aa700b3e9daaf6c1addb818`，最大 GLIBC
+符号为 `GLIBC_2.29`。
+
+本机和 Ubuntu 20.04 构建机均以 4 个单原子模板在 20 A 周期盒中实际调用项目 `InpGenerator` 或等价
+Packmol 输入：返回码为 0，输出含 `Success!`、4 个 `ATOM/HETATM` 记录和一个 `CRYST1` 记录。
+**结果：通过（Packmol 二进制兼容与最小建盒）。** 这不替代更新验收机检出后的 Step 1--10 端到端重跑；
+后者仍是 G-01/G-03 的人工验收项。

@@ -2,7 +2,7 @@
 
 > 维护范围：`src/willy/env_registry.py`、`src/willy/env_checker.py` 及外部软件调用适配器。
 > 状态：核心实现完成；启动级全局缓存、版本兼容性判定和自动后端重规划待后续评估。
-> 最后更新：2026-08-11。
+> 最后更新：2026-08-12。
 
 ## 1. 目标与边界
 
@@ -79,7 +79,7 @@ Willy 同时依赖项目内置程序和用户安装的外部程序。当前运�
 | 外部组件 | 当前开发机 | 目标范围 | 证据边界 |
 |---|---|---|---|
 | GROMACS | 2025.0 | 计划验收 2023、2024、2025；代码理论下限为提供统一 `gmx` 前端的 5.0 | 仅 2025.0 有本机真实链路证据，其他版本不得表述为已支持 |
-| Packmol | 21.2.3 | 固定当前内置二进制 | 当前 Linux x86_64/glibc 基线 |
+| Packmol | 21.2.3 | Linux x86_64，glibc >= 2.29 | 官方 `v21.2.3` 源码在 Ubuntu 20.04/glibc 2.31、gfortran 9.4.0 上以通用 x86-64 选项构建；本机与 Ubuntu 20.04 最小周期盒 smoke 均通过 |
 | Sobtop | 内置 Linux x86_64 二进制 | 固定随仓库版本 | 当前 Linux x86_64/glibc 基线 |
 | Open Babel | 3.1.1 | OPLS 使用完整 Open Babel 3；内置仅为精简运行时 | 完整格式插件仍由用户安装 |
 | Multiwfn | 3.8(dev)，更新于 2025-02-14 | 固定 `3.8-dev-2025-02-14` 的 Linux x86_64 包 | 已接入 vendor，默认不依赖外部安装 |
@@ -139,7 +139,7 @@ python3 scripts/verify_vendor_manifest.py --require-release-ready
 ```
 
 前者必须始终通过，防止受管二进制和参数文件在未知条件下漂移。后者会将未补齐来源、版本或
-许可证的组件视为发布阻塞。当前只有 Multiwfn 已达到 `release_ready`；Packmol、Sobtop、
+许可证的组件视为发布阻塞。当前 Multiwfn 和 Packmol 已达到 `release_ready`；Sobtop、
 精简 Open Babel 和遗留 `3Dmol-min.js` 均明确标为 `evidence_pending` 或
 `exclude_from_release_artifact`，不能在正式发行前静默通过。Sobtop 示例目录也不属于受管
 运行时；发布包必须在打包规则中排除它，或另行登记其来源、许可证与示例数据保留理由。
@@ -261,6 +261,27 @@ ResolvedTool(
 `DepResult.needed_by` 由该注册表反向生成，而不是在预检列表中重复维护字符串。新增或
 迁移执行器时必须先在执行模块注册表登记依赖，再增加外部 `ToolSpec` 或内置依赖展示项。
 这样不会改变既有模块 ID 或预检阻断时机，也避免工具选择和依赖报告出现漂移。
+
+### 4.2 外部二进制 ABI 兼容性边界
+
+工具被发现且具有执行权限，不代表它能在当前宿主机启动。2026-08-11 目标机真实运行
+`md__202608110001` 时，随包 `vendor/packmol` 因要求 `GLIBC_2.34` 而在 `GLIBC_2.31`
+宿主上以返回码 1 退出，Step 7 未生成 `model.pdb`。该事实登记在
+`docs/testing_strategy.md` 的 6.12 和 `docs/project_gap_analysis.md` 的 G-01/G-07。
+
+Packmol 已登记为受管工具，`resolve_tool("packmol")` 与 `env_checker` 会在 Step 7 前执行受控最小启动
+探针（`packmol -h`）。动态加载器/ABI 签名、启动异常、超时或异常信号退出统一归类为
+`runtime_unavailable`；普通参数/帮助用法的非零退出只证明加载器已启动，不能被误判为不可用。
+这类失败不会进入密度、盒参数或 LLM 自动修复重试：编排器直接以零次修复升级，私有证据只保留
+受限分类和返回码，公共状态仅显示文件/操作级兼容性建议。目标机仍须部署兼容构建并重新执行真实链路，
+本地探针并不替代跨发行版运行证据。
+
+2026-08-12 已以官方 `v21.2.3` 源码在 Ubuntu 20.04/glibc 2.31、gfortran 9.4.0 上重建内置
+`vendor/packmol`。构建固定为 `-O3 -march=x86-64 -mtune=generic -funroll-loops`，最大 GLIBC
+符号为 `GLIBC_2.29`，避免绑定构建机 CPU；源码 tarball、编译器、选项、二进制哈希和 MIT 许可证均登记在
+`vendor/manifest.json`。本机与同一 Ubuntu 20.04 主机均完成 4 原子、20 A 周期盒 smoke（退出码 0、
+`Success!`、4 个原子、一个 `CRYST1`）。验收机上的 Willy 检出尚未替换为该版本，因此完整端到端仍须在
+更新检出后重新执行。
 
 ## 5. 模块职责与迁移
 

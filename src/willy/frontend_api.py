@@ -177,7 +177,7 @@ _LLM_CONNECTION_PUBLIC_ERRORS: dict[str, tuple[str, str]] = {
     ),
     "managed_not_registered": (
         "本机尚未登记到托管网关",
-        "在配置页申请接入，并等待网关管理员批准。",
+        "在配置页确认接入，并等待网关管理员批准。",
     ),
     "managed_not_approved": (
         "设备尚未获得托管网关批准",
@@ -360,8 +360,10 @@ def request_managed_gateway_registration() -> str:
             "managed_registration_limit_reached": "接入申请已达服务器名额上限。",
             "managed_registration_rate_limited": "申请次数过多，请稍后再试。",
             "managed_access_denied": "该设备尚未获得网关批准。",
-            "managed_gateway_unreachable": "无法连接托管网关。",
-            "managed_gateway_timeout": "托管网关连接超时。",
+            "managed_gateway_unreachable": "无法连接托管网关：请检查服务器地址、端口、HTTPS/TLS 证书和防火墙。",
+            "managed_gateway_timeout": "托管网关连接超时：请检查服务器负载、网络路径和防火墙。",
+            "managed_gateway_rejected": "托管网关拒绝了接入申请：请检查服务器配置和设备状态。",
+            "managed_gateway_protocol": "托管网关返回了无法识别的响应：请检查客户端与网关版本。",
         }
         return messages.get(error.code, "托管设备申请未完成，请联系网关管理员。")
     _refresh_agent_llm_client()
@@ -1635,11 +1637,15 @@ def _repair_lines(repair: dict | None) -> list[str]:
         return []
     attempt = repair.get("attempt")
     max_attempts = repair.get("max_attempts")
-    if isinstance(attempt, int) and isinstance(max_attempts, int) and max_attempts > 0:
-        shown_attempt = max(1, attempt)
-        lines = [f"自动修复：第 {shown_attempt}/{max_attempts} 次"]
+    if (
+        isinstance(attempt, int)
+        and isinstance(max_attempts, int)
+        and max_attempts > 0
+        and attempt > 0
+    ):
+        lines = [f"自动修复：第 {attempt}/{max_attempts} 次"]
     else:
-        lines = ["自动修复：正在分析并应用修复"]
+        lines = ["自动修复：正在分析，尚未执行修复"]
     for adjustment in repair.get("adjustments", []):
         if not isinstance(adjustment, dict):
             continue
@@ -1649,6 +1655,28 @@ def _repair_lines(repair: dict | None) -> list[str]:
         if all(isinstance(value, str) and value for value in (name, before, after)):
             lines.append(f"已调整：{name} {before} → {after}")
     return ["", *lines]
+
+
+def _escalation_lines(escalation: dict | None) -> list[str]:
+    """Render the bounded public conclusion of a terminal recovery attempt."""
+    if not isinstance(escalation, dict):
+        return []
+    lines: list[str] = []
+    attempts = escalation.get("attempts_made")
+    if isinstance(attempts, int):
+        if attempts > 0:
+            lines.append(f"自动修复已尝试：{attempts} 次")
+        else:
+            lines.append("自动修复：未执行参数调整")
+    recommendation = escalation.get("recommendation")
+    if isinstance(recommendation, str) and recommendation:
+        lines.append(f"处理建议：{recommendation}")
+    actions = escalation.get("actions_tried")
+    if isinstance(actions, list) and actions:
+        latest = actions[-1]
+        if isinstance(latest, str) and latest:
+            lines.append(f"处理记录：{latest}")
+    return ["", *lines] if lines else []
 
 
 def refresh_molecule_choices() -> list[str]:
@@ -2156,6 +2184,7 @@ def get_run_summary_markdown(run_id: str | None, *, include_error: bool = True) 
         lines.extend(["", f"{_status_indicator('error')}{status['error']}"])
     if state == "escalated":
         lines.extend(["", f"{_status_indicator('stopped')}**自动处理未完成**"])
+        lines.extend(_escalation_lines(status.get("escalation")))
         if status.get("error_kind") == "user_confirmation_required":
             lines.extend([
                 "",
@@ -2200,6 +2229,7 @@ def _public_run_error_event(
         ])
     elif state == "escalated":
         lines.extend(["", "自动处理未完成，当前工程未继续执行。"])
+        lines.extend(_escalation_lines(status.get("escalation")))
     return {
         "event_id": f"{run_id}:error:{revision}",
         "content": "\n".join(lines),

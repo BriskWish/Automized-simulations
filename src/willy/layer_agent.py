@@ -575,6 +575,18 @@ class LayerAgent:
         err = step_result.error or StepError(
             kind=ErrorKind.UNKNOWN, message="未知错误",
         )
+        if ctx.attempts:
+            recommendation = (
+                f"{self.name} 层自动修复已耗尽（{ctx.attempts}/{ctx.max_attempts} 次重试）。"
+                "⚠️ 流水线在此步骤停止，MD 模拟不会继续执行。"
+                "建议：人工检查本次运行的日志与 manifest，修复输入或配置后重新运行。"
+            )
+        else:
+            recommendation = (
+                f"{self.name} 层未执行受控修复动作即升级。"
+                "流水线在此步骤停止，MD 模拟不会继续执行。"
+                "建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+            )
         escalation = Escalation(
             layer=self.name,
             step_name=step_result.step_name,
@@ -582,11 +594,7 @@ class LayerAgent:
             attempts_made=ctx.attempts,
             actions_tried=ctx.actions_tried,
             last_raw_output=ctx.last_raw_output or err.raw_output,
-            recommendation=(
-                f"{self.name} 层自动修复已耗尽（{ctx.attempts}/{ctx.max_attempts} 次重试）。"
-                f"⚠️ 流水线在此步骤停止，MD 模拟不会继续执行。"
-                f"建议：人工检查本次运行的日志与 manifest，修复输入或配置后重新运行。"
-            ),
+            recommendation=recommendation,
             backup_plan=(
                 "保留本次运行产物供排查；修复上游输入或配置后，重新运行对应步骤。"
             ),

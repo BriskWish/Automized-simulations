@@ -460,7 +460,7 @@ def test_llm_configuration_exposes_mutually_exclusive_managed_controls():
         "test-llm-connection-button",
     }.issubset(elem_ids)
     assert "托管网关（服务器）" in str(config)
-    assert "申请接入" in str(config)
+    assert "确认接入" in str(config)
     assert "一次性邀请码" not in str(config)
     assert "#llm-provider-mode .wrap" in app_module.APP_CSS
     assert "grid-template-columns: minmax(0, 1fr) !important;" in app_module.APP_CSS

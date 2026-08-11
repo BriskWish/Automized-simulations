@@ -4,7 +4,7 @@
 >
 > 状态：执行中。已实现局域网试运行切片：固定上游/模型白名单、非流式转发、服务端计数的 Ed25519 自助申请、前 50 名默认授权的自动批准、10 分钟令牌、nonce 防重放、撤销检查、SQLite 预留/结算账本、非回环 TLS 强制配置、回环管理员页面，以及 Willy 的 `managed/byok` provider。管理员 OIDC、PostgreSQL/Redis、多实例、备份告警、真实跨机器 TLS/upstream smoke 和密钥轮换工作流尚未实现。当前 Gradio 仍仅绑定 `127.0.0.1`。
 >
-> 最后更新：2026-08-11。
+> 最后更新：2026-08-12。
 
 构建完成度、运行证据与双机验收顺序在本文第 11 节统一维护。
 
@@ -48,7 +48,24 @@
 
 `base_url` 必须是无路径、无查询参数的 HTTPS 地址；只有 `localhost`/loopback 的开发测试允许 HTTP。描述文件不是服务端授权凭据，客户端篡改不会获得运营者的上游 Key、模型权限或额度；服务端白名单仍是唯一授权事实源。
 
-`managed_gateway.json` 是具体部署资产，不提交到 GitHub；它由安装包、受控文件分发或本机管理员提供。仓库只提交可审计的网关/客户端源代码和无凭据文档。`WILLY_GATEWAY_*` 环境变量、`.env`、SQLite 数据库、管理员秘密、上游 Key、TLS 私钥/证书、用户身份文件和运行时日志都只能留在部署机器，并已列入 `.gitignore` 防止误提交。
+`managed_gateway.json` 是具体部署资产，不提交到 GitHub；它由客户端部署包构建器写入安装包根目录。仓库只提交可审计的网关/客户端源代码和无凭据文档。`WILLY_GATEWAY_*` 环境变量、`.env`、SQLite 数据库、管理员秘密、上游 Key、TLS 私钥/证书、用户身份文件和运行时日志都只能留在部署机器，并已列入 `.gitignore` 防止误提交。当前仓库中的 `managed_gateway.json` 若指向 `127.0.0.1`，只适用于网关和 Willy 在同一台电脑上的测试，不能复制给其他电脑。
+
+发布者使用真实服务器 profile 构建客户端部署包：
+
+```bash
+python3 scripts/build_managed_client_bundle.py \
+  --profile /secure/deployment/managed_gateway.json \
+  --output /secure/releases/willy-client
+```
+
+构建器只接受位于源码树外的非 loopback HTTPS profile，并排除所有隐藏本地目录（仅保留无凭据的 `.env.example`）、虚拟环境、日志、决策追踪、进程/锁文件、数据库、设备身份、密钥、证书和运行目录；输出包根目录只写入规范化的 `managed_gateway.json`。目标机不需要再手动创建或编辑该文件。
+
+发布顺序固定为：先通过测试、提交并推送源码；再在干净的同一提交检出中构建客户端目录；最后压缩、校验并以 GitHub Release 附件或受控下载方式分发。部署 profile 和生成目录均不得提交到 Git。示例：
+
+```bash
+tar -C /secure/releases -czf /secure/releases/willy-client-0.2.0.tar.gz willy-client
+sha256sum /secure/releases/willy-client-0.2.0.tar.gz
+```
 
 ## 3. 威胁模型与安全原则
 
@@ -66,7 +83,7 @@
 
 ### 4.1 首次注册
 
-1. 用户在 Willy 配置页点击“申请接入”后，客户端生成或读取本机 Ed25519 密钥对。当前实现将私钥存入用户级私有身份文件，父目录 `0700`、文件 `0600`；系统凭据库适配属于后续强化。私钥不写入项目 `.env`、浏览器、网关数据库或日志。
+1. 用户在 Willy 配置页点击“确认接入”后，客户端生成或读取本机 Ed25519 密钥对并提交一次申请；当前实现将私钥存入用户级私有身份文件，父目录 `0700`、文件 `0600`；系统凭据库适配属于后续强化。私钥不写入项目 `.env`、浏览器、网关数据库或日志。
 2. 客户端提交公钥、版本和设备标签；网关不回传邀请码或其他可复用凭据。
 3. SQLite 在同一 `BEGIN IMMEDIATE` 事务中检查公钥是否已存在，再检查活跃 `pending + approved` 设备数是否达到 `WILLY_GATEWAY_REGISTRATION_LIMIT`（默认 `500`）。同一公钥重复申请返回原设备记录，不占用第二个名额。
 4. 新申请在同一事务中统计历史唯一注册设备。默认前 `50` 个唯一申请直接成为 `approved`，授予一个模型别名（优先 `willy-default`，否则字典序首个别名）、每日 `1,000,000` Token、每月 `10,000,000` Token、并发 `2` 和每分钟 `20` 次请求。自动批准窗口由注册审计永久计数，已有手动注册、撤销和过期均不让后来设备补位；同一公钥重复申请不重复占名额。
@@ -136,7 +153,7 @@
 
 服务入口为 `python3 -m willy_gateway`，默认只监听 `127.0.0.1:8787`。部署启动前必须由受限部署配置提供 `WILLY_GATEWAY_DATABASE`、`WILLY_GATEWAY_TOKEN_SECRET`（至少 32 字节）、`WILLY_GATEWAY_UPSTREAM_BASE_URL`、`WILLY_GATEWAY_UPSTREAM_API_KEY` 和 `WILLY_GATEWAY_MODEL_ALIASES`（JSON 别名映射）。自助申请配置可选：`WILLY_GATEWAY_REGISTRATION_LIMIT`（默认 `500`）、`WILLY_GATEWAY_AUTO_APPROVE_LIMIT`（默认 `50`；设为 `0` 关闭自动批准）、`WILLY_GATEWAY_DEFAULT_DAILY_TOKEN_LIMIT`（默认 `1000000`）、`WILLY_GATEWAY_DEFAULT_MONTHLY_TOKEN_LIMIT`（默认 `10000000`）、`WILLY_GATEWAY_DEFAULT_MAX_CONCURRENCY`（默认 `2`）、`WILLY_GATEWAY_DEFAULT_REQUESTS_PER_MINUTE`（默认 `20`）、`WILLY_GATEWAY_PENDING_REGISTRATION_TTL_S`（默认 `86400`）、`WILLY_GATEWAY_REGISTRATION_REQUESTS_PER_WINDOW`（默认 `10`）和 `WILLY_GATEWAY_REGISTRATION_RATE_WINDOW_S`（默认 `3600`）。这些值不应写入仓库、客户端 `.env` 或浏览器表单。
 
-要接受其他电脑，设置 `WILLY_GATEWAY_BIND_HOST` 和可选的 `WILLY_GATEWAY_BIND_PORT`。任何非 loopback 监听都必须同时设置 `WILLY_GATEWAY_TLS_CERTFILE` 和 `WILLY_GATEWAY_TLS_KEYFILE`，否则进程会在启动前拒绝配置；客户端的 `managed_gateway.json` 必须使用对应 HTTPS 地址。证书信任、路由、防火墙和真实 LAN 连通性必须由部署者在目标网络验收，不能由 fake-upstream 测试代替。
+要接受其他电脑，设置 `WILLY_GATEWAY_BIND_HOST` 和 `WILLY_GATEWAY_BIND_PORT`，并使 profile 中的端口与实际监听端口一致。任何非 loopback 监听都必须同时设置 `WILLY_GATEWAY_TLS_CERTFILE` 和 `WILLY_GATEWAY_TLS_KEYFILE`，否则进程会在启动前拒绝配置；客户端的 `managed_gateway.json` 必须使用对应 HTTPS 地址。客户端网关请求默认不继承 `HTTP_PROXY`/`HTTPS_PROXY` 环境代理；如部署网络必须经过代理，应由部署者增加明确的受控代理配置。证书信任、路由、防火墙和真实 LAN 连通性必须由部署者在目标网络验收，不能由 fake-upstream 测试代替。
 
 管理员页面以独立进程启动：`python3 -m willy_gateway.admin`。它固定监听 `127.0.0.1:${WILLY_GATEWAY_ADMIN_PORT:-8788}`，且要求至少 32 字节的 `WILLY_GATEWAY_ADMIN_SECRET`；页面地址是 `http://127.0.0.1:8788/`。该页面仅展示设备指纹、状态、接入名额占用、自动批准已用/剩余、待审批截止、今日结算/预留 token、当前并发和近一分钟请求数，可批准/调整 grant 或撤销设备；不返回私钥、访问令牌、prompt、上游 Key 或请求体。不要将管理端口转发到 LAN/公网，也不要在浏览器外持久化管理员秘密。
 
@@ -157,7 +174,7 @@ usage_snapshot()     -> 托管模式的本设备用量与剩余额度
 
 配置页：
 
-- 托管模式显示部署描述、粗粒度本机设备状态、“申请接入”和“检查托管服务”；申请只提交本机公钥，不接受表单 URL、Key 或邀请码，且不写入 `.env`。
+- 托管模式显示安装包携带的部署描述、粗粒度本机设备状态、“确认接入”和“检查托管服务”；只有点击“确认接入”才提交本机公钥；不接受表单 URL、Key 或邀请码，且不写入 `.env`。
 - BYOK 模式允许编辑自己的 Key、Base URL、Model，并显示请求不会经过托管网关。
 - 模式切换不修改已有 run 的 provenance；新 run 只记录脱敏 provider mode 和模型标识。
 
@@ -210,8 +227,18 @@ usage_snapshot()     -> 托管模式的本设备用量与剩余额度
 
 ## 11. 构建与验收快照
 
-当前实现达到单机/受控局域网试运行完整度：网关、管理员控制面、Willy 客户端、设备申请、前 50 名自动批准、设备令牌、模型白名单、额度账本和撤销链路均有代码与离线测试。网关关联回归为 `86 passed, 1 skipped`；当前完整默认回归为 `806 passed, 9 skipped`。
+当前实现达到单机/受控局域网试运行完整度：网关、管理员控制面、Willy 客户端、安装包 profile 与确认接入后的设备申请、前 50 名自动批准、设备令牌、模型白名单、额度账本和撤销链路均有代码与离线测试。网关关联回归和完整默认回归的实际结果以本轮测试记录为准。
 
 当前仍未完成真实双机 TLS、真实上游、反向代理限流、备份恢复、管理员强认证、多实例账本、密钥轮换和 Uvicorn 监听 smoke。离线验收使用临时 SQLite、ASGI 内存 transport 与脚本化 fake upstream，不创建监听 socket、不调用真实上游，不能替代生产验收。
+
+### 11.1 2026-08-11 本机健康检查
+
+本机部署描述 `managed_gateway.json` 指向 `http://127.0.0.1:8789`。通过绕过环境代理的只读请求
+访问 `/healthz`，返回 HTTP 200 和 `{"status":"ok"}`；未读取或记录设备私钥、访问令牌、上游
+API Key 或管理员秘密。未绕过代理的同一请求曾返回 502，确认为代理路径结果，不能作为网关本身的失败证据。
+
+该记录只证明本机监听和健康端点可用，不构成真实双机 TLS、设备注册、短期令牌交换、上游
+tool-calling 或远程 Willy 验收。远程验收机目前没有 `managed_gateway.json`，且本机 loopback 地址
+不能从远程机器使用；这些条件仍属于真实双机网关验收缺口。
 
 发布顺序固定为：先完成协议/安全契约，再完成核心转发与设备额度，随后完成 Willy 双模式接入，最后进行小范围双机试运行。认证、额度、撤销、脱敏审计和真实 tool-calling smoke 未全部通过前，状态只能标为“开发中”。

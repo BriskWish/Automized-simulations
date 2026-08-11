@@ -1821,14 +1821,14 @@ def _managed_gateway_status_markdown() -> str:
         return "托管网关描述尚不可用。请使用部署者随安装包提供的配置。"
     state = status.get("device_state")
     state_message = {
-        "not_registered": "本机尚未申请接入。申请后等待管理员批准。",
+        "not_registered": "本机尚未确认接入。确认后将发送设备公钥。",
         "pending_or_approved": "本机已登记。管理员批准后可使用“检查托管服务”验证。",
     }.get(state, "本机身份状态未知。")
     return f"**{status['label']}** · 模型别名：`{status['model']}`。\n\n{state_message}"
 
 
 def _select_llm_mode(mode: str):
-    """Persist the narrow provider selection and toggle mutually exclusive controls."""
+    """Persist the provider selection without creating a device identity."""
     normalized = mode if mode in {"managed", "byok"} else "byok"
     result = save_llm_mode(normalized)
     managed = normalized == "managed"
@@ -2178,7 +2178,7 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                     _managed_gateway_status_markdown(), elem_id="managed-gateway-status",
                 )
                 with gr.Row():
-                    managed_register = gr.Button("申请接入", variant="primary", elem_id="managed-gateway-register")
+                    managed_register = gr.Button("确认接入", variant="primary", elem_id="managed-gateway-register")
                     managed_test = gr.Button("检查托管服务", variant="secondary", elem_id="managed-gateway-test")
                 managed_register.click(
                     fn=_request_managed_gateway_registration,

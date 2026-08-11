@@ -97,6 +97,19 @@ class EnvReport:
         return "\n".join(lines)
 
 
+class EnvironmentDependencyError(RuntimeError):
+    """Structured module-preflight failure for the orchestrator boundary."""
+
+    def __init__(self, module: str, report: EnvReport):
+        self.module = module
+        self.report = report
+        super().__init__(f"[{module}] 依赖不满足:\n" + "\n".join(report.failed_strs()))
+
+    @property
+    def runtime_unavailable(self) -> bool:
+        return any(item.status == "runtime_unavailable" for item in self.report.failed())
+
+
 @dataclass(frozen=True)
 class _DependencyDefinition:
     """One preflight display item owned by an execution-module dependency ID."""
@@ -110,12 +123,16 @@ class _DependencyDefinition:
 
     def needed_by(self) -> list[str]:
         if self.tool_id:
-            return list(EXECUTION_MODULE_REGISTRY.modules_for_tool(self.tool_id))
-        return list(
-            EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency(
-                self.bundled_dependency_id
+            modules = list(EXECUTION_MODULE_REGISTRY.modules_for_tool(self.tool_id))
+            if modules:
+                return modules
+        if self.bundled_dependency_id:
+            return list(
+                EXECUTION_MODULE_REGISTRY.modules_for_bundled_dependency(
+                    self.bundled_dependency_id
+                )
             )
-        )
+        return []
 
 
 _DEPENDENCY_DEFINITIONS: tuple[_DependencyDefinition, ...] = (
@@ -144,7 +161,10 @@ _DEPENDENCY_DEFINITIONS: tuple[_DependencyDefinition, ...] = (
     _DependencyDefinition("Open Babel", "binary", "obabel", "设置 WILLY_OBABEL_BIN 或将带格式插件的 obabel 加入 PATH", tool_id="obabel"),
     _DependencyDefinition("C shell", "binary", "csh", "设置 WILLY_CSH_BIN 或将 csh 加入 PATH（BOSS 脚本必需）", tool_id="csh"),
     _DependencyDefinition("gmx", "binary", "gmx", "设置 WILLY_GMX_BIN 或将 gmx 加入 PATH", tool_id="gmx"),
-    _DependencyDefinition("packmol", "file_exec", str(ROOT / "vendor" / "packmol"), "项目内置 Packmol 文件缺失", bundled_dependency_id="packmol"),
+    _DependencyDefinition(
+        "packmol", "file_exec", str(ROOT / "vendor" / "packmol"),
+        "项目内置 Packmol 文件缺失", tool_id="packmol", bundled_dependency_id="packmol",
+    ),
     _DependencyDefinition("obabel", "file_exec", str(ROOT / "vendor" / "obabel.bin"), "项目内置 OpenBabel 文件缺失", bundled_dependency_id="obabel"),
     _DependencyDefinition("libopenbabel.so", "file", str(ROOT / "vendor" / "libopenbabel.so.7"), "项目内置 OpenBabel 库缺失", bundled_dependency_id="openbabel"),
     _DependencyDefinition("libcoordgen.so", "file", str(ROOT / "vendor" / "libcoordgen.so.3"), "项目内置 OpenBabel 库缺失", bundled_dependency_id="coordgen"),
@@ -212,7 +232,7 @@ def ensure(module: str) -> None:
     """Raise a user-safe error before the pipeline enters an unavailable module."""
     report = check_module(module)
     if not report.is_ok(module):
-        raise RuntimeError(f"[{module}] 依赖不满足:\n" + "\n".join(report.failed_strs()))
+        raise EnvironmentDependencyError(module, report)
 
 
 if __name__ == "__main__":

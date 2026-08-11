@@ -18,6 +18,7 @@ class ErrorKind(Enum):
     # 环境问题（通常无法自动修复）
     DEPENDENCY_MISSING = "dependency_missing"
     DEPENDENCY_NO_EXEC = "dependency_no_exec"
+    RUNTIME_UNAVAILABLE = "runtime_unavailable"
 
     # 量子化学
     SCF_NOT_CONVERGED = "scf_not_converged"
@@ -78,6 +79,7 @@ class ErrorKind(Enum):
 _PUBLIC_ERROR_REASONS = {
     ErrorKind.DEPENDENCY_MISSING: "运行依赖不可用",
     ErrorKind.DEPENDENCY_NO_EXEC: "运行依赖不可用",
+    ErrorKind.RUNTIME_UNAVAILABLE: "运行环境不兼容",
     ErrorKind.SCF_NOT_CONVERGED: "SCF 未收敛",
     ErrorKind.GEOM_NOT_CONVERGED: "结构优化未收敛",
     ErrorKind.GAUSSIAN_CRASH: "G16 计算失败",

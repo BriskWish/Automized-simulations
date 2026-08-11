@@ -1116,6 +1116,7 @@ class RunRegistry:
             "error_kind": status.get("error_kind", ""),
             "error": status.get("error", ""),
             "repair": self._public_repair(status),
+            "escalation": self._public_escalation(status.get("escalation")),
             "done_steps": status.get("done_steps", []),
         }
         pending_action = self._public_pending_action(status.get("extra", {}))
@@ -1167,6 +1168,7 @@ class RunRegistry:
             "error": status.get("error", ""),
             "error_kind": status.get("error_kind", ""),
             "repair": self._public_repair(status),
+            "escalation": self._public_escalation(status.get("escalation")),
             "activity": self._public_activity(status.get("activity", {})),
             "started_at": status.get("started_at", ""),
             "updated_at": status.get("updated_at", ""),
@@ -1357,6 +1359,40 @@ class RunRegistry:
             "max_attempts": max_attempts,
             "adjustments": adjustments[-8:],
         }
+
+    @staticmethod
+    def _public_escalation(value: object) -> dict[str, Any]:
+        """Whitelist a compact human-actionable recovery conclusion."""
+        if not isinstance(value, Mapping):
+            return {}
+
+        def clean(item: object, limit: int) -> str:
+            text = str(item or "").replace("\n", " ").replace("\r", " ").strip()
+            if not text or "/" in text or "\\" in text or ".." in text:
+                return ""
+            return text[:limit]
+
+        attempts = value.get("attempts_made", 0)
+        if isinstance(attempts, bool):
+            attempts = 0
+        try:
+            attempts = max(0, min(int(attempts), 99))
+        except (TypeError, ValueError):
+            attempts = 0
+        actions = [
+            text for text in (clean(item, 160) for item in value.get("actions_tried", []))
+            if text
+        ][:8] if isinstance(value.get("actions_tried"), list) else []
+        public = {
+            "layer": clean(value.get("layer"), 80),
+            "step": clean(value.get("step"), 120),
+            "error_kind": clean(value.get("error_kind"), 80),
+            "attempts_made": attempts,
+            "actions_tried": actions,
+            "recommendation": clean(value.get("recommendation"), 300),
+            "backup_plan": clean(value.get("backup_plan"), 300),
+        }
+        return {key: item for key, item in public.items() if item not in ("", [])}
 
     def _read_json(self, path: Path, label: str) -> dict[str, Any]:
         try:

@@ -436,6 +436,7 @@ def test_auto_box_config_derives_mass_from_run_local_itp(tmp_path):
 
 def test_packmol_uses_seekable_input_file(tmp_path, monkeypatch):
     import willy.simulation.box as box_module
+    from willy.env_registry import AVAILABLE, RuntimeProbeResult
 
     component = tmp_path / "AR.pdb"
     component.write_text("ATOM      1  AR  AR  A   1       0.000   0.000   0.000\nEND\n")
@@ -456,6 +457,11 @@ def test_packmol_uses_seekable_input_file(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(box_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        box_module,
+        "probe_executable_runtime",
+        lambda *args, **kwargs: RuntimeProbeResult(AVAILABLE, "started"),
+    )
     result = InpGenerator(config).run()
 
     assert result.success
@@ -466,6 +472,7 @@ def test_packmol_uses_seekable_input_file(tmp_path, monkeypatch):
 
 def test_packmol_failure_removes_stale_output_and_classifies_process_exit(tmp_path, monkeypatch):
     import willy.simulation.box as box_module
+    from willy.env_registry import AVAILABLE, RuntimeProbeResult
 
     component = tmp_path / "AR.pdb"
     component.write_text("ATOM      1  AR  AR  A   1       0.000   0.000   0.000\nEND\n")
@@ -486,6 +493,11 @@ def test_packmol_failure_removes_stale_output_and_classifies_process_exit(tmp_pa
         return subprocess.CompletedProcess(args, 17, "", "packing failed")
 
     monkeypatch.setattr(box_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        box_module,
+        "probe_executable_runtime",
+        lambda *args, **kwargs: RuntimeProbeResult(AVAILABLE, "started"),
+    )
     result = InpGenerator(config).run()
 
     assert not result.success
@@ -496,6 +508,44 @@ def test_packmol_failure_removes_stale_output_and_classifies_process_exit(tmp_pa
     assert evidence["output_before"]["exists"] is True
     assert evidence["output_removed_before_run"] is True
     assert evidence["output_after"]["exists"] is False
+
+
+def test_packmol_runtime_preflight_blocks_loader_incompatibility(tmp_path, monkeypatch):
+    import willy.simulation.box as box_module
+    from willy.env_registry import RUNTIME_UNAVAILABLE, RuntimeProbeResult
+
+    component = tmp_path / "AR.pdb"
+    component.write_text("ATOM      1  AR  AR  A   1       0.000   0.000   0.000\nEND\n")
+    config = InpConfig(
+        components=[Component(pdb=str(component), count=1)],
+        output_dir=str(tmp_path),
+        box_size=10.0,
+        packmol_bin="packmol-test",
+    )
+    monkeypatch.setattr(
+        box_module,
+        "probe_executable_runtime",
+        lambda *args, **kwargs: RuntimeProbeResult(
+            RUNTIME_UNAVAILABLE,
+            "loader_failure",
+            "Packmol 与当前系统运行库不兼容",
+            returncode=1,
+            raw_output="GLIBC_2.34 not found",
+        ),
+    )
+    monkeypatch.setattr(
+        box_module.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("运行时预检失败后不得启动 Packmol"),
+    )
+
+    result = InpGenerator(config).run()
+
+    assert result.success is False
+    assert result.error.kind is ErrorKind.RUNTIME_UNAVAILABLE
+    assert result.extra["box_execution"]["failure_stage"] == "preflight"
+    assert result.extra["runtime_probe"]["classification"] == "loader_failure"
+    assert result.extra["automatic_retry_allowed"] is False
 
 
 def test_box_preflight_reports_missing_inputs_as_structured_evidence(tmp_path):

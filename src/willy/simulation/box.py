@@ -18,7 +18,14 @@ import re
 
 from willy._paths import get_project_root
 from willy.errors import StepResult, StepError, ErrorKind
-from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
+from willy.env_registry import (
+    EnvironmentRegistryError,
+    NOT_EXECUTABLE,
+    RUNTIME_UNAVAILABLE,
+    build_tool_env,
+    probe_executable_runtime,
+    require_tool,
+)
 from willy.step_registry import PACKMOL_STEP
 
 
@@ -473,6 +480,51 @@ class InpGenerator:
 
         self._inp_path = Path(inp_path)
         requested_vectors = [requested.box_size_angstrom] * 3
+
+        # Verify the loader/runtime before invoking Packmol. A present and
+        # executable vendor binary can still be unusable on an older host
+        # libc; that is an environment failure, not a geometry retry case.
+        runtime_probe = probe_executable_runtime(
+            self.config.packmol_bin,
+            label="Packmol",
+        )
+        if runtime_probe.status != "available":
+            kind = (
+                ErrorKind.RUNTIME_UNAVAILABLE
+                if runtime_probe.status == RUNTIME_UNAVAILABLE
+                else ErrorKind.DEPENDENCY_NO_EXEC
+                if runtime_probe.status == NOT_EXECUTABLE
+                else ErrorKind.DEPENDENCY_MISSING
+            )
+            return StepResult(
+                step_name="box", step_index=PACKMOL_STEP, success=False,
+                error=StepError(
+                    kind=kind,
+                    message=runtime_probe.public_reason or "Packmol 运行环境不可用",
+                    raw_output=runtime_probe.raw_output,
+                    hint="安装与当前系统兼容的 Packmol，或重新编译项目内置 Packmol",
+                ),
+                artifacts=[str(self._inp_path)],
+                extra={
+                    "box_execution": _box_execution_evidence(
+                        output_name=out_path.name,
+                        requested_box_vectors=requested_vectors,
+                        output_before=output_before,
+                        output_removed=output_removed,
+                        failure_stage="preflight",
+                        returncode=runtime_probe.returncode,
+                        output_after=_output_fingerprint(out_path),
+                    ),
+                    "runtime_probe": {
+                        "status": runtime_probe.status,
+                        "classification": runtime_probe.classification,
+                        "returncode": runtime_probe.returncode,
+                        "automatic_retry_allowed": False,
+                    },
+                    "automatic_retry_allowed": False,
+                },
+                duration_s=_time.time() - _start,
+            )
 
         # Packmol seeks on its input stream; ``-i`` is required because a
         # piped stdin fails with "Illegal seek" in the bundled Fortran build.

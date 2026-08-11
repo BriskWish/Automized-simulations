@@ -705,10 +705,73 @@ class TestInvokeAgent:
         return PipelineOrchestrator(backend="g16", use_llm=False)
 
     def test_no_agent_available(self, orch):
-        """agent 为 None 时应返回 False。"""
-        sr = StepResult(step_name="test", step_index=1, success=False)
+        """agent 为 None 时必须升级，不能悬挂在 retrying。"""
+        sr = StepResult(
+            step_name="test", step_index=1, success=False,
+            error=StepError(ErrorKind.UNKNOWN, "fixture failure"),
+        )
         ok = orch._invoke_agent(sr, "test", Path("/tmp"), {}, layer_index=1)
         assert ok is False
+        assert orch._sm._status.state == "escalated"
+        assert orch._sm._status.retry_n == 0
+
+    def test_agent_exception_is_escalated_and_decision_is_persisted(self, orch, tmp_path):
+        run_dir = tmp_path / "md_run" / "md_agent_exception"
+        run_dir.mkdir(parents=True)
+        (run_dir / "config.json").write_text("{}")
+        from willy.run_registry import RunRegistry
+
+        orch._run_dir = run_dir
+        orch._run_registry = RunRegistry(tmp_path)
+        orch._run_registry.register_run(run_dir, backend="g16", total_steps=10)
+        orch._sm.bind_status_path(run_dir / "status.json")
+        orch._sm.bind_observer(orch._record_run_status)
+
+        agent = MagicMock()
+        agent.name = "SimulationAgent"
+        agent.max_retries = 3
+        agent.prompt_version = "simulation_agent_v1"
+        agent.handle_failure.side_effect = RuntimeError("transport failed")
+        orch._agents[3] = agent
+        failure = StepResult(
+            step_name="box", step_index=7, success=False,
+            error=StepError(ErrorKind.PACKMOL_FAILED, "Packmol exited"),
+        )
+
+        ok = orch._invoke_agent(failure, "Packmol 盒子构建", run_dir, {}, layer_index=3)
+
+        assert ok is False
+        assert orch._sm._status.state == "escalated"
+        assert orch._sm._status.retry_n == 0
+        assert orch._sm._status.escalation["attempts_made"] == 0
+        trace = (run_dir / "decision_trace.jsonl").read_text()
+        assert '"result": "agent_exception"' in trace
+        status = json.loads((run_dir / "status.json").read_text())
+        assert status["state"] == "escalated"
+        assert status["repair"] == {}
+
+    def test_runtime_unavailable_skips_llm_parameter_repair(self, orch):
+        agent = MagicMock()
+        agent.name = "SimulationAgent"
+        agent.max_retries = 3
+        orch._agents[3] = agent
+        failure = StepResult(
+            step_name="box", step_index=7, success=False,
+            error=StepError(
+                ErrorKind.RUNTIME_UNAVAILABLE,
+                "Packmol 与当前系统运行库不兼容",
+            ),
+        )
+
+        ok = orch._handle_single_result(
+            failure, "Packmol 盒子构建", Path("/tmp"), {}, 3, 7,
+        )
+
+        assert ok is False
+        agent.handle_failure.assert_not_called()
+        assert orch._sm._status.state == "escalated"
+        assert orch._sm._status.escalation["attempts_made"] == 0
+        assert "未执行自动参数修复" in orch._sm._status.escalation["actions_tried"][0]
 
     def test_agent_repair_success(self, orch):
         mock_agent = MagicMock()

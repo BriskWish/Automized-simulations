@@ -199,6 +199,36 @@ def test_boss_signal_termination_is_runtime_unavailable(tmp_path, monkeypatch):
     assert "系统信号" in result.public_reason
 
 
+def test_bundled_packmol_loader_failure_is_runtime_unavailable(tmp_path):
+    packmol = tmp_path / "vendor" / "packmol"
+    packmol.parent.mkdir(parents=True)
+    packmol.write_text(
+        "#!/bin/sh\n"
+        "echo 'version GLIBC_2.34 not found' >&2\n"
+        "exit 1\n"
+    )
+    packmol.chmod(0o755)
+
+    result = resolve_tool("packmol", project_root=tmp_path)
+
+    assert result.status == RUNTIME_UNAVAILABLE
+    assert result.source == "bundled"
+    assert "运行库不兼容" in result.public_reason
+    assert "GLIBC" not in result.public_reason
+
+
+def test_bundled_packmol_usage_exit_still_proves_runtime_started(tmp_path):
+    packmol = tmp_path / "vendor" / "packmol"
+    packmol.parent.mkdir(parents=True)
+    packmol.write_text("#!/bin/sh\necho 'usage' >&2\nexit 2\n")
+    packmol.chmod(0o755)
+
+    result = resolve_tool("packmol", project_root=tmp_path)
+
+    assert result.status == AVAILABLE
+    assert result.source == "bundled"
+
+
 def test_capability_report_is_redacted_and_run_local(tmp_path, monkeypatch):
     gmx = _executable(tmp_path / "gmx")
     monkeypatch.setenv("WILLY_GMX_BIN", str(gmx))

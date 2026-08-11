@@ -466,7 +466,12 @@ class TestPipelineStateMachine:
         sm.set_escalated({
             "layer": "quantum", "step": "struct_g16",
             "error_kind": "scf_not_converged", "last_raw_output": "/tmp/secret stderr",
+            "attempts_made": 0,
+            "recommendation": "检查运行环境后重新提交",
+            "actions_tried": ["未执行参数调整"],
         })
 
         saved = json.loads((tmp_path / "status.json").read_text())
         assert "last_raw_output" not in json.dumps(saved, ensure_ascii=False)
+        assert saved["escalation"]["recommendation"] == "检查运行环境后重新提交"
+        assert saved["escalation"]["attempts_made"] == 0

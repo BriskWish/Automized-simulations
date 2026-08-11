@@ -93,7 +93,10 @@ CATEGORIES = {
     },
     "K": {
         "title": "托管 LLM 网关",
-        "files": {"test_gateway.py", "test_gateway_admin.py", "test_gateway_offline_acceptance.py", "test_managed_gateway.py"},
+        "files": {
+            "test_gateway.py", "test_gateway_admin.py", "test_gateway_offline_acceptance.py",
+            "test_managed_gateway.py", "test_managed_gateway_bundle.py",
+        },
         "description": "服务端限额的设备自助申请、客户端私钥、短期令牌、签名/nonce、防重放、模型白名单、额度账本、管理员控制面和离线 fake-upstream 脱敏边界。",
     },
 }
@@ -153,6 +156,7 @@ FILE_TARGETS = {
     "test_gateway_admin.py": "willy_gateway loopback administrator control plane",
     "test_gateway_offline_acceptance.py": "willy_gateway 离线 fake-upstream 验收",
     "test_managed_gateway.py": "willy.managed_gateway device identity and token-refreshing client",
+    "test_managed_gateway_bundle.py": "willy.managed_gateway_bundle release client packaging",
 }
 
 FILE_CATEGORY = {

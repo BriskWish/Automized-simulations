@@ -4,7 +4,7 @@
 
 新 run 使用单一的 `run_manifest.json`（schema v2）：公开 `registry` section 管理 run 身份、冻结输入和产物索引；私有 `provenance`、`topology`、`simulation`、`protocol` sections 分别保存溯源、组件计划、MD 阶段许可和 MDP 元数据。物理合并不扩大公开面，`RunRegistry` 仍只投影白名单字段。历史 `manifest.json`、`provenance.json`、`topology_manifest.json` 和 `md_manifest.json` 仅作兼容读取；已迁移终态 run 保留它们以便回退。`RunRegistry` 可在内部读取私有 simulation section，以发现公开状态已经越过一个仍在运行的阶段；这不会向前端或 LLM 返回私有内容。
 
-公开状态表达六类信息：**工具、操作、对象、进度、摘要错误、自动修复摘要**。自动修复摘要仅可包含当前重试次数和已落盘配置的白名单差异（旧值到新值）；命令行、stderr、原始日志、绝对路径、堆栈、Agent 思维过程和任意工具原始参数不得写入状态或经前端、运行助理暴露。若 Simulation Agent 提议修改协议，使用固定的 `user_confirmation_required` 错误类型升级；不公开模型参数、拟议值或授权信息。
+公开状态表达七类信息：**工具、操作、对象、进度、摘要错误、自动修复摘要、终态升级摘要**。自动修复摘要仅可包含已经发生的重试次数和已落盘配置的白名单差异（旧值到新值）；终态升级摘要仅可含尝试次数、受限操作记录、建议和备用方案。命令行、stderr、原始日志、绝对路径、堆栈、Agent 思维过程和任意工具原始参数不得写入状态或经前端、运行助理暴露。若 Simulation Agent 提议修改协议，使用固定的 `user_confirmation_required` 错误类型升级；不公开模型参数、拟议值或授权信息。
 
 ## 读取方式
 
@@ -54,6 +54,15 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
       {"name": "恒温耦合时间", "before": "0.5 ps", "after": "2 ps"}
     ]
   },
+  "escalation": {
+    "layer": "simulation",
+    "step": "Packmol 盒子",
+    "error_kind": "runtime_unavailable",
+    "attempts_made": 0,
+    "actions_tried": ["检测到运行环境不可用，未执行自动参数修复"],
+    "recommendation": "安装或重建与当前系统兼容的 Packmol 后重新提交。",
+    "backup_plan": "请确认目标机的软件运行环境。"
+  },
   "activity": {
     "tool":        "G16",
     "operation":   "结构优化",
@@ -70,7 +79,7 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
 }
 ```
 
-`activity` 是唯一的公开工序模型，由 `set_activity(tool, operation, target_type, target, current, total)` 原子写入。字段严格固定，`target_type` 仅允许 `molecule`、`stage`、`system`。`repair` 仅在自动修复期间或存在已应用配置差异时出现；其差异由配置写入成功后的白名单字段生成，最多保留 8 项。run 级状态额外含有顶层 `run_id`，不写入绝对运行目录。
+`activity` 是唯一的公开工序模型，由 `set_activity(tool, operation, target_type, target, current, total)` 原子写入。字段严格固定，`target_type` 仅允许 `molecule`、`stage`、`system`。`repair` 仅在已经进入实际自动修复或存在已应用配置差异时出现，诊断阶段不得伪报“第 1/3 次”；其差异由配置写入成功后的白名单字段生成，最多保留 8 项。`escalation` 仅在 `escalated` 状态出现，所有文本和列表都经过白名单清洗。run 级状态额外含有顶层 `run_id`，不写入绝对运行目录。
 
 等待用户授权时，`extra` 增加受限的 `pending_action`，而私有动作记录仅保存在同一 run 的 `pending_action.json`。公开字段示例：
 
@@ -112,7 +121,7 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
 | `mdrun_eta.json` | GROMACS `mdrun -v` 的 ETA 预测，以及独立的进程/阶段产物心跳 | 原子替换 |
 | `md_run/index.json` | 历史 run 的安全摘要 | 原子替换并加锁 |
 
-`events.jsonl` 的公共字段为 `sequence`、`timestamp`、`event_type`、`run_id`、`details`；由可恢复写入包产生的记录另带不含业务信息的 `transaction_id`。`sequence` 与同一 run 的决策审计、进程生命周期记录共享单调递增序列。步骤结果的 `details` 仅包含 `step_id`、注册表产物契约 `artifact_contract`、`activity`、`success`、`error_kind` 和摘要 `error`；状态事件可额外包含与 `status.json` 相同的受限 `repair` 或 `pending_action` 摘要。停止事件仅说明已请求停止或已中止，不携带底层信号、命令或日志。不会写入原始错误消息、`hint`、命令行、绝对路径、产物路径、日志内容或 Agent 原始工具参数。EM 收敛失败触发重建时，状态机只记录公开状态变化；EQ 真空区仅保留为私有诊断证据。
+`events.jsonl` 的公共字段为 `sequence`、`timestamp`、`event_type`、`run_id`、`details`；由可恢复写入包产生的记录另带不含业务信息的 `transaction_id`。`sequence` 与同一 run 的决策审计、进程生命周期记录共享单调递增序列。步骤结果的 `details` 仅包含 `step_id`、注册表产物契约 `artifact_contract`、`activity`、`success`、`error_kind` 和摘要 `error`；状态事件可额外包含与 `status.json` 相同的受限 `repair`、`pending_action` 或 `escalation` 摘要。停止事件仅说明已请求停止或已中止，不携带底层信号、命令或日志。不会写入原始错误消息、`hint`、命令行、绝对路径、产物路径、日志内容或 Agent 原始工具参数。EM 收敛失败触发重建时，状态机只记录公开状态变化；EQ 真空区仅保留为私有诊断证据。
 
 结构化内部流的 `event_code` 采用固定事件族：`run_started`、`state_changed`、`step_started`、`step_skipped`、`step_result`、`decision_recorded`、`process_started`、`process_heartbeat` 和 `process_finished`。它只保留逻辑标签和受控标识，不是原始程序日志的替代品。
 
@@ -126,10 +135,10 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
 |-------|------|----------|
 | `idle` | 无运行中的流水线 | 运行助理工程状态显示暂无运行 |
 | `running` | 正常执行中 | 运行助理工程状态显示 `activity` 与运行圆环 |
-| `retrying` | 正在内部处理 | 显示 `activity`、第几次修复和已应用参数差异；不显示 Agent 诊断 |
+| `retrying` | 正在执行实际内部修复 | 仅在已有真实修复尝试后显示 `activity`、实际第几次修复和已应用参数差异；诊断或依赖失败不得进入该状态 |
 | `awaiting_confirmation` | LLM 已生成当前 EQ 协议调整方案，等待用户明确授权 | 展示固定脱敏方案摘要和“等待用户确认调整方案”；未收到明确批准语前保持等待，不启动任何进程。替代方案生成后仍保持该状态，且需再次确认。 |
 | `stopping` | 已确认停止，正在等待安全点或进程退出 | 显示“正在安全停止”；中止按钮禁用 |
-| `escalated` | 自动处理未完成 | 显示摘要错误；`error_kind=user_confirmation_required` 时明确当前 run 未改写，需确认新方案后重新启动 |
+| `escalated` | 自动处理未完成或不允许自动处理 | 显示摘要错误、已尝试次数、受限处理记录和建议；`error_kind=user_confirmation_required` 时明确当前 run 未改写，需确认新方案后重新启动；`runtime_unavailable` 时明确未执行参数重试 |
 | `done` | 已完成声明的运行范围 | 默认全流程完成并显示全部完成；仅当 `extra.completion_scope.mode=through_eq` 时显示“已完成至 EQ”，不得暗示 PROD 已运行 |
 | `aborted` | 已中止 | 显示已中止 |
 

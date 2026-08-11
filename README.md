@@ -79,7 +79,7 @@ pip install -e .
 
 ### 配置 LLM
 
-启动应用后，在“配置”页选择“自带 API Key”或“托管网关（服务器）”。前者允许填写 API Key、Base URL 和 Model；“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`。后者只读取部署者提供的、未提交到 GitHub 的 `managed_gateway.json`；用户点击“申请接入”时才生成本机设备密钥，由网关按服务端名额记录并等待管理员批准，不会显示或接收上游 Key、Base URL 或邀请码。保存本机 BYOK 配置或切换模式后，应用会刷新 provider，无需重启。
+启动应用后，在“配置”页选择“自带 API Key”或“托管网关（服务器）”。前者允许填写 API Key、Base URL 和 Model；“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`。后者由安装包预置部署者提供的 `managed_gateway.json`；用户点击“确认接入”时才生成本机设备密钥并提交公钥，由网关按服务端名额自动批准或进入待审批，不会显示或接收上游 Key、Base URL 或邀请码。保存本机 BYOK 配置或切换模式后，应用会刷新 provider，无需重启。
 
 ```bash
 cp .env.example .env
