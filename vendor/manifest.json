@@ -13,10 +13,10 @@
       ],
       "files": [
         {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/Multiwfn", "size_bytes": 41919825, "sha256": "63d5164f06f881fd98a03623403c00eb4b53dc5b02b618a893cfc450c415e902"},
-        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/settings.ini", "size_bytes": 20030, "sha256": "c9b3d9172af8073c893c90fa5164a8b1fe8cb04572b24672f3047a4baee2ba27"},
-        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/LICENSE.txt", "size_bytes": 1254, "sha256": "0846f4144fd66d07a5b17e340863147a6797bbec871114d804ae620ffd7e8360"},
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/settings.ini", "size_bytes": 19915, "sha256": "c889e528389e5a29f34e613a34ea1ef6672eb2990508a43deda5cd16de0e50d2"},
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/LICENSE.txt", "size_bytes": 1246, "sha256": "683ebe19409e1629bc7dc8ffc34cdc89b2da5c7fac940003574ebfa8b30aef67"},
         {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/NOTICE.md", "size_bytes": 1018, "sha256": "529602db40f38b4ba4ead6229926e434f5927b2b81696ce88248e6b8db63cd14"},
-        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/manifest.json", "size_bytes": 1431, "sha256": "c1af3140cfb7088a0d17cb3f2d87e3ce780b1452bf03ac5e11bb30a58797ea83"}
+        {"path": "multiwfn/linux-x86_64/3.8-dev-2025-02-14/manifest.json", "size_bytes": 1431, "sha256": "3b6c5402b1effd4c80fe5b86422128eb9f7bfdf7fc6815a7f247d869d20e7ca3"}
       ]
     },
     {

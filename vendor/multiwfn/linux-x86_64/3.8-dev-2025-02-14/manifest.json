@@ -27,12 +27,12 @@
       "executable": true
     },
     "settings.ini": {
-      "size_bytes": 20030,
-      "sha256": "c9b3d9172af8073c893c90fa5164a8b1fe8cb04572b24672f3047a4baee2ba27"
+      "size_bytes": 19915,
+      "sha256": "c889e528389e5a29f34e613a34ea1ef6672eb2990508a43deda5cd16de0e50d2"
     },
     "LICENSE.txt": {
-      "size_bytes": 1254,
-      "sha256": "0846f4144fd66d07a5b17e340863147a6797bbec871114d804ae620ffd7e8360"
+      "size_bytes": 1246,
+      "sha256": "683ebe19409e1629bc7dc8ffc34cdc89b2da5c7fac940003574ebfa8b30aef67"
     },
     "NOTICE.md": {
       "size_bytes": 1018,
