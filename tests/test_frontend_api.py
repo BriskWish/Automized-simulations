@@ -923,6 +923,7 @@ def test_llm_connection_uses_transient_form_values_and_requires_an_automatic_too
     assert call["model"] == "compatible-model"
     assert call["timeout"] == frontend_api.LLM_CONNECTION_TIMEOUT_S
     assert call["tool_choice"] == "auto"
+    assert call["max_tokens"] == frontend_api.LLM_CONNECTION_MAX_TOKENS == 128
     assert call["tools"][0]["function"]["name"] == "willy_connection_check"
     assert secret not in str(result)
 
@@ -1331,7 +1332,11 @@ def test_run_summary_uses_compact_current_stage_eta_label(tmp_path, monkeypatch)
 
     markdown = frontend_api.get_run_summary_markdown(run_id)
 
-    assert "当前步骤预计结束：2026-08-02 21:53:56 本地时间（UTC+08:00）" in markdown
+    expected_end = datetime.fromisoformat("2026-08-02T13:53:56+00:00").astimezone()
+    offset = expected_end.strftime("%z")
+    offset_label = "UTC" if not offset else f"UTC{offset[:3]}:{offset[3:]}"
+    expected_label = f"当前步骤预计结束：{expected_end:%Y-%m-%d %H:%M:%S} 本地时间（{offset_label}）"
+    assert expected_label in markdown
     assert "GROMACS 预计结束：" not in markdown
     assert "预测）" not in markdown
 

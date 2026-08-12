@@ -415,14 +415,30 @@ def test_dependency_preflight_action_only_locks_its_own_button(monkeypatch):
     monkeypatch.setattr(
         app_module,
         "run_local_dependency_preflight",
-        lambda: {"markdown": "**当前依赖满足完整 MD 最小链路。**"},
+        lambda: {
+            "groups": [
+                {"alternatives": [
+                    {"items": [
+                        {"requirement_id": "g16", "status": "available", "source": "path"},
+                        {"requirement_id": "formchk", "status": "available", "source": "dotenv"},
+                        {"requirement_id": "multiwfn", "status": "available", "source": "bundled"},
+                    ]},
+                    {"items": [{"requirement_id": "multiwfn", "status": "available", "source": "bundled"}]},
+                ]},
+            ],
+        },
     )
 
     updates = list(app_module._run_dependency_preflight())
 
-    assert updates[0][0]["value"] == "正在检查本机运行依赖与内置 Vendor 软件..."
+    assert updates[0][0]["value"] == "正在检查本机软件与内置模组..."
     assert updates[0][1]["interactive"] is False
-    assert "满足完整 MD 最小链路" in updates[-1][0]["value"]
+    assert "#### 量化结构" in updates[-1][0]["value"]
+    assert "1. G16：满足；来源：已检测到外置" in updates[-1][0]["value"]
+    assert "2. G16 formchk：满足；来源：已配置外置" in updates[-1][0]["value"]
+    assert "1. Multiwfn：满足；来源：内置" in updates[-1][0]["value"]
+    assert updates[-1][0]["value"].count("Multiwfn") == 1
+    assert "完整 MD" not in updates[-1][0]["value"]
     assert updates[-1][1]["interactive"] is True
 
 

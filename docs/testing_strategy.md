@@ -285,24 +285,24 @@ GROMACS 在加载 oneAPI 前因缺少 MKL 动态库不可运行，加载后可�
 **结果：通过（历史本机监听健康端点记录）。** 真实双机 TLS、远程客户端部署描述、设备注册/令牌交换和真实
 上游 tool-calling 仍未验收，不能直接据此启动远程完整 E2E。
 
-### 6.10 2026-08-11 第二台受控验收机：真实 BYOK DeepSeek 工具调用
+### 6.10 2026-08-12 第二台受控验收机：真实 BYOK DeepSeek 工具调用
 
 目标机保存的 BYOK 配置使用 DeepSeek OpenAI-compatible 端点与 `deepseek-v4-pro`。模型列表同时暴露
-`deepseek-v4-flash`。最小普通
-Chat Completions 请求返回标准单 choice，证明网络、鉴权和基础响应兼容；Willy 的受限连接检查要求
-模型强制调用空参数工具时，服务拒绝 `tool_choice`，原因是当前 thinking 模式不支持该字段。
+`deepseek-v4-flash`。最小普通 Chat Completions 请求返回标准单 choice，证明网络、鉴权和基础响应兼容。
+早期连接探针使用 `max_tokens=16` 时，`deepseek-v4-pro` 返回 `finish_reason=length` 且没有工具调用；同一模型在
+`max_tokens=256` 的自动工具选择探针中可以返回 `willy_connection_check`。该现象说明极低输出预算可造成推理型
+模型的 function-calling 假阴性。
 
-**结果：不通过（工具调用契约不兼容）。** 这不是网络、Key 或 Base URL 失败，且不记录 Key、原始
-prompt、原始响应或服务端错误体。该配置不能作为当前需要受控 function calling 的 Config Agent
-端到端验收模型；应改用支持 `tool_choice` 的非 thinking 模型/模式，或在后续版本为该类服务设计
-经过评审的非强制工具调用兼容策略。随后在同一 `deepseek-v4-pro` 配置下仅提供工具定义并使用
-默认自动选择时，模型返回了 `willy_connection_check` 工具调用；这证明实际 Agent 的自动工具调用路径
-可用，而配置页的强制选择检查过窄。目标机的 GPT 中转站配置已被此 BYOK 保存覆盖，尚无可复测证据。
+同一验收机还验证了：`deepseek-v4-pro` 可在自动工具选择下返回与冻结后端/组分完全匹配的
+`tools_inspect_quantum_inputs` 调用，但会拒绝指定函数的 `tool_choice` 请求（HTTP 400）。当前实现因此将连接探针
+预算固定为 128，并在量子审计阶段使用自动工具选择；128 是跨 OpenAI-compatible 服务的保守探针预算，尚未在该
+验收机上单独形成实测证据。服务端仍只接受唯一的指定审计工具并验证精确参数，普通文本
+或不匹配调用仍安全拒绝。HTTP 400/404/405/422、鉴权和限流被归为不可重试的明确配置错误，网络和超时才保留最多
+三次重试。探针、响应和错误体均未记录。
 
-**后续修改建议：** 配置页连接测试应提供工具定义但使用自动工具选择，仍必须校验响应中确实包含
-`willy_connection_check`，不能以普通文本响应判定成功；同时将服务端明确拒绝强制工具选择的响应归类为
-`tool_call_unsupported`，向用户提示“当前模型/思考模式不支持强制工具调用”，不要笼统显示为协议错误。
-该兼容策略需要单独的回归测试，不能改变实际 Agent 的动作契约或绕过工具调用校验。
+**结果：部分通过（自动 function-calling 兼容）。** 这不是网络、Key 或 Base URL 失败，也不构成对所有模型的
+兼容性结论。目标机仍需在更新候选上重新运行配置页连接测试、最小方案生成和受控错误解释，方可形成真实 BYOK
+端到端验收结论。目标机的 GPT 中转站配置已被此 BYOK 保存覆盖，尚无可复测证据。
 
 ### 6.11 2026-08-11 第二台受控验收机：GPT 中转站 BYOK
 

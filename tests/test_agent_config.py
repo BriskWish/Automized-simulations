@@ -88,7 +88,7 @@ def test_plan_prompt_exposes_only_read_only_tools_and_structured_contract():
         assert f"{field}：" in prompt
 
 
-def test_config_agent_rejects_model_text_when_forced_audit_has_no_tool_call(monkeypatch):
+def test_config_agent_rejects_model_text_when_automatic_audit_has_no_tool_call(monkeypatch):
     class Replies:
         def __init__(self):
             self.calls = []
@@ -118,7 +118,7 @@ def test_config_agent_rejects_model_text_when_forced_audit_has_no_tool_call(monk
     assert {
         tool["function"]["name"] for tool in audit_call["tools"]
     } == {"tools_inspect_quantum_inputs"}
-    assert audit_call["tool_choice"] == agent_config.QUANTUM_AUDIT_TOOL_CHOICE
+    assert audit_call["tool_choice"] == "auto"
 
 
 def test_config_agent_uses_semantic_audit_then_strict_json_stages(monkeypatch):
@@ -173,6 +173,46 @@ def test_config_agent_uses_semantic_audit_then_strict_json_stages(monkeypatch):
     assert replies.calls[0]["tools"] == agent_config.SEMANTIC_TOOLS
     assert replies.calls[1]["tools"] == agent_config.QUANTUM_AUDIT_TOOLS
     assert "tools" not in replies.calls[2]
+
+
+class _LLMHTTPError(Exception):
+    def __init__(self, status_code: int):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def test_config_agent_does_not_retry_a_tool_protocol_rejection(monkeypatch):
+    calls = []
+
+    class Replies:
+        def create(self, **_kwargs):
+            calls.append(True)
+            raise _LLMHTTPError(400)
+
+    monkeypatch.setattr(agent_config, "_available_residues", lambda: {"Li": {}})
+    monkeypatch.setattr(agent_config, "_DS", SimpleNamespace(chat=SimpleNamespace(completions=Replies())))
+
+    updates = list(agent_config.chat("Li 1", []))
+
+    assert len(calls) == 1
+    assert "工具调用协议不兼容" in updates[-1][1][-1]["content"]
+
+
+def test_config_agent_keeps_transient_llm_retry_budget(monkeypatch):
+    calls = []
+
+    class Replies:
+        def create(self, **_kwargs):
+            calls.append(True)
+            raise TimeoutError("network timeout")
+
+    monkeypatch.setattr(agent_config, "_available_residues", lambda: {"Li": {}})
+    monkeypatch.setattr(agent_config, "_DS", SimpleNamespace(chat=SimpleNamespace(completions=Replies())))
+
+    updates = list(agent_config.chat("Li 1", []))
+
+    assert len(calls) == agent_config.CONFIG_MAX_ATTEMPTS
+    assert "LLM 服务暂时不可用" in updates[-1][1][-1]["content"]
 
 
 def test_new_failed_request_clears_an_older_pending_plan(monkeypatch):

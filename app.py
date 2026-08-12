@@ -1740,20 +1740,99 @@ def _test_llm_connection(api_key, base_url, model):
 def _run_dependency_preflight():
     """Render the advisory local dependency report without gating task launch."""
     yield (
-        gr.update(value="正在检查本机运行依赖与内置 Vendor 软件..."),
+        gr.update(value="正在检查本机软件与内置模组..."),
         gr.update(interactive=False),
     )
     try:
         result = run_local_dependency_preflight()
-        markdown = result.get("markdown") if isinstance(result, Mapping) else ""
-        if not isinstance(markdown, str) or not markdown.strip():
-            markdown = "**依赖预检未返回有效结果。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
+        markdown = _format_dependency_preflight_result(result)
     except Exception:
         markdown = "**依赖预检执行失败。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
     yield (
         gr.update(value=markdown),
         gr.update(interactive=True),
     )
+
+
+_SOBTOP_REQUIREMENTS = (
+    "sobtop", "atomtype", "sobtop_ini", "sobtop_lj", "sobtop_bonded",
+    "bundled_obabel_wrapper", "bundled_obabel", "bundled_openbabel", "bundled_coordgen",
+)
+
+_DEPENDENCY_DISPLAY_GROUPS = (
+    ("量化结构", (
+        ("G16", ("g16",)),
+        ("G16 formchk", ("formchk",)),
+        ("G09", ("g09",)),
+        ("G09 formchk", ("g09_formchk",)),
+        ("ORCA", ("orca",)),
+        ("ORCA 转换工具", ("orca_2mkl",)),
+    )),
+    ("电荷配置", (("Multiwfn", ("multiwfn",)),)),
+    ("拓扑参数", (
+        ("Sobtop", _SOBTOP_REQUIREMENTS),
+        ("LigParGen", ("ligpargen",)),
+        ("BOSS", ("boss",)),
+        ("Open Babel", ("obabel",)),
+        ("C Shell", ("csh",)),
+    )),
+    ("初始建盒", (("Packmol", ("packmol",)),)),
+    ("模拟运行", (("GROMACS", ("gmx",)),)),
+)
+
+
+def _dependency_source_label(items: list[Mapping[str, object]]) -> str:
+    """Translate internal resolution origins into concise user-facing labels."""
+    sources = {str(item.get("source", "")) for item in items}
+    if "bundled" in sources:
+        return "内置"
+    if sources & {"willy_env", "dotenv"}:
+        return "已配置外置"
+    if sources & {"path", "legacy_env"}:
+        return "已检测到外置"
+    return "未检测到外置"
+
+
+def _format_dependency_preflight_result(result: object) -> str:
+    """Render each checked dependency once without exposing route diagnostics."""
+    if not isinstance(result, Mapping):
+        return "**依赖预检未返回有效结果。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
+    raw_groups = result.get("groups")
+    if not isinstance(raw_groups, list):
+        return "**依赖预检未返回有效结果。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
+
+    items_by_id: dict[str, Mapping[str, object]] = {}
+    for group in raw_groups:
+        if not isinstance(group, Mapping):
+            continue
+        alternatives = group.get("alternatives")
+        if not isinstance(alternatives, list):
+            continue
+        for alternative in alternatives:
+            if not isinstance(alternative, Mapping):
+                continue
+            items = alternative.get("items")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                requirement_id = item.get("requirement_id")
+                if isinstance(requirement_id, str) and requirement_id not in items_by_id:
+                    items_by_id[requirement_id] = item
+
+    if not items_by_id:
+        return "**依赖预检未返回有效结果。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
+
+    lines = ["### 本机依赖预检"]
+    for category, dependencies in _DEPENDENCY_DISPLAY_GROUPS:
+        lines.append(f"#### {category}")
+        for index, (label, requirement_ids) in enumerate(dependencies, start=1):
+            items = [items_by_id[item_id] for item_id in requirement_ids if item_id in items_by_id]
+            satisfied = bool(items) and all(item.get("status") == "available" for item in items)
+            status = "满足" if satisfied else "不满足"
+            lines.append(f"{index}. {label}：{status}；来源：{_dependency_source_label(items)}")
+    return "\n".join(lines)
 
 
 _LOCAL_EXECUTION_CONTEXT = {
@@ -2090,8 +2169,8 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
 
             gr.Markdown("### 2. 运行依赖预检", elem_id="dependency-preflight-heading")
             gr.Markdown(
-                "检查本机外部软件、环境变量和内置 Vendor 软件。发现的外部工具会写入本项目 "
-                "`.env` 的缺失 `WILLY_*` 默认项；不会覆盖已有配置，也不会阻止本地任务启动。",
+                "检查本机软件和内置模组。检测到的软件会自动保存为本项目默认配置；"
+                "不会覆盖已有配置，也不会阻止本地任务启动。",
                 elem_id="dependency-preflight-notice",
             )
             dependency_preflight_button = gr.Button(

@@ -154,10 +154,10 @@ _PLAN_READ_ONLY_TOOL_NAMES = frozenset({
     "tools_inspect_quantum_inputs",
 })
 QUANTUM_AUDIT_TOOL_NAME = "tools_inspect_quantum_inputs"
-QUANTUM_AUDIT_TOOL_CHOICE = {
-    "type": "function",
-    "function": {"name": QUANTUM_AUDIT_TOOL_NAME},
-}
+# The server accepts only this named call with the exact normalized arguments.
+# Automatic selection keeps that contract while supporting providers that
+# reject a fixed-function ``tool_choice`` request.
+QUANTUM_AUDIT_TOOL_CHOICE = "auto"
 _SEMANTIC_TOOL_NAMES = _PLAN_READ_ONLY_TOOL_NAMES - {QUANTUM_AUDIT_TOOL_NAME}
 SEMANTIC_TOOLS = tuple(
     tool for tool in TOOLS
@@ -658,6 +658,23 @@ def _j(raw):
         import yaml; return yaml.safe_load(raw)
 
 
+def _llm_failure_notice(error: Exception) -> tuple[str, bool]:
+    """Return a redacted UI message and whether a transient retry is useful."""
+    response = getattr(error, "response", None)
+    status = getattr(error, "status_code", None) or getattr(response, "status_code", None)
+    if status in {400, 404, 405, 422}:
+        return (
+            "⚠️ LLM 模型或工具调用协议不兼容。"
+            "请在配置页重新测试连接，或更换支持自动 function calling 的模型。",
+            False,
+        )
+    if status in {401, 403}:
+        return "⚠️ LLM API Key 无效或无权访问当前模型，请检查配置。", False
+    if status == 429:
+        return "⚠️ LLM 服务限流或余额不足，请稍后重试并检查账户配额。", False
+    return "❌ LLM 服务暂时不可用，请检查网络和配置后重试。", True
+
+
 # ============================================================
 # 方案总结
 # ============================================================
@@ -1132,7 +1149,7 @@ def chat(
     thinking_h = list(user_h) + [{"role":"assistant","content": "\n".join(progress_lines)}]
     yield "", thinking_h, thinking_h, pending_plan, "", _HIDE_BTN
 
-    # LLM call: semantic normalization -> forced input audit -> strict JSON.
+    # LLM call: semantic normalization -> required input audit -> strict JSON.
     # The state transitions live here rather than in a prompt reminder, so a
     # model that emits prose in the audit phase cannot silently bypass it.
     candidate_config = None
@@ -1257,10 +1274,9 @@ def chat(
                     )},
                 ],
                 tools=QUANTUM_AUDIT_TOOLS,
-                # This is the one action in configuration generation whose
-                # result is a hard safety prerequisite. The selected tool is
-                # fixed, while the service still checks its arguments against
-                # the server-normalized backend/components before dispatch.
+                # This action remains a hard safety prerequisite. The provider
+                # may select automatically, while the server still accepts
+                # only this exact tool with exact normalized arguments.
                 tool_choice=QUANTUM_AUDIT_TOOL_CHOICE,
                 temperature=0,
                 timeout=CONFIG_LLM_TIMEOUT_S,
@@ -1364,9 +1380,10 @@ def chat(
                 return
             candidate_config = audited_config
             break
-        except Exception:
-            if attempt == CONFIG_MAX_ATTEMPTS - 1:
-                h = list(user_h) + [{"role": "assistant", "content": "❌ LLM 服务暂时不可用，请检查配置后重试。"}]
+        except Exception as error:
+            notice, retryable = _llm_failure_notice(error)
+            if not retryable or attempt == CONFIG_MAX_ATTEMPTS - 1:
+                h = list(user_h) + [{"role": "assistant", "content": notice}]
                 yield _emit(h, pending_plan)
                 return
     if candidate_config is None:

@@ -2,7 +2,7 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **版本 0.3.0**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版强化了配置生成、量子输入审计和受控错误恢复的 LLM 契约。
+> **版本 0.3.1**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版完善了 OpenAI-compatible 工具调用兼容、配置审计错误提示和本机依赖预检展示。
 
 > 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证；2026-08-11 的四条真实 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，使用 7 ns EQ、2 ns PROD，且根目录配置在批次结束后恢复。
 
@@ -54,7 +54,7 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 
 | 依赖 | 用途 | 获取方式 |
 |------|------|------|
-| Python ≥3.10 | 运行环境 | `apt install python3` |
+| Python 3.10--3.12 | 运行环境 | 使用发行版或受控环境提供的 3.10+ 解释器；系统 Python 3.8 不受支持 |
 | Gaussian16 / Gaussian09 | 量子化学计算（默认后端为 G16） | 需 license |
 | ORCA 6.x | 量子化学计算（可选后端） | [orcaforum.kofo.mpg.de](https://orcaforum.kofo.mpg.de/) |
 | formchk | Gaussian checkpoint 转换 | 分别配置对应版本的 formchk |
@@ -74,12 +74,22 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 ```bash
 git clone <repo-url>
 cd AutomizedSimulations
-pip install -e .
+python3.11 -m venv .venv  # 或任何 Python 3.10--3.12 解释器
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -V  # 必须为 Python 3.10--3.12
 ```
+
+Ubuntu 20.04 的系统 `python3` 通常是 3.8，不能直接安装本项目。请先通过系统包、机构模块、
+conda/mamba 或其他受控方式取得 Python 3.10--3.12，再以上述解释器创建独立虚拟环境；不要以
+`--ignore-requires-python` 强行安装，也不要修改项目的 Python 下限。
 
 ### 配置 LLM
 
-启动应用后，在“配置”页填写用户自有的 API Key、Base URL 和 Model。“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`；保存后应用会刷新本地 provider，无需重启。托管网关配置入口在本版本冻结。
+启动应用后，在“配置”页填写用户自有的 API Key、Base URL 和 Model。“测试连接”只使用当前表单值验证 Chat Completions 与实际工具调用，不会保存配置，也不会自动补 `/v1`；该探针的 `max_tokens` 固定为 128，以避免推理型模型在极低输出预算下被误判为不支持工具调用。保存后应用会刷新本地 provider，无需重启。托管网关配置入口在本版本冻结。
+
+方案助理仍要求模型返回实际 function call。原始量子输入审计对 provider 使用自动工具选择以兼容拒绝固定 `tool_choice` 的 OpenAI-compatible 服务；服务端只接受唯一的 `tools_inspect_quantum_inputs` 调用，并校验其后端和组分参数与已归一化方案完全一致。HTTP 400/404/405/422、鉴权和限流错误会立即显示为对应配置问题，不会无意义地连续重试三次；网络/超时等瞬态错误仍最多重试三次。
 
 ```bash
 cp .env.example .env

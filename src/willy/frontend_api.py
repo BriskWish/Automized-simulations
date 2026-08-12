@@ -118,6 +118,7 @@ class ExecutionProposalContext(TypedDict):
 
 
 LLM_CONNECTION_TIMEOUT_S = 12.0
+LLM_CONNECTION_MAX_TOKENS = 128
 _LLM_CONNECTION_TOOL_NAME = "willy_connection_check"
 _LLM_CONNECTION_TOOL = {
     "type": "function",
@@ -518,7 +519,10 @@ def test_llm_connection(api_key: str, base_url: str, model: str) -> LLMConnectio
             # returned call remains mandatory for a successful check.
             tool_choice="auto",
             temperature=0,
-            max_tokens=16,
+            # Reasoning-capable models can consume a small output budget
+            # before emitting a tool call.  This bounded probe avoids a
+            # low-token false negative without changing normal agent budgets.
+            max_tokens=LLM_CONNECTION_MAX_TOKENS,
             timeout=LLM_CONNECTION_TIMEOUT_S,
         )
     except Exception as error:
