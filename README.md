@@ -72,7 +72,7 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 ### 安装
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/BriskWish/Automized-simulations.git
 cd AutomizedSimulations
 python3.11 -m venv .venv  # 或任何 Python 3.10--3.12 解释器
 source .venv/bin/activate
