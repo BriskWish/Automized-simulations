@@ -27,6 +27,11 @@ from willy.quantum.input_audit import (
     audit_config_quantum_inputs,
     quantum_input_contract_issues,
 )
+from willy.prompt_contract import (
+    PROMPT_CONTRACT_VERSION,
+    build_contract_system_prompt,
+    build_structured_context,
+)
 from willy.pipeline_launch import (
     PipelineLockConflict,
     cleanup_finished_launch,
@@ -35,21 +40,11 @@ from willy.pipeline_launch import (
 )
 # ── Config Agent System Prompt ──
 
-CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。根据用户意图选择模式：
+CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案：
 
 **只能使用提供的 function calling 工具。不存在 bash/shell/命令行工具，禁止编造或调用不存在的工具。**
 
-## 模式 A: 直接操作
-用户意图是单次操作（非配置新体系）时，**只调工具，不生成 config**。
-- "跳过 XXX"/"移除 XXX" → tools_skip_molecule_global
-- "用 ORCA"/"用 G16"/"用 G09"/"换高斯" → tools_set_backend_quantum
-- "列出分子"/"有什么分子" → tools_refresh_structs 或 tools_lookup_molecule
-- "XXX 是什么"/"查一下 XXX" → tools_lookup_molecule
-- "诊断 XXX" → tools_diagnose_error_config
-- "验证配置" → tools_validate_config
-操作完成后简短回复结果即可，**不要**输出 config JSON。
-
-## 模式 B: 配置生成
+## 配置生成
 用户描述了模拟体系（含分子名+数量）时，按以下流程：
 
 ### 输出格式（严格）
@@ -71,9 +66,9 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。根据用户意图选择模式
   "defaults": {{ "mem": "5GB", "nproc": 8 }}
 }}
 ```
-- backend: 量子化学后端，默认 g16。用户说"用 G09""gaussian09" 时设为 g09；说"用 ORCA""orca" 时设为 orca。调用 tools_set_backend_quantum 工具。
+- backend: 量子化学后端，默认 g16。用户说"用 G09""gaussian09" 时设为 g09；说"用 ORCA""orca" 时设为 orca。后端只能写入候选 JSON，不能调用写入型工具。
 - molecules/residues 的 key 必须用 struct/ 下的精确文件名: {molecules}。用户写 Li+/Li⁺/锂离子 都映射到 Li，NO3-/NO₃⁻/硝酸根 都映射到 NO3
-- **电荷和自旋不是默认值，也不能从知识库猜测。** 在输出任何 config 前，必须调用一次 `tools_inspect_quantum_inputs`，传入最终 backend 和最终所有 `name/count`。g16/g09 只接受同名 `.gjf`，orca 只接受同名 `.inp`；工具返回的每个 `charge` 和 `spin` 是唯一可写入 JSON 的数值。示例中的尖括号仅说明来源，实际 JSON 必须填工具返回的整数。
+- **电荷和自旋不是默认值，也不能从知识库猜测。** 在输出任何完整候选 config 前，必须完成一次 `tools_inspect_quantum_inputs` 审计；g16/g09 只接受同名 `.gjf`，orca 只接受同名 `.inp`。工具返回的每个 `charge` 和 `spin` 是唯一可写入最终 JSON 的数值。语义草案阶段只能给出 backend 和 residues，服务端会冻结其 backend/name/count 后进入强制审计阶段。
 - 审计返回 `ok=false` 时返回阻塞 Error，不得输出可确认 config。`charge_balance=imbalanced` 时，除非用户已明确要求并在 JSON 中写入 `ion_compensation` 或 `non_neutral_confirmed=true`，否则返回 `charge_imbalance` Error，说明净电荷和缺失的配平信息；绝不能把任意分子改写为中性来绕过。
 - md 必须使用 schema_version=2；EQ 采用六段退火，PROD 只接受独立 duration_ns，PROD 温度必须等于 EQ target_temperature
 - 用户明确要求“额外输出全精度 TRR 轨迹”、"输出 TRR"或同义表述时，设 md.outputs.trr=true；未明确要求时保持 false
@@ -102,13 +97,13 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。根据用户意图选择模式
 
 ## Few-shot
 **Normal**: Li 100, TFSI 100, FEC 300 → 先调用 tools_inspect_quantum_inputs(g16, 全部组分) → 将返回的电荷/自旋写入 {{"error":null,...}}。
-**G09**: 用 Gaussian 09 算 Li 50, TFSI 50 → 先调 tools_set_backend_quantum("g09")，再调用 tools_inspect_quantum_inputs(g09, 全部组分)；缺少 `.gjf` 时返回错误，不得回退读取 `.inp`。
-**ORCA**: 用 ORCA 算 Li 50, TFSI 50, 350K → 先调 tools_set_backend_quantum("orca")，再调用 tools_inspect_quantum_inputs(orca, 全部组分)；缺少 `.inp` 时返回错误，不得回退读取 `.gjf`。
+**G09**: 用 Gaussian 09 算 Li 50, TFSI 50 → 在候选 JSON 中设 backend=g09，再调用 tools_inspect_quantum_inputs(g09, 全部组分)；缺少 `.gjf` 时返回错误，不得回退读取 `.inp`。
+**ORCA**: 用 ORCA 算 Li 50, TFSI 50, 350K → 在候选 JSON 中设 backend=orca，再调用 tools_inspect_quantum_inputs(orca, 全部组分)；缺少 `.inp` 时返回错误，不得回退读取 `.gjf`。
 **Ambiguous**: 锂盐100 溶剂200 → {{"error":{{"type":"ambiguous","detail":"锂盐和溶剂未指定具体分子"}},"available":["LiTFSI","LiPF6","EC",...]}}
 **Warning**: Li 20000, TFSI 20000 → {{"error":null,"warnings":[{{"type":"compute_heavy","detail":"Total 40000 molecules"}}],...}}
-**操作**: 跳过 TFSI → 调 tools_skip_molecule_global("TFSI") → "已跳过 TFSI"
-**操作**: 用 ORCA → 调 tools_set_backend_quantum("orca") → "后端已切换为 orca"
-**操作**: 用 G09 → 调 tools_set_backend_quantum("g09") → "后端已切换为 g09"
+**修改**: 移除 TFSI → 生成不含 TFSI 的新候选 JSON，等待用户确认。
+**修改**: 用 ORCA → 生成 backend=orca 的新候选 JSON，等待用户确认。
+**修改**: 用 G09 → 生成 backend=g09 的新候选 JSON，等待用户确认。
 
 可用分子: {molecules}"""
 
@@ -143,6 +138,38 @@ LAUNCH_CONFIRMATIONS = frozenset({
 })
 _HIDE_BTN = {"visible": False}
 _PENDING_LAUNCH_PLAN_VERSION = 1
+CONFIG_PROMPT_VERSION = "config-assistant-v2"
+CONFIG_MAX_ATTEMPTS = 3
+CONFIG_MAX_TOOL_ROUNDS = 5
+CONFIG_LLM_TIMEOUT_S = 30.0
+_PLAN_READ_ONLY_TOOL_NAMES = frozenset({
+    "tools_lookup_molecule",
+    "tools_resolve_compound",
+    "tools_lookup_md_defaults",
+    "tools_get_box_density",
+    "tools_lookup_basis_set",
+    "tools_refresh_structs",
+    "tools_diagnose_error_config",
+    "tools_validate_config",
+    "tools_inspect_quantum_inputs",
+})
+QUANTUM_AUDIT_TOOL_NAME = "tools_inspect_quantum_inputs"
+QUANTUM_AUDIT_TOOL_CHOICE = {
+    "type": "function",
+    "function": {"name": QUANTUM_AUDIT_TOOL_NAME},
+}
+_SEMANTIC_TOOL_NAMES = _PLAN_READ_ONLY_TOOL_NAMES - {QUANTUM_AUDIT_TOOL_NAME}
+SEMANTIC_TOOLS = tuple(
+    tool for tool in TOOLS
+    if tool.get("function", {}).get("name") in _SEMANTIC_TOOL_NAMES
+)
+QUANTUM_AUDIT_TOOLS = tuple(
+    tool for tool in TOOLS
+    if tool.get("function", {}).get("name") == QUANTUM_AUDIT_TOOL_NAME
+)
+# Kept as a public compatibility alias for callers that previously imported the
+# planning-tool collection.  The generation loop uses the stage-specific sets.
+PLAN_TOOLS = SEMANTIC_TOOLS
 
 
 @dataclass(frozen=True)
@@ -244,7 +271,9 @@ def _audit_candidate_config(config: Mapping[str, object]) -> tuple[dict[str, obj
         if not audit.get("ok"):
             return None, [str(issue) for issue in audit.get("issues", [])[:16]]
         audited_config = apply_audited_quantum_properties(config, audit)
-        return audited_config, quantum_input_contract_issues(audited_config, audit)
+        issues = quantum_input_contract_issues(audited_config, audit)
+        issues.extend(validate_config(audited_config))
+        return audited_config, list(dict.fromkeys(issues))
     except QuantumInputAuditError as exc:
         return None, [str(exc)]
 
@@ -338,18 +367,267 @@ def launch_pipeline(config: Mapping[str, object] | None = None) -> str:
 # System Prompt
 # ============================================================
 
-def get_system_prompt(execution_facts: str = "") -> str:
+def get_system_prompt(
+    execution_facts: str = "",
+    *,
+    stage: str = "semantic_normalize",
+) -> str:
+    """Return the stage-specific system contract for configuration generation."""
     molecules = ", ".join(_available_residues().keys())
-    prompt = CONFIG_AGENT_PROMPT.format(molecules=molecules)
+    domain_rules = CONFIG_AGENT_PROMPT.format(molecules=molecules)
     if execution_facts:
-        prompt += (
-            "\n\n## 已确认的 MD 执行边界\n"
-            f"{execution_facts}\n"
-            "该执行选择由服务端在通过输入审计后写入 config.execution.md。"
+        domain_rules += (
+            "\n\n已确认的 MD 执行边界由受控结构化上下文提供。"
             "不得在 JSON 中新增、修改或猜测 execution、SSH、Slurm、主机、路径、"
             "认证或命令字段。"
         )
-    return prompt
+    stage_rules = {
+        "semantic_normalize": (
+            "当前仅处于语义提取与服务端归一化前阶段。可以调用本轮提供的名称、"
+            "默认值等只读工具，随后只能输出一个含 backend 和 residues 的语义草案。"
+            "不得把草案称为已审计、可确认或可运行方案；服务端会独立发起强制量子输入审计。"
+        ),
+        "quantum_input_audit": (
+            "当前仅处于原始量子输入审计阶段。必须发出唯一一个 tools_inspect_quantum_inputs "
+            "调用，且参数必须逐字匹配服务端冻结的 backend 与 components；不得输出文本或 JSON。"
+        ),
+        "strict_json": (
+            "当前处于审计后的严格 JSON 输出阶段。不得调用工具；必须使用受控上下文中的"
+            "量子输入审计结果，且不得改变已审计 backend、residues、电荷或自旋。"
+        ),
+    }.get(stage, "")
+    return build_contract_system_prompt(
+        assistant_name="Willy 方案助理",
+        scope="将用户的模拟需求整理为可确认、可审计的工作流配置",
+        domain_rules=(
+            domain_rules
+            + "\n\n方案生成与修改只能调用本轮提供的只读工具。"
+            "后端是候选 JSON 的字段，不得调用写入型工具修改项目全局配置；"
+            "跳过分子、启动流水线和修改已有运行不属于本助理的本轮权限。"
+            + "\n\n" + stage_rules
+        ),
+    )
+
+
+def _config_outline(config: Mapping[str, object] | None) -> dict[str, object]:
+    """Return only proposal fields that are meaningful to a revision request."""
+    if not isinstance(config, Mapping):
+        return {}
+    outline: dict[str, object] = {}
+    for key in (
+        "backend", "residues", "molecules", "md", "topology", "box", "defaults",
+        "ion_compensation", "non_neutral_confirmed",
+    ):
+        if key in config:
+            outline[key] = copy.deepcopy(config[key])
+    return outline
+
+
+def _config_task_context(
+    *,
+    mode: str,
+    user_request: str,
+    execution_facts: str,
+    frozen_config: Mapping[str, object] | None = None,
+    recent_history: list[dict[str, str]] | None = None,
+    attempt: int = 0,
+    tool_round: int = 0,
+    stage: str = "semantic_normalize",
+) -> str:
+    """Create a bounded, authority-labelled context for one config request."""
+    available = list(_available_residues())[:128]
+    immutable: dict[str, object] = {
+        "prompt_contract_version": PROMPT_CONTRACT_VERSION,
+        "prompt_version": CONFIG_PROMPT_VERSION,
+        "execution_boundary": execution_facts or "MD 仅使用服务端确认的本机执行边界",
+        "supported_quantum_backends": ["g16", "g09", "orca"],
+        "available_structure_names": available,
+        "raw_input_rule": "g16/g09 仅接受 .gjf；orca 仅接受 .inp；电荷和自旋必须来自审计工具。",
+    }
+    if frozen_config is not None:
+        immutable["frozen_plan_outline"] = _config_outline(frozen_config)
+    evidence: dict[str, object] = {
+        "server_validated": [
+            "候选方案会在展示前重新审计原始量子输入、回填电荷和自旋，并校验 workflow/MD schema",
+            "execution 字段由服务端覆盖，模型没有远程连接或启动权限",
+        ],
+    }
+    if recent_history:
+        evidence["recent_conversation"] = [
+            {"role": item["role"], "content": item["content"][-600:]}
+            for item in recent_history[-2:]
+            if item.get("role") in {"user", "assistant"} and isinstance(item.get("content"), str)
+        ]
+    expected: object
+    if mode in {"plan_generate", "plan_revise"} and stage == "semantic_normalize":
+        expected = {
+            "content": "严格 JSON 对象：语义草案，必须含 backend 和 residues，或固定 error 对象",
+            "stage_boundary": "此阶段不得声称量子输入已审计；服务端会从草案归一化 backend 和 components 后进入强制审计阶段。",
+        }
+    else:
+        expected = {
+            "content": "简洁中文解释；区分已记录事实与建议；不得输出 config JSON",
+        }
+    return build_structured_context(
+        task_type={"mode": mode, "user_request": user_request.strip()[:3_000]},
+        current_layer_and_step={"layer": "config", "step": "方案生成与确认前校验", "run_id": None},
+        immutable_facts=immutable,
+        verified_evidence=evidence,
+        unverified_assumptions=[
+            "分子名称映射、体系类型和参数建议需要通过工具或审计结果确认",
+            "用户未明确给出的科学参数只能使用已登记默认值，不能假定为已确认偏好",
+        ],
+        allowed_actions=[
+            "调用本轮提供的配置只读工具",
+            "生成语义草案或解释当前待确认方案",
+        ],
+        prohibited_actions=[
+            "不得启动流水线、写入 config.json、修改已有待确认方案或执行外部程序",
+            "不得把未审计电荷/自旋写入候选配置",
+            "不得绕过服务端量子输入审计阶段",
+            "不得自行设置 execution、SSH、Slurm、主机、路径、认证或命令字段",
+        ],
+        remaining_budget={
+            "remaining_generation_attempts": max(0, CONFIG_MAX_ATTEMPTS - attempt),
+            "remaining_tool_rounds": max(0, CONFIG_MAX_TOOL_ROUNDS - tool_round),
+            "per_call_timeout_s": CONFIG_LLM_TIMEOUT_S,
+        },
+        expected_output_format=expected,
+    )
+
+
+def _quantum_audit_context(
+    *,
+    user_request: str,
+    backend: str,
+    components: list[dict[str, object]],
+    execution_facts: str,
+) -> str:
+    """Build the isolated one-tool context for raw quantum-input auditing."""
+    return build_structured_context(
+        task_type={"mode": "plan_quantum_input_audit", "user_request": user_request.strip()[:3_000]},
+        current_layer_and_step={"layer": "config", "step": "原始量子输入强制审计", "run_id": None},
+        immutable_facts={
+            "prompt_contract_version": PROMPT_CONTRACT_VERSION,
+            "normalized_backend": backend,
+            "normalized_components": components,
+            "execution_boundary": execution_facts or "MD 仅使用服务端确认的本机执行边界",
+        },
+        verified_evidence={
+            "server_validated": [
+                "backend 和 components 已由语义草案经服务端归一化",
+                "此阶段不接受模型更改 backend、分子名或数量",
+            ],
+        },
+        unverified_assumptions=[
+            "对应后端的原始量子输入是否存在、格式是否有效及其电荷/自旋尚未验证。",
+        ],
+        allowed_actions=[
+            "只能且必须调用一次 tools_inspect_quantum_inputs，参数必须与 normalized_backend 和 normalized_components 完全相同。",
+        ],
+        prohibited_actions=[
+            "不得输出普通文本、JSON 方案或其他工具调用",
+            "不得改变 backend、components、execution 或启动流水线",
+        ],
+        remaining_budget={"required_tool_calls": 1, "remaining_tool_rounds": 1, "per_call_timeout_s": CONFIG_LLM_TIMEOUT_S},
+        expected_output_format={
+            "tool_call": "tools_inspect_quantum_inputs",
+            "arguments": {"backend": backend, "components": components},
+        },
+    )
+
+
+def _strict_config_context(
+    *,
+    user_request: str,
+    semantic_draft: Mapping[str, object],
+    audit: Mapping[str, object],
+    execution_facts: str,
+    mode: str,
+) -> str:
+    """Build the no-tool rendering stage after source input audit succeeds."""
+    return build_structured_context(
+        task_type={"mode": "plan_strict_json", "source_mode": mode, "user_request": user_request.strip()[:3_000]},
+        current_layer_and_step={"layer": "config", "step": "审计后严格配置生成", "run_id": None},
+        immutable_facts={
+            "prompt_contract_version": PROMPT_CONTRACT_VERSION,
+            "semantic_selection": {
+                "backend": semantic_draft.get("backend"),
+                "residues": semantic_draft.get("residues"),
+            },
+            "execution_boundary": execution_facts or "MD 仅使用服务端确认的本机执行边界",
+        },
+        verified_evidence={
+            "quantum_input_audit": dict(audit),
+            "server_validated": [
+                "量子输入审计已经通过；组件电荷和自旋必须以此结果为准",
+                "最终配置仍会由服务端执行输入契约、schema 与执行边界校验",
+            ],
+        },
+        unverified_assumptions=[
+            "未明确的 MD、拓扑和建盒参数只能使用已登记默认值。",
+        ],
+        allowed_actions=["输出一个严格 JSON 候选 config，或固定 error 对象。"],
+        prohibited_actions=[
+            "不得调用工具、输出 Markdown、启动流水线或修改执行边界",
+            "不得修改已审计的 backend、分子名、数量、电荷或自旋",
+        ],
+        remaining_budget={"remaining_model_calls": 1, "per_call_timeout_s": CONFIG_LLM_TIMEOUT_S},
+        expected_output_format={
+            "content": "严格 JSON 对象：完整候选 config，或固定 error 对象",
+            "required_before_config": "必须使用 quantum_input_audit 中的 source-authoritative charge/spin。",
+        },
+    )
+
+
+def _normalize_quantum_audit_request(
+    draft: Mapping[str, object],
+) -> tuple[dict[str, object] | None, str | None]:
+    """Extract one exact, server-validated audit request from a semantic draft."""
+    backend = draft.get("backend", "g16")
+    if not isinstance(backend, str) or backend.strip().lower() not in {"g16", "g09", "orca"}:
+        return None, "候选方案未提供受支持的量子后端。"
+    residues = draft.get("residues")
+    if not isinstance(residues, Mapping) or not residues:
+        return None, "候选方案未提供可审计的分子及数量。"
+    available = set(_available_residues())
+    components: list[dict[str, object]] = []
+    for name, count in residues.items():
+        if not isinstance(name, str) or name not in available:
+            return None, "候选方案包含未登记的分子名称，无法进行原始输入审计。"
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            return None, f"分子 {name} 的数量必须是正整数，无法进行原始输入审计。"
+        components.append({"name": name, "count": count})
+    components.sort(key=lambda item: str(item["name"]))
+    return {"backend": backend.strip().lower(), "components": components}, None
+
+
+def _audit_result_from_required_tool_call(
+    message: object,
+    expected_request: Mapping[str, object],
+) -> tuple[dict[str, object] | None, str | None]:
+    """Accept exactly one matching audit call and dispatch it server-side."""
+    tool_calls = getattr(message, "tool_calls", None)
+    if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+        return None, "model_no_tool_call"
+    tool_call = tool_calls[0]
+    function = getattr(tool_call, "function", None)
+    if getattr(function, "name", None) != QUANTUM_AUDIT_TOOL_NAME:
+        return None, "model_invalid_tool_call"
+    try:
+        arguments = json.loads(getattr(function, "arguments", ""))
+    except (TypeError, json.JSONDecodeError):
+        return None, "model_invalid_tool_arguments"
+    if arguments != expected_request:
+        return None, "model_audit_scope_mismatch"
+    result_str = handle_tool_call(QUANTUM_AUDIT_TOOL_NAME, dict(arguments))
+    try:
+        result = json.loads(result_str)
+    except json.JSONDecodeError:
+        return None, "quantum_input_audit_invalid_response"
+    if not isinstance(result, dict):
+        return None, "quantum_input_audit_invalid_response"
+    return result, None
 
 
 # ============================================================
@@ -360,7 +638,9 @@ def _llm(system, user):
     r = _DS.chat.completions.create(
         model=_LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL,
         messages=[{"role":"system","content":system},{"role":"user","content":user}],
-        temperature=0.1)
+        temperature=0.1,
+        timeout=CONFIG_LLM_TIMEOUT_S,
+    )
     return r.choices[0].message.content
 
 def _j(raw):
@@ -597,7 +877,7 @@ def _pending_config_context(
             continue
         role, content = item.get("role"), item.get("content")
         if role in ("user", "assistant") and isinstance(content, str):
-            recent.append({"role": role, "content": content[-4000:]})
+            recent.append({"role": role, "content": content[-600:]})
     return {
         "config": config,
         "summary": _latest_pending_summary(history) or "",
@@ -605,22 +885,23 @@ def _pending_config_context(
     }
 
 
-def _pending_revision_message(message: str, context: Mapping[str, object]) -> str:
-    """Bind an incremental edit to the exact proposal shown in the UI."""
-    config = context.get("config", {})
-    summary = context.get("summary", "")
-    recent = context.get("recent_history", [])
-    return (
-        "这是对上一轮待确认模拟方案的增量修改请求。请把上一轮方案作为基线，"
-        "只修改用户明确提出的字段，保留其余字段不变。输出前必须重新调用 "
-        "tools_inspect_quantum_inputs，并按审计结果生成完整配置 JSON；不要启动流水线，"
-        "不要调用 tools_set_backend_quantum 直接改写全局配置。\n\n"
-        f"上一轮方案摘要：\n{summary}\n\n"
-        "上一轮冻结配置（唯一基线，JSON）：\n"
-        f"{json.dumps(config, ensure_ascii=False, sort_keys=True)}\n\n"
-        "最近对话上下文：\n"
-        f"{json.dumps(recent, ensure_ascii=False)}\n\n"
-        f"本轮用户修改要求：\n{message}"
+def _pending_revision_message(
+    message: str,
+    context: Mapping[str, object],
+    execution_facts: str,
+    *,
+    attempt: int = 0,
+    tool_round: int = 0,
+) -> str:
+    """Build the structured prompt envelope for an incremental revision."""
+    return _config_task_context(
+        mode="plan_revise",
+        user_request=message,
+        execution_facts=execution_facts,
+        frozen_config=context.get("config") if isinstance(context.get("config"), Mapping) else None,
+        recent_history=context.get("recent_history") if isinstance(context.get("recent_history"), list) else None,
+        attempt=attempt,
+        tool_round=tool_round,
     )
 
 
@@ -628,18 +909,23 @@ def _answer_pending_config_question(message: str, context: Mapping[str, object])
     """Answer a question without changing or invalidating the pending plan."""
     if not _DS:
         return "当前方案仍在等待确认；请回复“运行”确认，或直接说明需要修改的参数。"
-    prompt = (
-        "你是模拟配置方案助理。用户正在查看一份尚未确认的方案。"
-        "只回答用户的问题，不生成新的 config JSON，不启动流水线，也不改变方案。"
-        "回答应明确说明若要修改需要用户提出具体字段；不要编造未提供的文件或计算结果。\n\n"
-        f"待确认方案摘要：\n{context.get('summary', '')}\n\n"
-        "冻结配置：\n"
-        f"{json.dumps(context.get('config', {}), ensure_ascii=False, sort_keys=True)}\n\n"
-        f"用户问题：\n{message}"
+    prompt = _config_task_context(
+        mode="plan_explain",
+        user_request=message,
+        execution_facts="当前方案尚未确认，任何执行目标均未授权。",
+        frozen_config=context.get("config") if isinstance(context.get("config"), Mapping) else None,
+        recent_history=context.get("recent_history") if isinstance(context.get("recent_history"), list) else None,
     )
     try:
         answer = _llm(
-            "你是严谨、简洁的 MD 配置解释助手。只回答问题，不执行操作。",
+            build_contract_system_prompt(
+                assistant_name="Willy 方案助理",
+                scope="解释当前待确认方案，不产生或修改配置",
+                domain_rules=(
+                    "只回答问题，不生成 config JSON，不启动流水线，也不改变方案。"
+                    "只能解释受控上下文中的冻结方案概要；需要修改时要求用户提出具体字段。"
+                ),
+            ),
             prompt,
         )
         if isinstance(answer, str) and answer.strip():
@@ -800,26 +1086,6 @@ def chat(
         yield _emit(h, None if receipt.state == "started" else pending_plan)
         return
 
-    # Keep an awaiting proposal alive while the user asks about it or edits it.
-    # The exact frozen config and the recent turns are bound into the next LLM
-    # request, so a second turn is an incremental edit rather than a stateless
-    # replacement. Explicitly starting a new project still invalidates it.
-    pending_context = _pending_config_context(pending_plan, history)
-    pending_intent = _classify_pending_config_intent(message)
-    revision_mode = False
-    llm_message = message
-    if pending_context is not None and pending_intent != "replace":
-        if pending_intent == "revise":
-            revision_mode = True
-            llm_message = _pending_revision_message(message, pending_context)
-        else:
-            answer = _answer_pending_config_question(message, pending_context)
-            h = user_h + [{"role": "assistant", "content": answer}]
-            yield _emit(h, pending_plan)
-            return
-    else:
-        pending_plan = None
-
     selected_execution, execution_facts, selection_error = _trusted_execution_selection(
         execution_context,
     )
@@ -827,6 +1093,24 @@ def chat(
         h = user_h + [{"role": "assistant", "content": selection_error}]
         yield _emit(h, pending_plan)
         return
+
+    # Keep an awaiting proposal alive while the user asks about it or edits it.
+    # The exact frozen config and the recent turns are bound into the next LLM
+    # request, so a second turn is an incremental edit rather than a stateless
+    # replacement. Explicitly starting a new project still invalidates it.
+    pending_context = _pending_config_context(pending_plan, history)
+    pending_intent = _classify_pending_config_intent(message)
+    revision_mode = False
+    if pending_context is not None and pending_intent != "replace":
+        if pending_intent == "revise":
+            revision_mode = True
+        else:
+            answer = _answer_pending_config_question(message, pending_context)
+            h = user_h + [{"role": "assistant", "content": answer}]
+            yield _emit(h, pending_plan)
+            return
+    else:
+        pending_plan = None
 
     yield "", user_h, user_h, pending_plan, "", _HIDE_BTN
 
@@ -848,105 +1132,243 @@ def chat(
     thinking_h = list(user_h) + [{"role":"assistant","content": "\n".join(progress_lines)}]
     yield "", thinking_h, thinking_h, pending_plan, "", _HIDE_BTN
 
-    # LLM call
+    # LLM call: semantic normalization -> forced input audit -> strict JSON.
+    # The state transitions live here rather than in a prompt reminder, so a
+    # model that emits prose in the audit phase cannot silently bypass it.
     candidate_config = None
-    for attempt in range(3):
+    request_mode = "plan_revise" if revision_mode else "plan_generate"
+    for attempt in range(CONFIG_MAX_ATTEMPTS):
         try:
-            msgs = [{"role":"system","content":get_system_prompt(execution_facts)},
-                    {"role":"user","content":llm_message}]
-            input_audits: list[dict[str, object]] = []
-            for _ in range(5):
-                r = _DS.chat.completions.create(
-                    model=_LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL, messages=msgs,
-                    tools=TOOLS, temperature=0.1)
-                msg = r.choices[0].message
-                if msg.tool_calls:
-                    msgs.append({"role":"assistant","content":"",
-                                 "tool_calls":[{"id":t.id,"type":"function",
-                                 "function":{"name":t.function.name,"arguments":t.function.arguments}}
-                                 for t in msg.tool_calls]})
-                    for t in msg.tool_calls:
-                        result_str = handle_tool_call(t.function.name,
-                                         json.loads(t.function.arguments))
-                        if t.function.name == "tools_inspect_quantum_inputs":
-                            try:
-                                audit_result = json.loads(result_str)
-                            except json.JSONDecodeError:
-                                audit_result = None
-                            if isinstance(audit_result, dict):
-                                input_audits.append(audit_result)
-                        msgs.append({"role":"tool","tool_call_id":t.id,
-                                     "content": result_str})
-                        icon, line = _tool_summary(t.function.name, result_str)
+            semantic_context = (
+                _pending_revision_message(
+                    message,
+                    pending_context,
+                    execution_facts,
+                    attempt=attempt,
+                )
+                if revision_mode and pending_context is not None
+                else _config_task_context(
+                    mode=request_mode,
+                    user_request=message,
+                    execution_facts=execution_facts,
+                    attempt=attempt,
+                    stage="semantic_normalize",
+                )
+            )
+            semantic_messages = [
+                {"role": "system", "content": get_system_prompt(execution_facts, stage="semantic_normalize")},
+                {"role": "user", "content": semantic_context},
+            ]
+            semantic_draft: dict[str, object] | None = None
+            for tool_round in range(CONFIG_MAX_TOOL_ROUNDS):
+                response = _DS.chat.completions.create(
+                    model=_LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL,
+                    messages=semantic_messages,
+                    tools=SEMANTIC_TOOLS,
+                    temperature=0.1,
+                    timeout=CONFIG_LLM_TIMEOUT_S,
+                )
+                semantic_message = response.choices[0].message
+                if semantic_message.tool_calls:
+                    semantic_messages.append({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.function.name,
+                                    "arguments": call.function.arguments,
+                                },
+                            }
+                            for call in semantic_message.tool_calls
+                        ],
+                    })
+                    for tool_call in semantic_message.tool_calls:
+                        try:
+                            if tool_call.function.name not in _SEMANTIC_TOOL_NAMES:
+                                raise ValueError("语义阶段不允许该工具")
+                            raw_args = json.loads(tool_call.function.arguments)
+                            if not isinstance(raw_args, dict):
+                                raise ValueError("工具参数必须是对象")
+                            result_str = handle_tool_call(tool_call.function.name, raw_args)
+                        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                            result_str = json.dumps(
+                                {"ok": False, "error": f"工具参数无效：{exc}"},
+                                ensure_ascii=False,
+                            )
+                        semantic_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result_str,
+                        })
+                        icon, line = _tool_summary(tool_call.function.name, result_str)
                         progress_lines.append(f"{icon} {line}")
-                        progress_h = list(user_h) + [{"role":"assistant", "content": "\n".join(progress_lines)}]
+                        progress_h = list(user_h) + [{"role": "assistant", "content": "\n".join(progress_lines)}]
                         yield "", progress_h, progress_h, pending_plan, "", _HIDE_BTN
-                else:
-                    config_dict = _j(msg.content)
-                    err = config_dict.get("error") if config_dict else None
-                    if isinstance(err, str):
-                        err = {"type": err.lower().replace(" ","_"), "detail": err}
-                    if isinstance(err, dict) and err.get("type"):
-                        etype = err["type"]
-                        detail = err.get("detail","")
-                        if etype == "invalid_molecule" and attempt < 2:
-                            from willy.toolist_global import _registry
-                            _registry._load()
-                            print(f"[agent] 🔄 {detail}, retry...")
-                            break
-                        elif etype in (
-                            "invalid_value", "ambiguous", "invalid_quantum_input", "charge_imbalance",
-                        ):
-                            hint = err.get("suggestion","请修正后重新输入")
-                            h = list(user_h)+[{"role":"assistant","content":f"⚠ {detail}\n\n{hint}"}]
-                            yield _emit(h, pending_plan); return
-                        else:
-                            avail = ", ".join(err.get("available",[]))
-                            h = list(user_h)+[{"role":"assistant","content":f"❌ {detail}\n\n可用: {avail}"}]
-                            yield _emit(h, pending_plan); return
-                    if isinstance(config_dict, dict) and config_dict.get("residues"):
-                        if not any(_audit_covers_candidate(audit, config_dict) for audit in input_audits):
-                            progress_lines.append("⚠️ 方案缺少对应原始输入审计，正在要求重新检查")
-                            progress_h = list(user_h) + [{"role":"assistant", "content": "\n".join(progress_lines)}]
-                            yield "", progress_h, progress_h, pending_plan, "", _HIDE_BTN
-                            msgs.append({"role": "assistant", "content": msg.content or ""})
-                            msgs.append({
-                                "role": "user",
-                                "content": (
-                                    "不得直接输出方案。请先调用 tools_inspect_quantum_inputs，"
-                                    "参数必须与最终 backend、分子名称和数目完全一致；"
-                                    "再按审计结果重新输出 JSON。"
-                                ),
-                            })
-                            continue
-                        candidate_with_execution = _attach_trusted_execution(
-                            config_dict,
-                            selected_execution or {
-                                "backend": "local",
-                                "profile": None,
-                                "retain_remote_run": True,
-                            },
-                        )
-                        audited_config, input_issues = _audit_candidate_config(candidate_with_execution)
-                        if audited_config is None or input_issues:
-                            details = "；".join(input_issues or ["量子输入审计未通过"])
-                            h = list(user_h) + [{
-                                "role": "assistant",
-                                "content": f"⚠️ 原始量子输入检查未通过：{details}\n\n请补齐或修正与所选后端对应的输入文件后重新提交。",
-                            }]
-                            yield _emit(h, pending_plan)
-                            return
-                        candidate_config = audited_config
+                    continue
+
+                config_dict = _j(semantic_message.content or "")
+                err = config_dict.get("error") if isinstance(config_dict, dict) else None
+                if isinstance(err, str):
+                    err = {"type": err.lower().replace(" ", "_"), "detail": err}
+                if isinstance(err, dict) and err.get("type"):
+                    etype = str(err["type"])
+                    detail = str(err.get("detail", ""))
+                    if etype == "invalid_molecule" and attempt < CONFIG_MAX_ATTEMPTS - 1:
+                        from willy.toolist_global import _registry
+                        _registry._load()
                         break
-                    if attempt < 2:
-                        print(f"[agent] ⚠ empty residues, retry {attempt+2}/3...")
-                        break
-            if candidate_config is not None:
+                    if etype in {"invalid_value", "ambiguous", "invalid_quantum_input", "charge_imbalance"}:
+                        hint = err.get("suggestion", "请修正后重新输入")
+                        h = list(user_h) + [{"role": "assistant", "content": f"⚠ {detail}\n\n{hint}"}]
+                        yield _emit(h, pending_plan)
+                        return
+                    avail = ", ".join(err.get("available", []))
+                    h = list(user_h) + [{"role": "assistant", "content": f"❌ {detail}\n\n可用: {avail}"}]
+                    yield _emit(h, pending_plan)
+                    return
+                if isinstance(config_dict, dict) and config_dict.get("residues"):
+                    semantic_draft = config_dict
+                    break
                 break
-        except Exception as e:
-            if attempt == 2:
-                h = list(user_h)+[{"role":"assistant","content":f"❌ LLM 失败 (已重试3次): {e}"}]
-                yield _emit(h, pending_plan); return
+
+            if semantic_draft is None:
+                continue
+
+            audit_request, audit_request_error = _normalize_quantum_audit_request(semantic_draft)
+            if audit_request is None:
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": f"⚠️ 方案未通过量子输入审计前校验：{audit_request_error or '无法确定审计目标'}",
+                }]
+                yield _emit(h, pending_plan)
+                return
+            audit_response = _DS.chat.completions.create(
+                model=_LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": get_system_prompt(execution_facts, stage="quantum_input_audit")},
+                    {"role": "user", "content": _quantum_audit_context(
+                        user_request=message,
+                        backend=str(audit_request["backend"]),
+                        components=list(audit_request["components"]),
+                        execution_facts=execution_facts,
+                    )},
+                ],
+                tools=QUANTUM_AUDIT_TOOLS,
+                # This is the one action in configuration generation whose
+                # result is a hard safety prerequisite. The selected tool is
+                # fixed, while the service still checks its arguments against
+                # the server-normalized backend/components before dispatch.
+                tool_choice=QUANTUM_AUDIT_TOOL_CHOICE,
+                temperature=0,
+                timeout=CONFIG_LLM_TIMEOUT_S,
+            )
+            audit_message = audit_response.choices[0].message
+            audit_result, audit_error = _audit_result_from_required_tool_call(audit_message, audit_request)
+            if audit_error:
+                public_reason = {
+                    "model_no_tool_call": "模型未按要求调用原始量子输入审计工具",
+                    "model_invalid_tool_call": "模型调用了不允许的审计工具",
+                    "model_invalid_tool_arguments": "模型提供的审计工具参数无效",
+                    "model_audit_scope_mismatch": "模型审计的后端或组分与已归一化方案不一致",
+                    "quantum_input_audit_invalid_response": "原始量子输入审计工具返回无效结果",
+                }.get(audit_error, "量子输入审计未完成")
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": (
+                        "⚠️ 方案未通过量子输入审计（invalid_quantum_input）："
+                        f"{public_reason}（{audit_error}）。"
+                        "本次方案已安全终止，未生成待确认配置。"
+                    ),
+                }]
+                yield _emit(h, pending_plan)
+                return
+            if not audit_result.get("ok") or not _audit_covers_candidate(audit_result, semantic_draft):
+                details = "；".join(str(item) for item in audit_result.get("issues", [])[:16])
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": (
+                        f"⚠️ 原始量子输入检查未通过：{details or '审计目标与候选方案不一致'}"
+                        "\n\n请补齐或修正与所选后端对应的输入文件后重新提交。"
+                    ),
+                }]
+                yield _emit(h, pending_plan)
+                return
+            icon, line = _tool_summary(QUANTUM_AUDIT_TOOL_NAME, json.dumps(audit_result, ensure_ascii=False))
+            progress_lines.append(f"{icon} {line}")
+            progress_h = list(user_h) + [{"role": "assistant", "content": "\n".join(progress_lines)}]
+            yield "", progress_h, progress_h, pending_plan, "", _HIDE_BTN
+
+            strict_response = _DS.chat.completions.create(
+                model=_LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": get_system_prompt(execution_facts, stage="strict_json")},
+                    {"role": "user", "content": _strict_config_context(
+                        user_request=message,
+                        semantic_draft=semantic_draft,
+                        audit=audit_result,
+                        execution_facts=execution_facts,
+                        mode=request_mode,
+                    )},
+                ],
+                temperature=0,
+                timeout=CONFIG_LLM_TIMEOUT_S,
+            )
+            strict_message = strict_response.choices[0].message
+            if strict_message.tool_calls:
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": "⚠️ 方案未通过最终配置校验：模型在无工具阶段请求了工具调用。本次方案已安全终止。",
+                }]
+                yield _emit(h, pending_plan)
+                return
+            strict_config = _j(strict_message.content or "")
+            strict_error = strict_config.get("error") if isinstance(strict_config, dict) else None
+            if strict_error:
+                detail = strict_error.get("detail", "配置生成未通过") if isinstance(strict_error, Mapping) else str(strict_error)
+                h = list(user_h) + [{"role": "assistant", "content": f"⚠️ 方案未通过最终配置校验：{detail}"}]
+                yield _emit(h, pending_plan)
+                return
+            if not isinstance(strict_config, Mapping) or not strict_config.get("residues"):
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": "⚠️ 方案未通过最终配置校验：模型未返回有效配置。本次方案已安全终止。",
+                }]
+                yield _emit(h, pending_plan)
+                return
+            if not _audit_covers_candidate(audit_result, strict_config):
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": "⚠️ 方案未通过最终配置校验：最终配置的后端或组分与已审计输入不一致。",
+                }]
+                yield _emit(h, pending_plan)
+                return
+            candidate_with_execution = _attach_trusted_execution(
+                strict_config,
+                selected_execution or {
+                    "backend": "local",
+                    "profile": None,
+                    "retain_remote_run": True,
+                },
+            )
+            audited_config, input_issues = _audit_candidate_config(candidate_with_execution)
+            if audited_config is None or input_issues:
+                details = "；".join(input_issues or ["量子输入审计未通过"])
+                h = list(user_h) + [{
+                    "role": "assistant",
+                    "content": f"⚠️ 原始量子输入检查未通过：{details}\n\n请补齐或修正与所选后端对应的输入文件后重新提交。",
+                }]
+                yield _emit(h, pending_plan)
+                return
+            candidate_config = audited_config
+            break
+        except Exception:
+            if attempt == CONFIG_MAX_ATTEMPTS - 1:
+                h = list(user_h) + [{"role": "assistant", "content": "❌ LLM 服务暂时不可用，请检查配置后重试。"}]
+                yield _emit(h, pending_plan)
+                return
     if candidate_config is None:
         h = list(user_h)+[{"role":"assistant","content":"❌ LLM 多次返回异常，请重新输入。"}]
         yield _emit(h, pending_plan); return

@@ -468,8 +468,117 @@ class TestRunAssistant:
         assert answer == "该运行正在执行第二步。"
         assert client.chat.completions.create.call_args_list[0].kwargs["tools"] == RUN_TOOLS
 
-    def test_assistant_limits_history_to_six_compact_turns(self, tmp_path):
-        from willy.agent_run import MAX_HISTORY_CHARS, RunAssistant
+    def test_llm_prompt_uses_structured_context_and_binds_current_run(self, tmp_path):
+        from willy.agent_run import RunAssistant
+        from willy.prompt_contract import REQUIRED_CONTEXT_FIELDS
+
+        registry, run_dir = _make_run(tmp_path)
+        registry.record_status(run_dir, _status(), "step_started")
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="当前工程正在运行。", tool_calls=None))]
+        )
+
+        answer = RunAssistant(client, registry=registry).answer(
+            "请分析当前运行是否可以继续。", selected_run_id=run_dir.name,
+        )
+
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        context = messages[-1]["content"]
+        assert answer == "当前工程正在运行。"
+        assert f"当前工程编号\":\"{run_dir.name}" in context
+        assert all(f"{field}：" in context for field in REQUIRED_CONTEXT_FIELDS)
+        assert "受控结构化上下文" in context
+        assert "预取运行事实" not in context
+
+    def test_structured_context_excludes_complete_configs_logs_and_artifact_lists(self, tmp_path):
+        from willy.agent_run import RunAssistant
+
+        registry, run_dir = _make_run(tmp_path)
+        assistant = RunAssistant(None, registry=registry)
+        facts = {
+            "status": _status(),
+            "error_context": {"error_kind": "unknown", "error": "公开错误摘要"},
+            "md_eta": {"status": "unavailable", "reason": "尚无 ETA"},
+            "config": {"api_key": "CONFIG_SECRET", "md": {"private": "complete-config"}},
+            "artifacts": [{"path": "/private/run/prod.xtc", "exists": True}],
+            "log_tail": "RAW_LOG_TAIL API_KEY=LOG_SECRET /private/run/eq.log",
+        }
+
+        messages, _ = assistant._build_messages("请分析运行参数。", run_dir.name, facts)
+        context = messages[-1]["content"]
+
+        assert "CONFIG_SECRET" not in context
+        assert "complete-config" not in context
+        assert "RAW_LOG_TAIL" not in context
+        assert "LOG_SECRET" not in context
+        assert "/private/run/prod.xtc" not in context
+
+    def test_followup_tool_context_summarizes_config_and_artifacts(self, tmp_path):
+        from willy.agent_run import RunAssistant
+
+        registry, run_dir = _make_run(tmp_path)
+        assistant = RunAssistant(None, registry=registry)
+        config_response = json.dumps({
+            "ok": True,
+            "config": {
+                "backend": "g16", "forcefield": "gaff",
+                "api_key": "CONFIG_SECRET", "residues": {"EC": 200},
+                "md": {"eq": {"private": "complete-config"}},
+            },
+        })
+        artifacts_response = json.dumps({
+            "ok": True,
+            "artifacts": [
+                {"path": "/private/run/prod.xtc", "exists": True},
+                {"path": "/private/run/prod.edr", "exists": False},
+            ],
+        })
+
+        config_summary = assistant._summarize_tool_result("tools_get_config_run", config_response)
+        artifact_summary = assistant._summarize_tool_result("tools_list_artifacts_run", artifacts_response)
+
+        assert "CONFIG_SECRET" not in config_summary
+        assert "complete-config" not in config_summary
+        assert '"组分种类数":1' in config_summary
+        assert "/private/run/prod.xtc" not in artifact_summary
+        assert '"已登记数量":2' in artifact_summary
+        assert '"可用数量":1' in artifact_summary
+
+    def test_followup_llm_request_never_receives_full_config(self, tmp_path):
+        from willy.agent_run import RunAssistant
+
+        registry, run_dir = _make_run(tmp_path)
+        registry.record_status(run_dir, _status(), "step_started")
+        tool_call = SimpleNamespace(
+            id="call-config",
+            function=SimpleNamespace(name="tools_get_config_run", arguments="{}"),
+        )
+        first = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=[tool_call]))]
+        )
+        second = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="已读取配置摘要。", tool_calls=None))]
+        )
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [first, second]
+
+        answer = RunAssistant(client, registry=registry).answer(
+            "请分析当前参数是否合理。", selected_run_id=run_dir.name,
+        )
+
+        followup_messages = client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        tool_messages = [item for item in followup_messages if item["role"] == "tool"]
+        assert answer == "已读取配置摘要。"
+        assert f"当前工程编号\":\"{run_dir.name}" in followup_messages[-3]["content"]
+        assert len(tool_messages) == 1
+        assert "config_summary" in tool_messages[0]["content"]
+        assert '"backend":"g16"' in tool_messages[0]["content"]
+        assert '"residues"' not in tool_messages[0]["content"]
+        assert '"md"' not in tool_messages[0]["content"]
+
+    def test_assistant_does_not_forward_chat_history_to_llm(self, tmp_path):
+        from willy.agent_run import RunAssistant
 
         registry, run_dir = _make_run(tmp_path)
         registry.record_status(run_dir, _status(), "step_started")
@@ -478,7 +587,7 @@ class TestRunAssistant:
             choices=[SimpleNamespace(message=SimpleNamespace(content="需要更多证据。", tool_calls=None))]
         )
         history = [
-            {"role": "user" if index % 2 == 0 else "assistant", "content": "x" * (MAX_HISTORY_CHARS + 50)}
+            {"role": "user" if index % 2 == 0 else "assistant", "content": "HISTORY_SECRET" * 300}
             for index in range(10)
         ]
 
@@ -487,10 +596,9 @@ class TestRunAssistant:
         )
 
         messages = client.chat.completions.create.call_args.kwargs["messages"]
-        prior_messages = messages[1:-1]
         assert answer == "需要更多证据。"
-        assert len(prior_messages) == 6
-        assert all(len(item["content"]) == MAX_HISTORY_CHARS for item in prior_messages)
+        assert len(messages) == 2
+        assert "HISTORY_SECRET" not in messages[-1]["content"]
 
     def test_assistant_degrades_complex_question_to_local_facts_without_llm(self, tmp_path):
         from willy.agent_run import RunAssistant

@@ -1,8 +1,8 @@
-# 托管 LLM 网关设计（0.2.0）
+# 托管 LLM 网关设计（后续版本参考）
 
 > 维护范围：独立 LLM Gateway、Willy 客户端的托管/自带 Key 选择、设备注册、用量账本、管理员控制面，以及与 `src/willy/llm_config.py`、`frontend_api.py`、`app.py` 的集成边界。
 >
-> 状态：执行中。已实现局域网试运行切片：固定上游/模型白名单、非流式转发、服务端计数的 Ed25519 自助申请、前 50 名默认授权的自动批准、10 分钟令牌、nonce 防重放、撤销检查、SQLite 预留/结算账本、非回环 TLS 强制配置、回环管理员页面，以及 Willy 的 `managed/byok` provider。管理员 OIDC、PostgreSQL/Redis、多实例、备份告警、真实跨机器 TLS/upstream smoke 和密钥轮换工作流尚未实现。当前 Gradio 仍仅绑定 `127.0.0.1`。
+> 状态：后续版本参考。网关协议、服务端账本、管理员控制面、客户端 provider、部署构建器和离线 fake-upstream 回归均保留在仓库中，但当前发行版已冻结托管路径：主前端仅支持本地 API Key；历史 `WILLY_LLM_MODE=managed` 会被强制按本地 BYOK 解析，手工构造的托管 client 会被拒绝；网关和管理员启动器、托管客户端包构建器均拒绝执行。既有代码不得被描述为当前可用的远程服务。管理员 OIDC、PostgreSQL/Redis、多实例、备份告警、真实跨机器 TLS/upstream smoke 和密钥轮换工作流仍未实现。
 >
 > 最后更新：2026-08-12。
 
@@ -10,7 +10,7 @@
 
 ## 1. 目标与边界
 
-网关的目标是在不分发上游供应商密钥的前提下，让部署在其他电脑上的 Willy Agent 使用受控的托管 LLM，同时保留用户使用自己的 API Key 直连模型服务的路径。
+网关代码的后续目标是在不分发上游供应商密钥的前提下，让其他电脑上的 Willy Agent 使用受控托管 LLM；当前产品只保留用户使用自己的 API Key 直连模型服务的路径。
 
 ```text
 托管模式：Willy 客户端 -> HTTPS LLM Gateway -> 运营者的上游 LLM 账户
@@ -21,7 +21,7 @@
 
 不在首期实现：通用 HTTP 代理、任意上游 URL、供应商密钥分发、共享万能 API Key、跨用户 run 目录、网关执行 function tool、对公网暴露 Gradio，或无限制、无配额的自动注册批准。
 
-## 2. 双模式客户端
+## 2. 历史双模式客户端（当前冻结）
 
 | 模式 | 凭据来源 | 请求目的地 | 配置页 | 用量归属 |
 |---|---|---|---|---|
@@ -30,9 +30,11 @@
 
 两种模式必须互斥。托管模式下，浏览器表单、本地 `config.json`、LLM prompt 和普通用户环境变量都不能覆盖网关地址、模型映射、额度或安全策略。BYOK 模式不得向托管网关上传 Key、Base URL、完整 prompt 或用量。
 
-`llm_config.py` 已按模式解析 provider。托管模式从安装目录的部署描述读取固定网关、通过本机身份文件签名换取短期令牌，并在每次 OpenAI-compatible 调用前按需刷新令牌；方案助理刷新本进程 provider，`run_pipeline.py` 子进程独立重新解析同一 provider。不能只修改前端表单。
+历史 `managed/byok` provider、身份文件、令牌交换和构建器仍可供后续维护；当前 `llm_config.py` 将历史托管标记解析为本地 BYOK，不会构造托管 client；手工构造的托管 client 也会被拒绝。不能通过编辑 `.env`、`managed_gateway.json` 或调用兼容 API 绕过冻结边界。
 
 ### 2.1 托管网关部署描述
+
+本节及后续托管协议、部署命令均为归档记录，不能作为当前版本的操作步骤。保留它们是为了未来恢复功能时可追溯安全边界和离线测试。
 
 部署者随安装包在项目根目录提供 `managed_gateway.json`，客户端只读该文件，不提供 URL、模型或上游 Key 的浏览器输入。当前 schema：
 
@@ -50,7 +52,7 @@
 
 `managed_gateway.json` 是具体部署资产，不提交到 GitHub；它由客户端部署包构建器写入安装包根目录。仓库只提交可审计的网关/客户端源代码和无凭据文档。`WILLY_GATEWAY_*` 环境变量、`.env`、SQLite 数据库、管理员秘密、上游 Key、TLS 私钥/证书、用户身份文件和运行时日志都只能留在部署机器，并已列入 `.gitignore` 防止误提交。当前仓库中的 `managed_gateway.json` 若指向 `127.0.0.1`，只适用于网关和 Willy 在同一台电脑上的测试，不能复制给其他电脑。
 
-发布者使用真实服务器 profile 构建客户端部署包：
+以下是历史构建记录。当前 `scripts/build_managed_client_bundle.py` 会拒绝执行；构建器实现仅为后续版本维护而保留：
 
 ```bash
 python3 scripts/build_managed_client_bundle.py \
@@ -60,11 +62,11 @@ python3 scripts/build_managed_client_bundle.py \
 
 构建器只接受位于源码树外的非 loopback HTTPS profile，并排除所有隐藏本地目录（仅保留无凭据的 `.env.example`）、虚拟环境、日志、决策追踪、进程/锁文件、数据库、设备身份、密钥、证书和运行目录；输出包根目录只写入规范化的 `managed_gateway.json`。目标机不需要再手动创建或编辑该文件。
 
-发布顺序固定为：先通过测试、提交并推送源码；再在干净的同一提交检出中构建客户端目录；最后压缩、校验并以 GitHub Release 附件或受控下载方式分发。部署 profile 和生成目录均不得提交到 Git。示例：
+未来重新启用后的发布顺序应为：先通过测试、提交并推送源码；再在干净的同一提交检出中构建客户端目录；最后压缩、校验并以 GitHub Release 附件或受控下载方式分发。部署 profile 和生成目录均不得提交到 Git。示例：
 
 ```bash
-tar -C /secure/releases -czf /secure/releases/willy-client-0.2.0.tar.gz willy-client
-sha256sum /secure/releases/willy-client-0.2.0.tar.gz
+tar -C /secure/releases -czf /secure/releases/willy-client-<release-version>.tar.gz willy-client
+sha256sum /secure/releases/willy-client-<release-version>.tar.gz
 ```
 
 ## 3. 威胁模型与安全原则
@@ -149,13 +151,13 @@ sha256sum /secure/releases/willy-client-0.2.0.tar.gz
 
 个人电脑可用于内测，但公网稳定运行需要公网地址、TLS、持续在线、备份和应急撤销能力，优先使用受管 VPS。不能把当前只绑定 `127.0.0.1` 的 Gradio 直接改成公网中转站。
 
-### 7.1 当前局域网试运行方式
+### 7.1 历史局域网试运行方式（当前不可启动）
 
-服务入口为 `python3 -m willy_gateway`，默认只监听 `127.0.0.1:8787`。部署启动前必须由受限部署配置提供 `WILLY_GATEWAY_DATABASE`、`WILLY_GATEWAY_TOKEN_SECRET`（至少 32 字节）、`WILLY_GATEWAY_UPSTREAM_BASE_URL`、`WILLY_GATEWAY_UPSTREAM_API_KEY` 和 `WILLY_GATEWAY_MODEL_ALIASES`（JSON 别名映射）。自助申请配置可选：`WILLY_GATEWAY_REGISTRATION_LIMIT`（默认 `500`）、`WILLY_GATEWAY_AUTO_APPROVE_LIMIT`（默认 `50`；设为 `0` 关闭自动批准）、`WILLY_GATEWAY_DEFAULT_DAILY_TOKEN_LIMIT`（默认 `1000000`）、`WILLY_GATEWAY_DEFAULT_MONTHLY_TOKEN_LIMIT`（默认 `10000000`）、`WILLY_GATEWAY_DEFAULT_MAX_CONCURRENCY`（默认 `2`）、`WILLY_GATEWAY_DEFAULT_REQUESTS_PER_MINUTE`（默认 `20`）、`WILLY_GATEWAY_PENDING_REGISTRATION_TTL_S`（默认 `86400`）、`WILLY_GATEWAY_REGISTRATION_REQUESTS_PER_WINDOW`（默认 `10`）和 `WILLY_GATEWAY_REGISTRATION_RATE_WINDOW_S`（默认 `3600`）。这些值不应写入仓库、客户端 `.env` 或浏览器表单。
+历史服务入口为 `python3 -m willy_gateway`，默认监听为 `127.0.0.1:8787`。当前启动器在读取任何 `WILLY_GATEWAY_*` 部署变量之前即拒绝执行，不创建监听 socket。历史配置、默认额度和部署步骤仅保留供未来重新启用时复核，不能用于当前版本部署。
 
 要接受其他电脑，设置 `WILLY_GATEWAY_BIND_HOST` 和 `WILLY_GATEWAY_BIND_PORT`，并使 profile 中的端口与实际监听端口一致。任何非 loopback 监听都必须同时设置 `WILLY_GATEWAY_TLS_CERTFILE` 和 `WILLY_GATEWAY_TLS_KEYFILE`，否则进程会在启动前拒绝配置；客户端的 `managed_gateway.json` 必须使用对应 HTTPS 地址。客户端网关请求默认不继承 `HTTP_PROXY`/`HTTPS_PROXY` 环境代理；如部署网络必须经过代理，应由部署者增加明确的受控代理配置。证书信任、路由、防火墙和真实 LAN 连通性必须由部署者在目标网络验收，不能由 fake-upstream 测试代替。
 
-管理员页面以独立进程启动：`python3 -m willy_gateway.admin`。它固定监听 `127.0.0.1:${WILLY_GATEWAY_ADMIN_PORT:-8788}`，且要求至少 32 字节的 `WILLY_GATEWAY_ADMIN_SECRET`；页面地址是 `http://127.0.0.1:8788/`。该页面仅展示设备指纹、状态、接入名额占用、自动批准已用/剩余、待审批截止、今日结算/预留 token、当前并发和近一分钟请求数，可批准/调整 grant 或撤销设备；不返回私钥、访问令牌、prompt、上游 Key 或请求体。不要将管理端口转发到 LAN/公网，也不要在浏览器外持久化管理员秘密。
+历史管理员入口为 `python3 -m willy_gateway.admin`，固定监听 `127.0.0.1:${WILLY_GATEWAY_ADMIN_PORT:-8788}`。当前启动器同样直接拒绝执行，不读取管理员秘密，也不启动管理页面。
 
 当前管理员认证是“回环监听 + 部署秘密”的内测措施，不等同于 OIDC。OIDC、PostgreSQL/Redis、TLS 真实验收、备份、监控与恢复演练完成前，不得将服务暴露到公网或将自助申请当作抗批量滥用的公开注册系统。
 
@@ -174,7 +176,7 @@ usage_snapshot()     -> 托管模式的本设备用量与剩余额度
 
 配置页：
 
-- 托管模式显示安装包携带的部署描述、粗粒度本机设备状态、“确认接入”和“检查托管服务”；只有点击“确认接入”才提交本机公钥；不接受表单 URL、Key 或邀请码，且不写入 `.env`。
+- 托管网关入口当前冻结：主前端不显示托管模式、设备登记或服务检查。`WILLY_LLM_MODE=managed` 不会构造托管 client；兼容 API 立即返回冻结状态，不读取 profile、不创建设备身份、不访问网关或改写 `.env`。
 - BYOK 模式允许编辑自己的 Key、Base URL、Model，并显示请求不会经过托管网关。
 - 模式切换不修改已有 run 的 provenance；新 run 只记录脱敏 provider mode 和模型标识。
 
@@ -188,25 +190,25 @@ usage_snapshot()     -> 托管模式的本设备用量与剩余额度
 
 验收：没有实现时不得在 README、UI 或安装包中宣称托管服务可用。
 
-### Phase 1：网关核心转发（私有开发切片已实现）
+### Phase 1：网关核心转发（历史开发切片，当前冻结）
 
 实现健康检查、固定上游、模型别名、非流式 `chat/completions`、tool call 透传、脱敏错误、请求限制、超时和 request ID。
 
 验收：不执行 tool、不访问任意 URL、不输出上游密钥；`tests/test_gateway.py` 的 fake upstream、模型别名、请求限制、tool call 透传和错误边界通过。该切片仅适用于本机/内网，不是公网部署凭据。
 
-### Phase 2：设备与额度（局域网运营控制面已实现）
+### Phase 2：设备与额度（历史切片，当前冻结）
 
 已实现服务端名额计数的公钥自助申请、前 50 名自动批准和默认 grant、待审批过期释放、回环管理员页面的批准/撤销/grant 操作、10 分钟令牌、签名验证、nonce 防重放、设备撤销、SQLite 事务账本和模型/并发/速率配额。管理员页面每 5 秒刷新接入名额、自动批准名额、各设备的今日 token、当前并发和近一分钟请求数。尚未实现 PostgreSQL/Redis 适配、管理员 OIDC、密钥轮换工作流和多实例部署。
 
 验收：复制令牌、重放、过期、撤销、越权模型、超额和高并发均被拒绝；当前测试覆盖重放、撤销、白名单、额度、管理员秘密隔离和 grant 生命周期。OIDC 与真实 LAN/TLS 验收仍待实现。
 
-### Phase 3：Willy 双模式接入（局域网切片已实现）
+### Phase 3：Willy 双模式接入（历史切片，当前冻结）
 
-已实现 `managed/byok` provider，托管模式隐藏可编辑服务商表单，BYOK 保持本地路径；方案助理刷新本进程 provider，动态 OpenAI facade 在每次调用前按需刷新短期令牌，子进程独立重新解析 provider。
+已实现的 `managed/byok` provider 作为归档保留；当前发行版只有 BYOK 本地路径。前端没有托管组件，配置解析不构造托管 client，服务端启动器和托管部署包构建器均拒绝执行。
 
 验收：托管调用无需供应商 Key；BYOK 不触达网关；当前测试覆盖客户端只发送公钥、私有身份文件权限、签名令牌交换、缓存/刷新、表单隔离与公开错误。真实跨机器调用、用量页和 run provenance 的 provider 字段仍待实现。
 
-### Phase 4：小范围试运行
+### Phase 4：小范围试运行（未来重新启用后）
 
 在小范围宣传中保持 `500` 或更低的自助申请上限、最多 `50` 个自动批准名额、保守模型、日 token、并发和请求体限制；完成 TLS、备份、告警、轮换和故障演练，再决定是否扩大注册范围。
 
@@ -227,11 +229,11 @@ usage_snapshot()     -> 托管模式的本设备用量与剩余额度
 
 ## 11. 构建与验收快照
 
-当前实现达到单机/受控局域网试运行完整度：网关、管理员控制面、Willy 客户端、安装包 profile 与确认接入后的设备申请、前 50 名自动批准、设备令牌、模型白名单、额度账本和撤销链路均有代码与离线测试。网关关联回归和完整默认回归的实际结果以本轮测试记录为准。
+当前网关归档包含服务端、管理员控制面、Willy 客户端、安装包 profile、设备申请、默认批准、设备令牌、模型白名单、额度账本和撤销链路的代码与离线测试。它们不是当前版本可部署能力；启动、构建和客户端 provider 路径均被明确阻塞。
 
 当前仍未完成真实双机 TLS、真实上游、反向代理限流、备份恢复、管理员强认证、多实例账本、密钥轮换和 Uvicorn 监听 smoke。离线验收使用临时 SQLite、ASGI 内存 transport 与脚本化 fake upstream，不创建监听 socket、不调用真实上游，不能替代生产验收。
 
-### 11.1 2026-08-11 本机健康检查
+### 11.1 2026-08-11 历史本机健康检查（不属于当前版本验收）
 
 本机部署描述 `managed_gateway.json` 指向 `http://127.0.0.1:8789`。通过绕过环境代理的只读请求
 访问 `/healthz`，返回 HTTP 200 和 `{"status":"ok"}`；未读取或记录设备私钥、访问令牌、上游
@@ -241,4 +243,4 @@ API Key 或管理员秘密。未绕过代理的同一请求曾返回 502，确�
 tool-calling 或远程 Willy 验收。远程验收机目前没有 `managed_gateway.json`，且本机 loopback 地址
 不能从远程机器使用；这些条件仍属于真实双机网关验收缺口。
 
-发布顺序固定为：先完成协议/安全契约，再完成核心转发与设备额度，随后完成 Willy 双模式接入，最后进行小范围双机试运行。认证、额度、撤销、脱敏审计和真实 tool-calling smoke 未全部通过前，状态只能标为“开发中”。
+未来重新启用后的发布顺序应为：先完成协议/安全契约，再完成核心转发与设备额度，随后完成 Willy 双模式接入，最后进行小范围双机试运行。认证、额度、撤销、脱敏审计和真实 tool-calling smoke 未全部通过前，状态只能标为“开发中”。

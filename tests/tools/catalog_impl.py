@@ -25,8 +25,11 @@ CATEGORIES = {
     },
     "B": {
         "title": "环境与基础错误模型",
-        "files": {"test_env_checker.py", "test_env_registry.py", "test_vendor_manifest.py", "test_errors.py"},
-        "description": "依赖发现、环境变量优先级、vendor 完整性/发布证据、能力报告脱敏与结构化错误协议。",
+        "files": {
+            "test_dependency_preflight.py", "test_env_checker.py", "test_env_registry.py",
+            "test_vendor_manifest.py", "test_errors.py",
+        },
+        "description": "依赖发现、配置页依赖预检、环境变量优先级、vendor 完整性/发布证据、能力报告脱敏与结构化错误协议。",
     },
     "C": {
         "title": "配置与全局工具",
@@ -38,8 +41,11 @@ CATEGORIES = {
         "files": {
             "test_action_contract.py", "test_agent_config.py", "test_layer_agent.py",
             "test_llm_budget.py", "test_llm_config.py", "test_llm_eval_report.py",
+            "test_llm_eval_matrix.py", "test_llm_eval_live_report.py",
+            "test_llm_eval_live_config_report.py",
+            "test_llm_eval_live_protocol_report.py",
         },
-        "description": "OpenAI-compatible 配置、LayerAgent 的上下文、受控动作、预算、重试、升级，以及 18 个离线 mock LLM 场景。",
+        "description": "OpenAI-compatible 配置、LayerAgent 的上下文、受控动作、预算、重试、升级、历史 mock 场景与离线 LLM 测试矩阵。",
     },
     "E": {
         "title": "量子与跨层 Tool 契约",
@@ -92,12 +98,12 @@ CATEGORIES = {
         "description": "外部工具预检、fixture 完整性、脱敏批次报告、证据归档和 required 发布门禁。",
     },
     "K": {
-        "title": "托管 LLM 网关",
+        "title": "托管 LLM 网关归档",
         "files": {
             "test_gateway.py", "test_gateway_admin.py", "test_gateway_offline_acceptance.py",
-            "test_managed_gateway.py", "test_managed_gateway_bundle.py",
+            "test_gateway_archive.py", "test_managed_gateway.py", "test_managed_gateway_bundle.py",
         },
-        "description": "服务端限额的设备自助申请、客户端私钥、短期令牌、签名/nonce、防重放、模型白名单、额度账本、管理员控制面和离线 fake-upstream 脱敏边界。",
+        "description": "为后续版本保留的服务端限额设备申请、客户端私钥、短期令牌、签名/nonce、防重放、模型白名单、额度账本、管理员控制面、启动冻结和离线 fake-upstream 脱敏边界。",
     },
 }
 
@@ -107,6 +113,7 @@ FILE_TARGETS = {
     "test_agent_config.py": "willy.agent_config",
     "test_action_contract.py": "willy.action_contract",
     "test_env_checker.py": "willy.env_checker",
+    "test_dependency_preflight.py": "willy.dependency_preflight 配置页依赖预检",
     "test_env_registry.py": "willy.env_registry",
     "test_vendor_manifest.py": "willy.vendor_manifest / bundled vendor release inventory",
     "test_errors.py": "willy.errors",
@@ -115,6 +122,10 @@ FILE_TARGETS = {
     "test_llm_budget.py": "willy.llm_budget",
     "test_llm_config.py": "willy.llm_config OpenAI-compatible 配置",
     "test_llm_eval_report.py": "tests.llm_eval 脱敏基线报告",
+    "test_llm_eval_matrix.py": "tests.llm_eval.matrix 离线 LLM 测试矩阵",
+    "test_llm_eval_live_report.py": "tests.llm_eval.live_runner 脱敏实时评测报告",
+    "test_llm_eval_live_config_report.py": "tests.llm_eval.live_config_runner 脱敏配置实时评测报告",
+    "test_llm_eval_live_protocol_report.py": "tests.llm_eval.live_protocol_runner 脱敏工具协议实测报告",
     "test_workflow_config.py": "willy.workflow_config 与 MD 配置协议",
     "test_log_parsers.py": "willy.log_parsers",
     "test_struct_orca.py": "willy.quantum.struct_orca",
@@ -155,6 +166,7 @@ FILE_TARGETS = {
     "test_gateway.py": "willy_gateway FastAPI/SQLite gateway contract",
     "test_gateway_admin.py": "willy_gateway loopback administrator control plane",
     "test_gateway_offline_acceptance.py": "willy_gateway 离线 fake-upstream 验收",
+    "test_gateway_archive.py": "willy_gateway 后续版本归档启动边界",
     "test_managed_gateway.py": "willy.managed_gateway device identity and token-refreshing client",
     "test_managed_gateway_bundle.py": "willy.managed_gateway_bundle release client packaging",
 }

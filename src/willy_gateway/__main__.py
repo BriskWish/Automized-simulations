@@ -1,24 +1,20 @@
-"""Explicit launcher for a separately deployed private gateway service."""
+"""Retired launcher retained only to report the current release boundary."""
 
 from __future__ import annotations
 
-from .app import create_app
-from .config import GatewaySettings
+import sys
+
+from .archive import GatewayServiceArchived, raise_gateway_service_archived
 
 
 def main() -> None:
-    import uvicorn
-
-    settings = GatewaySettings.from_environment()
-    uvicorn.run(
-        create_app(settings),
-        host=settings.bind_host,
-        port=settings.bind_port,
-        ssl_certfile=str(settings.tls_certfile) if settings.tls_certfile is not None else None,
-        ssl_keyfile=str(settings.tls_keyfile) if settings.tls_keyfile is not None else None,
-        log_level="warning",
-    )
+    """Refuse gateway startup in the current BYOK-only release."""
+    raise_gateway_service_archived()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except GatewayServiceArchived as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(2) from None

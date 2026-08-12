@@ -157,7 +157,7 @@ QUANTUM_TOOLS = [
                     "log_path": {"type": "string", "description": "输出日志文件路径（g16 为 .log，ORCA 为 .out）"},
                     "error_kind": {
                         "type": "string",
-                        "enum": ["scf_not_converged", "geom_not_converged", "gaussian_crash", "orca_crash", "formchk_failed", "unknown"],
+                        "enum": ["scf_not_converged", "geom_not_converged", "gaussian_crash", "orca_crash", "formchk_failed", "resp_failed", "unknown"],
                     },
                 },
                 "required": ["log_path", "error_kind"],

@@ -56,9 +56,11 @@ class AgentTrace:
     final_success: bool = False
     escalated: bool = False
     escalation_info: dict = field(default_factory=dict)
+    recovery_terminal_reason: str = ""
 
     # 耗时
     duration_s: float = 0.0
+    provider_call_durations_s: list[float] = field(default_factory=list)
 
     # 异常
     errors_encountered: list[str] = field(default_factory=list)
@@ -74,7 +76,9 @@ class AgentTrace:
             "final_success": self.final_success,
             "escalated": self.escalated,
             "escalation_info": self.escalation_info,
+            "recovery_terminal_reason": self.recovery_terminal_reason,
             "duration_s": self.duration_s,
+            "provider_call_durations_s": self.provider_call_durations_s,
             "errors_encountered": self.errors_encountered,
             "tool_calls": [
                 {
@@ -95,9 +99,9 @@ class MockLLMClient:
     """
     模拟 OpenAI 兼容客户端, 按场景预设返回响应。
 
-    每次 create() 调用返回序列中的下一个响应。
-    响应格式为文本 JSON (含 _step_result 标记),
-    由 LayerAgent.handle_failure() 解析驱动重试循环。
+    每次 create() 根据服务端阶段返回唯一允许的工具调用。
+    场景响应序列只描述 retry 工具的成败，不再伪造模型文本
+    ``_step_result`` 来取得评分。
     """
 
     def __init__(self, responses: list[MockLLMResponse],
@@ -107,45 +111,90 @@ class MockLLMClient:
         self._call_count = 0
         self.chat = self._Chat()
 
-    def _build_response(self, mr: MockLLMResponse) -> MagicMock:
+    def _build_response(self, mr: MockLLMResponse, **kwargs) -> MagicMock:
         """构造一个模拟 OpenAI chat completion 响应。"""
         resp = MagicMock()
         choice = MagicMock()
         message = MagicMock()
 
-        if mr.outcome == "escalate":
-            # 返回包含 "escalat" 关键词的纯文本
-            message.content = (
-                "无法自动修复此错误。已尝试所有可用策略, "
-                "必须升级 (escalate) 给用户进行手动干预。\n"
-                "建议: 检查输入文件或使用不同的计算方法。"
-            )
+        tools = kwargs.get("tools") or []
+        names = [
+            str(tool.get("function", {}).get("name") or "")
+            for tool in tools if isinstance(tool, dict)
+        ]
+        diagnostic = next((name for name in names if "diagnose" in name), "")
+        selected = diagnostic or self._preferred_recovery_tool(names)
+        if not selected:
+            message.content = None
             message.tool_calls = None
         else:
-            # 返回带 _step_result 标记的 JSON
-            err = self._scenario.injected_error_kind
-            kind_str = mr.error_kind_override or err.value
-            is_success = mr.outcome == "success"
-            message.content = json.dumps({
-                "_step_result": True,
-                "success": is_success,
-                "step_name": self._scenario.step_name,
-                "outputs": {"fchk": "/tmp/repaired.fchk"} if is_success else {},
-                "artifacts": ["/tmp/repaired.fchk"] if is_success else [],
-                "duration_s": 0.5,
-                "error_message": "" if is_success else (
-                    f"[{self._scenario.layer}] 第{mr.call_index+1}次修复尝试: "
-                    f"{kind_str}"
-                ),
-                "error_kind": "" if is_success else kind_str,
-                "hint": mr.hint_override or "",
-                "raw_output": mr.raw_output_override or "",
-            }, ensure_ascii=False)
-            message.tool_calls = None
+            args = self._tool_arguments(selected)
+            tool_call = MagicMock()
+            tool_call.id = f"call_{mr.call_index}"
+            tool_call.type = "function"
+            tool_call.function.name = selected
+            tool_call.function.arguments = json.dumps(args, ensure_ascii=False)
+            message.content = None
+            message.tool_calls = [tool_call]
 
         choice.message = message
         resp.choices = [choice]
         return resp
+
+    def _tool_arguments(self, tool_name: str) -> dict:
+        """Return schema-compatible deterministic arguments for offline eval."""
+        scenario = self._scenario
+        if "diagnose_error_quantum" in tool_name:
+            return {"log_path": "result.log", "error_kind": scenario.injected_error_kind.value}
+        if "diagnose_error_topology" in tool_name:
+            return {"error_source": "sobtop", "raw_output": "controlled evidence"}
+        if "diagnose_error_simulation" in tool_name:
+            step = {
+                "md_em": "em",
+                "md_eq": "eq",
+                "md_prod": "prod",
+            }.get(scenario.step_name, scenario.step_name)
+            if step not in {"em", "eq", "prod"}:
+                step = "em"
+            return {"step": step, "work_dir": "run"}
+        if "retry_struct" in tool_name or "retry_topo" in tool_name:
+            return {"molecule_name": "LiTFSI"}
+        if "retry_mol2" in tool_name or "retry_chg" in tool_name:
+            if "retry_chg" in tool_name:
+                # charge/spin are optional but change a retry into a fork.
+                # The normal retry contract must retain the audited values.
+                return {"fchk_path": "repaired.fchk"}
+            return {"fchk_path": "repaired.fchk"}
+        if "top_assembly" in tool_name:
+            return {}
+        if "retry" in tool_name:
+            return {"work_dir": "run"}
+        return {}
+
+    def _preferred_recovery_tool(self, names: list[str]) -> str:
+        """Choose a policy-valid mock repair representative for this scenario."""
+        scenario = self._scenario
+        if scenario.layer == "quantum":
+            if scenario.step_index == 2:
+                return next((name for name in names if "mol2" in name), "")
+            if scenario.step_index == 3:
+                return next((name for name in names if "retry_chg" in name), "")
+            return next((name for name in names if "retry_struct" in name), "")
+        if scenario.layer == "topology":
+            if scenario.step_name in {"top_assembly", "topology_assemble"}:
+                return next((name for name in names if "top_assembly" in name), "")
+            if scenario.injected_error_kind.value == "ligpargen_failed":
+                return next((name for name in names if "topo_opls" in name), "")
+            return next((name for name in names if "topo_gaff" in name), "")
+        if scenario.layer == "simulation":
+            if scenario.step_name in {"em", "md_em"}:
+                return next((name for name in names if "retry_em" in name), "")
+            if scenario.step_name in {"eq", "md_eq"}:
+                return next((name for name in names if "retry_eq" in name), "")
+            if scenario.step_name in {"prod", "md_prod"}:
+                return next((name for name in names if "retry_prod" in name), "")
+            return next((name for name in names if "retry" in name), "")
+        return next((name for name in names if "retry" in name), "")
 
     class _Chat:
         def __init__(self):
@@ -172,7 +221,7 @@ class MockLLMClient:
                     mr = harness._responses[harness._call_count]
 
                 harness._call_count += 1
-                return harness._build_response(mr)
+                return harness._build_response(mr, **kwargs)
 
 
 # ============================================================
@@ -210,9 +259,9 @@ class AgentHarness:
         # 给 _harness 赋值
         self.mock_llm._harness = self
 
-    def _build_response(self, mr: MockLLMResponse) -> MagicMock:
+    def _build_response(self, mr: MockLLMResponse, **kwargs) -> MagicMock:
         """委托给 MockLLMClient。"""
-        return self.mock_llm._build_response(mr)
+        return self.mock_llm._build_response(mr, **kwargs)
 
     def run(self) -> AgentTrace:
         """执行评估, 返回 AgentTrace。"""
@@ -279,44 +328,91 @@ class AgentHarness:
         self.trace.total_llm_calls = self._call_count
         self.trace.final_success = result.success
         self.trace.escalated = result.escalated
+        self.trace.recovery_terminal_reason = str(
+            result.extra.get("recovery_terminal_reason", "")
+        )
         self.trace.max_retries_configured = agent.max_retries
 
         if result.escalated and "escalation" in result.extra:
             self.trace.escalation_info = result.extra["escalation"]
 
-        # ── 估算重试次数 ──
-        # 从 mock 响应中统计 failure 和 success
-        retries = 0
-        for i, mr in enumerate(self.scenario.llm_responses):
-            if i >= self._call_count:
-                break
-            if mr.outcome == "failure":
-                retries += 1
-            elif mr.outcome == "success":
-                break
-        self.trace.retry_count = retries
+        # A retry is a real repair-tool invocation, not an LLM call.
+        self.trace.total_tool_calls = len(getattr(agent, "_offline_tool_calls", []))
+        self.trace.tool_calls = list(getattr(agent, "_offline_tool_calls", []))
+        self.trace.retry_count = sum(
+            1 for call in self.trace.tool_calls if "diagnose" not in call.tool_name
+        )
 
         return self.trace
 
     def _create_layer_agent(self) -> LayerAgent:
         """根据场景的 layer 创建对应的 Agent 子类。"""
+        from willy.action_contract import build_default_tool_catalog
+        from willy.recovery_policy import default_recovery_policy
+        catalog = build_default_tool_catalog()
+        policy = default_recovery_policy(catalog)
+        records: list[ToolCallRecord] = []
+
+        def handler(tool_name: str, args: dict) -> str:
+            is_diagnosis = "diagnose" in tool_name
+            if is_diagnosis:
+                payload = {
+                    "_diagnosis": True,
+                    "source": self.scenario.layer,
+                    "severity": "error",
+                    "issues": [self.scenario.injected_error_kind.value],
+                    "evidence": ["controlled evidence"],
+                }
+                records.append(ToolCallRecord(
+                    len(records), tool_name, args, True, True, "", "diagnosis",
+                ))
+                return json.dumps(payload, ensure_ascii=False)
+            # A policy-safe repair can be named ``run_em`` as well as
+            # ``retry_*``. Both consume one bounded repair attempt.
+            attempt = sum(1 for call in records if "diagnose" not in call.tool_name)
+            expected = self.scenario.llm_responses
+            outcome = expected[attempt].outcome if attempt < len(expected) else "escalate"
+            success = outcome == "success"
+            payload = {
+                "_step_result": True,
+                "success": success,
+                "step_name": self.scenario.step_name,
+                "step_index": self.scenario.step_index,
+                "outputs": {"repaired": "artifact"} if success else {},
+                "artifacts": [],
+                "duration_s": 0.5,
+                "error_message": "" if success else self.scenario.injected_error_kind.value,
+                "error_kind": "" if success else self.scenario.injected_error_kind.value,
+            }
+            records.append(ToolCallRecord(
+                len(records), tool_name, args, True, success,
+                payload["error_kind"], payload["error_message"] or "success",
+            ))
+            return json.dumps(payload, ensure_ascii=False)
+
         if self.scenario.layer == "quantum":
             from willy.agent_quantum import QuantumAgent
-            return QuantumAgent(
+            agent = QuantumAgent(
                 llm_client=self.mock_llm,
                 max_retries=self.scenario.expected.max_expected_retries,
+                recovery_policy=policy, tool_catalog=catalog,
             )
         elif self.scenario.layer == "topology":
             from willy.agent_topology import TopologyAgent
-            return TopologyAgent(
+            agent = TopologyAgent(
                 llm_client=self.mock_llm,
                 max_retries=self.scenario.expected.max_expected_retries,
+                recovery_policy=policy, tool_catalog=catalog,
             )
         elif self.scenario.layer == "simulation":
             from willy.agent_simulation import SimulationAgent
-            return SimulationAgent(
+            agent = SimulationAgent(
                 llm_client=self.mock_llm,
                 max_retries=self.scenario.expected.max_expected_retries,
+                recovery_policy=policy, tool_catalog=catalog,
             )
         else:
             raise ValueError(f"未知 layer: {self.scenario.layer}")
+        agent.handle_tool = handler
+        agent._offline_tool_calls = records
+        return agent

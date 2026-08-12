@@ -63,6 +63,118 @@ def test_start_pipeline_rejects_validation_issues_before_reserving_a_run(monkeyp
     assert reserved == []
 
 
+def test_plan_prompt_exposes_only_read_only_tools_and_structured_contract():
+    tool_names = {
+        item["function"]["name"]
+        for item in agent_config.PLAN_TOOLS
+    }
+
+    assert tool_names == agent_config._SEMANTIC_TOOL_NAMES
+    assert "tools_set_backend_quantum" not in tool_names
+    assert "tools_skip_molecule_global" not in tool_names
+    assert "tools_inspect_quantum_inputs" not in tool_names
+    assert {
+        item["function"]["name"] for item in agent_config.QUANTUM_AUDIT_TOOLS
+    } == {"tools_inspect_quantum_inputs"}
+    prompt = agent_config._config_task_context(
+        mode="plan_generate",
+        user_request="Li 1",
+        execution_facts="本机执行边界",
+    )
+    for field in (
+        "任务类型", "当前层与步骤", "不可修改事实", "已验证证据", "未验证假设",
+        "允许动作", "禁止动作", "剩余预算", "期望输出格式",
+    ):
+        assert f"{field}：" in prompt
+
+
+def test_config_agent_rejects_model_text_when_forced_audit_has_no_tool_call(monkeypatch):
+    class Replies:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    tool_calls=None,
+                    content='{"backend":"g16","residues":{"Li":1}}',
+                ))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                tool_calls=None,
+                content="量子输入看起来没有问题。",
+            ))])
+
+    replies = Replies()
+    monkeypatch.setattr(agent_config, "_available_residues", lambda: {"Li": {}})
+    monkeypatch.setattr(agent_config, "_DS", SimpleNamespace(chat=SimpleNamespace(completions=replies)))
+
+    updates = list(agent_config.chat("Li 1", []))
+
+    assert updates[-1][3] is None
+    assert "model_no_tool_call" in updates[-1][1][-1]["content"]
+    assert len(replies.calls) == 2
+    audit_call = replies.calls[1]
+    assert {
+        tool["function"]["name"] for tool in audit_call["tools"]
+    } == {"tools_inspect_quantum_inputs"}
+    assert audit_call["tool_choice"] == agent_config.QUANTUM_AUDIT_TOOL_CHOICE
+
+
+def test_config_agent_uses_semantic_audit_then_strict_json_stages(monkeypatch):
+    class Replies:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    tool_calls=None,
+                    content='{"backend":"g16","residues":{"Li":2}}',
+                ))])
+            if len(self.calls) == 2:
+                tool_call = SimpleNamespace(
+                    id="forced-audit",
+                    function=SimpleNamespace(
+                        name="tools_inspect_quantum_inputs",
+                        arguments='{"backend":"g16","components":[{"name":"Li","count":2}]}',
+                    ),
+                )
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    tool_calls=[tool_call], content="",
+                ))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                tool_calls=None,
+                content='{"backend":"g16","residues":{"Li":2},"molecules":{"Li":{"charge":1,"spin":1}}}',
+            ))])
+
+    audit = {
+        "ok": True,
+        "backend": "g16",
+        "components": [{"name": "Li", "count": 2, "status": "valid"}],
+        "charge_balance": "imbalanced",
+        "net_charge": 2,
+    }
+    replies = Replies()
+    monkeypatch.setattr(agent_config, "_available_residues", lambda: {"Li": {}})
+    monkeypatch.setattr(agent_config, "_DS", SimpleNamespace(chat=SimpleNamespace(completions=replies)))
+    monkeypatch.setattr(
+        agent_config,
+        "handle_tool_call",
+        lambda _name, _args: __import__("json").dumps(audit),
+    )
+    monkeypatch.setattr(agent_config, "_audit_candidate_config", lambda config: (dict(config), []))
+
+    updates = list(agent_config.chat("Li 2", []))
+
+    assert updates[-1][3]["config"]["residues"] == {"Li": 2}
+    assert len(replies.calls) == 3
+    assert replies.calls[0]["tools"] == agent_config.SEMANTIC_TOOLS
+    assert replies.calls[1]["tools"] == agent_config.QUANTUM_AUDIT_TOOLS
+    assert "tools" not in replies.calls[2]
+
+
 def test_new_failed_request_clears_an_older_pending_plan(monkeypatch):
     class Replies:
         def create(self, **_kwargs):
@@ -96,6 +208,11 @@ def test_pending_plan_revision_sends_frozen_context_and_replaces_plan(monkeypatc
             self.calls.append(kwargs)
             self.count += 1
             if self.count == 1:
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    tool_calls=None,
+                    content='{"backend":"g16","residues":{"Li":2}}',
+                ))])
+            if self.count == 2:
                 tool_call = SimpleNamespace(
                     id="audit-revision",
                     function=SimpleNamespace(
@@ -133,9 +250,12 @@ def test_pending_plan_revision_sends_frozen_context_and_replaces_plan(monkeypatc
     plan = _plan(old_config)
     updates = list(agent_config.chat("把 Li 改为 2 个", history, plan))
 
-    assert replies.calls[0]["messages"][1]["content"].find("上一轮冻结配置") >= 0
-    assert '"Li": 1' in replies.calls[0]["messages"][1]["content"]
-    assert "把 Li 改为 2 个" in replies.calls[0]["messages"][1]["content"]
+    structured = replies.calls[0]["messages"][1]["content"]
+    assert "受控结构化上下文" in structured
+    assert '"mode":"plan_revise"' in structured
+    assert "frozen_plan_outline" in structured
+    assert '"Li":1' in structured
+    assert "把 Li 改为 2 个" in structured
     assert updates[-1][3] is not plan
     assert updates[-1][3]["config"]["residues"] == {"Li": 2}
     assert "模拟方案确认" in updates[-1][1][-1]["content"]
@@ -159,8 +279,11 @@ def test_pending_plan_question_keeps_plan_and_sends_context_to_llm(monkeypatch):
 
     assert updates[-1][3] == plan
     assert "当前方案的 EQ 和 PROD" in updates[-1][1][-1]["content"]
-    assert "冻结配置" in calls[0]["messages"][1]["content"]
-    assert '"Li": 1' in calls[0]["messages"][1]["content"]
+    structured = calls[0]["messages"][1]["content"]
+    assert "受控结构化上下文" in structured
+    assert '"mode":"plan_explain"' in structured
+    assert "frozen_plan_outline" in structured
+    assert '"Li":1' in structured
 
 
 def test_confirmation_after_pending_plan_question_still_uses_original_plan(monkeypatch):
@@ -211,6 +334,11 @@ def test_remote_selection_is_server_validated_and_frozen_into_new_plan(monkeypat
             self.calls.append(kwargs)
             self.count += 1
             if self.count == 1:
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    tool_calls=None,
+                    content='{"backend":"g16","residues":{"Li":2}}',
+                ))])
+            if self.count == 2:
                 tool_call = SimpleNamespace(
                     id="audit-remote",
                     function=SimpleNamespace(
@@ -271,7 +399,7 @@ def test_remote_selection_is_server_validated_and_frozen_into_new_plan(monkeypat
         "md": {"backend": "ssh", "profile": "lab_gpu", "retain_remote_run": True}
     }
     assert "profile: lab_gpu" in updates[-1][1][-1]["content"]
-    assert "SSH 直连" in replies.calls[0]["messages"][0]["content"]
+    assert "SSH 直连" in replies.calls[0]["messages"][1]["content"]
 
 
 def test_unregistered_remote_selection_blocks_plan_generation(monkeypatch):

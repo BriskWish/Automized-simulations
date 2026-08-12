@@ -131,20 +131,20 @@ class TestBuildContext:
         assert "SCF" in ctx or "scf" in ctx.lower()
         assert "scf=xqc" in ctx
 
-    def test_context_truncates_long_config(self, mock_llm_client, make_step_result):
-        """config_text 应被截断到约 2000 字符。"""
+    def test_context_excludes_long_config(self, mock_llm_client, make_step_result):
+        """兼容上下文不应再拼接完整 config。"""
         agent = LayerAgent("test", "prompt", [], lambda n, a: "{}", mock_llm_client)
 
         sr = make_step_result(success=False, error_kind=ErrorKind.UNKNOWN)
 
-        # 极长的 config 文本应被截断
+        # 极长 config 只转为可用性事实，不能直接进入 prompt。
         long_config = "x" * 5000
         ctx = agent._build_context(sr, long_config, "/tmp/run", {})
         assert isinstance(ctx, str)
-        # config 段应存在
-        assert "config" in ctx.lower()
+        assert '"config_available":true' in ctx
+        assert long_config not in ctx
 
-    def test_context_includes_artifacts(self, mock_llm_client, make_step_result):
+    def test_context_lists_artifact_keys_without_paths(self, mock_llm_client, make_step_result):
         agent = LayerAgent("test", "prompt", [], lambda n, a: "{}", mock_llm_client)
 
         sr = make_step_result(success=False, error_kind=ErrorKind.UNKNOWN)
@@ -152,10 +152,11 @@ class TestBuildContext:
             sr, '{"residues": {}}', "/tmp/run",
             {"fchk": "/tmp/LiTFSI.fchk", "mol2": "/tmp/LiTFSI.mol2"},
         )
-        assert "fchk" in ctx or "LiTFSI" in ctx
+        assert "fchk" in ctx
+        assert "/tmp/LiTFSI.fchk" not in ctx
 
-    def test_context_includes_failed_step_outputs(self, mock_llm_client, make_step_result):
-        """失败步骤保留的中间产物也必须展示给 Agent。"""
+    def test_context_lists_failed_step_output_keys_without_paths(self, mock_llm_client, make_step_result):
+        """失败步骤产物只以键名摘要给 Agent。"""
         agent = LayerAgent("test", "prompt", [], lambda n, a: "{}", mock_llm_client)
         fchk_path = "/tmp/Li_opt.fchk"
         sr = make_step_result(success=False, error_kind=ErrorKind.UNKNOWN)
@@ -163,7 +164,8 @@ class TestBuildContext:
 
         ctx = agent._build_context(sr, "{}", "/tmp/run", {})
 
-        assert fchk_path in ctx
+        assert "fchk" in ctx
+        assert fchk_path not in ctx
 
     def test_context_includes_structured_execution_evidence(self, mock_llm_client, make_step_result):
         agent = LayerAgent("test", "prompt", [], lambda n, a: "{}", mock_llm_client)
@@ -177,9 +179,10 @@ class TestBuildContext:
 
         ctx = agent._build_context(sr, "{}", "/tmp/run", {})
 
-        assert "私有执行证据" in ctx
-        assert "preflight" in ctx
-        assert "AR.pdb/.gro" in ctx
+        assert "step_extra" in ctx
+        assert "box_execution" in ctx
+        assert "preflight" not in ctx
+        assert "AR.pdb/.gro" not in ctx
 
 
 # ============================================================
@@ -282,6 +285,117 @@ class TestHandleFailure:
             call.kwargs["model"] == "compatible-repair-model"
             for call in agent.llm.chat.completions.create.call_args_list
         )
+
+    def test_diagnose_phase_requires_one_tool_call(self, mock_llm_client, make_step_result):
+        """诊断阶段纯文本不能触发空转或修复调用。"""
+        agent = LayerAgent(
+            "test", "prompt",
+            [
+                {"type": "function", "function": {"name": "tools_diagnose", "parameters": {}}},
+                {"type": "function", "function": {"name": "tools_retry", "parameters": {}}},
+            ],
+            lambda name, args: json.dumps({"_diagnosis": True, "source": "test"})
+            if name == "tools_diagnose" else json.dumps({"_step_result": True, "success": True}),
+            mock_llm_client,
+            on_decision=(traces := []).append,
+        )
+        mock_llm_client.chat.completions.create.return_value = _make_mock_llm_response(
+            content="我认为可以直接重试",
+        )
+        result = agent.handle_failure(make_step_result(success=False, error_kind=ErrorKind.UNKNOWN))
+        assert result.escalated is True
+        assert result.extra["recovery_terminal_reason"] == "model_no_tool_call"
+        assert mock_llm_client.chat.completions.create.call_count == 1
+        assert mock_llm_client.chat.completions.create.call_args.kwargs["tool_choice"] == "required"
+        assert [t["function"]["name"] for t in mock_llm_client.chat.completions.create.call_args.kwargs["tools"]] == ["tools_diagnose"]
+        assert traces[-1]["result"] == "model_no_tool_call"
+
+    @pytest.mark.parametrize("kind", [
+        ErrorKind.INPUT_CONTRACT,
+        ErrorKind.RUNTIME_UNAVAILABLE,
+        ErrorKind.USER_CONFIRMATION_REQUIRED,
+    ])
+    def test_server_terminal_errors_do_not_invoke_model(self, mock_llm_client, make_step_result, kind):
+        """输入、运行环境和确认边界由服务端终态化。"""
+        agent = LayerAgent(
+            "test", "prompt",
+            [{"type": "function", "function": {"name": "tools_diagnose", "parameters": {}}}],
+            lambda *_: "{}",
+            mock_llm_client,
+        )
+        result = agent.handle_failure(make_step_result(success=False, error_kind=kind))
+        assert result.escalated is True
+        mock_llm_client.chat.completions.create.assert_not_called()
+        if kind is ErrorKind.USER_CONFIRMATION_REQUIRED:
+            assert result.error.kind is ErrorKind.USER_CONFIRMATION_REQUIRED
+        else:
+            assert result.extra["recovery_terminal_reason"] == f"server_terminal_{kind.value}"
+
+    def test_diagnose_then_recover_exposes_separate_tool_sets(self, mock_llm_client, make_step_result):
+        """诊断成功后才向模型公开 retry 工具。"""
+        calls = []
+        agent = LayerAgent(
+            "test", "prompt",
+            [
+                {"type": "function", "function": {"name": "tools_diagnose", "parameters": {}}},
+                {"type": "function", "function": {"name": "tools_retry", "parameters": {}}},
+            ],
+            lambda name, args: calls.append(name) or (
+                json.dumps({"_diagnosis": True, "source": "test"})
+                if name == "tools_diagnose"
+                else json.dumps({"_step_result": True, "success": True, "step_name": "fixed"})
+            ),
+            mock_llm_client,
+        )
+        mock_llm_client.chat.completions.create.side_effect = [
+            _make_mock_llm_response(content=None, tool_calls=[_make_tool_call("tools_diagnose", "{}")]),
+            _make_mock_llm_response(content=None, tool_calls=[_make_tool_call("tools_retry", "{}")]),
+        ]
+        result = agent.handle_failure(make_step_result(success=False, error_kind=ErrorKind.UNKNOWN))
+        assert result.success is True
+        assert calls == ["tools_diagnose", "tools_retry"]
+        assert [t["function"]["name"] for t in mock_llm_client.chat.completions.create.call_args_list[0].kwargs["tools"]] == ["tools_diagnose"]
+        assert [t["function"]["name"] for t in mock_llm_client.chat.completions.create.call_args_list[1].kwargs["tools"]] == ["tools_retry"]
+
+    def test_phase_context_does_not_expose_raw_log_or_path(self, mock_llm_client, make_step_result):
+        agent = LayerAgent("test", "prompt", [], lambda *_: "{}", mock_llm_client)
+        failure = make_step_result(
+            success=False,
+            error_kind=ErrorKind.UNKNOWN,
+            error_message="failure at /private/run.log",
+            raw_output="secret raw engine output",
+        )
+        context = agent._build_phase_context(
+            phase="DIAGNOSE",
+            step_result=failure,
+            ctx=RetryContext("test", failure.step_name, ErrorKind.UNKNOWN),
+            allowed_tools=["tools_diagnose"],
+        )
+        assert "/private/run.log" not in context
+        assert "secret raw engine output" not in context
+
+    def test_confirmation_repair_is_not_exposed_to_model(self, mock_llm_client, make_step_result):
+        """服务端确认边界不能由模型绕过，也不计为失败重试。"""
+        from willy.agent_simulation import SimulationAgent
+        from willy.action_contract import build_default_tool_catalog
+        from willy.recovery_policy import default_recovery_policy
+
+        catalog = build_default_tool_catalog()
+        agent = SimulationAgent(
+            mock_llm_client,
+            recovery_policy=default_recovery_policy(catalog),
+            tool_catalog=catalog,
+        )
+        result = agent.handle_failure(make_step_result(
+            success=False, step_name="eq", step_index=9,
+            error_kind=ErrorKind.EQUILIBRATION_FAILED,
+        ))
+        assert result.escalated is True
+        assert result.error.kind is ErrorKind.USER_CONFIRMATION_REQUIRED
+        assert result.extra["escalation"]["attempts_made"] == 0
+        # The confirmation policy is a server-owned route.  It does not ask
+        # the model to diagnose, and it does not consume a repair attempt.
+        mock_llm_client.chat.completions.create.assert_not_called()
 
     def test_successful_tool_result_keeps_its_actual_step_identity(self, mock_llm_client, make_step_result):
         """Upstream repair success must not be relabelled as the failed EQ step."""
@@ -489,7 +603,7 @@ class TestHandleFailure:
         # 应在重试后恢复或升级
         assert isinstance(result, StepResult)
 
-    def test_llm_exceptions_consume_retry_budget_and_update_state(self, agent, make_step_result):
+    def test_llm_transport_exception_does_not_consume_retry_budget(self, agent, make_step_result):
         agent.max_retries = 2
         agent.llm.chat.completions.create.side_effect = Exception("API 超时")
         state_machine = MagicMock()
@@ -500,12 +614,10 @@ class TestHandleFailure:
         )
 
         assert result.escalated is True
-        assert result.extra["escalation"]["attempts_made"] == 2
-        assert agent.llm.chat.completions.create.call_count == 2
-        assert state_machine.start_retry.call_args_list == [
-            call(agent.name, 1, 2),
-            call(agent.name, 2, 2),
-        ]
+        assert result.extra["escalation"]["attempts_made"] == 0
+        assert result.extra["recovery_terminal_reason"] == "model_transport_failure"
+        assert agent.llm.chat.completions.create.call_count == 1
+        state_machine.start_retry.assert_not_called()
 
 
 # ============================================================

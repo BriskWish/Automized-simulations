@@ -8,7 +8,9 @@ from willy.llm_config import (
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL,
     LLMConfigError,
+    LLMSettings,
     configured_llm_client,
+    create_openai_client,
     load_llm_settings,
     load_llm_provider_mode,
     validate_llm_values,
@@ -94,7 +96,7 @@ def test_configured_client_uses_resolved_endpoint_and_model(tmp_path, monkeypatc
     assert settings.base_url == "https://example.test/v1"
 
 
-def test_managed_mode_uses_a_fixed_deployment_profile_not_a_user_api_key(tmp_path, monkeypatch):
+def test_stale_managed_mode_cannot_route_to_gateway_and_falls_back_to_local_key(tmp_path, monkeypatch):
     (tmp_path / "managed_gateway.json").write_text(
         '{"schema_version":1,"profile_id":"home-gateway","label":"Home gateway","base_url":"https://gateway.example.test","model":"willy-default"}',
         encoding="utf-8",
@@ -102,15 +104,26 @@ def test_managed_mode_uses_a_fixed_deployment_profile_not_a_user_api_key(tmp_pat
     monkeypatch.setenv("WILLY_LLM_MODE", "managed")
     monkeypatch.setenv("WILLY_LLM_API_KEY", "must-not-be-used")
 
+    assert load_llm_provider_mode(tmp_path) == "byok"
     settings = load_llm_settings(tmp_path)
-
     assert settings is not None
-    assert settings.provider_mode == "managed"
-    assert settings.source == "managed"
-    assert settings.api_key == ""
-    assert settings.base_url == "https://gateway.example.test/v1"
-    assert settings.model == "willy-default"
-    assert "must-not-be-used" not in settings.public_dict().values()
+    assert settings.provider_mode == "byok"
+    assert settings.api_key == "must-not-be-used"
+    assert settings.base_url == DEFAULT_LLM_BASE_URL
+    assert settings.source == "environment"
+
+
+def test_manually_constructed_managed_settings_cannot_create_gateway_client():
+    archived = LLMSettings(
+        api_key="",
+        base_url="https://gateway.example.test/v1",
+        model="willy-default",
+        source="managed",
+        provider_mode="managed",
+    )
+
+    with pytest.raises(LLMConfigError, match="托管网关已冻结"):
+        create_openai_client(archived)
 
 
 def test_invalid_llm_mode_is_rejected_before_any_client_is_constructed(tmp_path, monkeypatch):

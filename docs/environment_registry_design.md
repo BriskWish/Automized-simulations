@@ -187,11 +187,15 @@ OpenAI-compatible Chat Completions API。
 `http(s)` 地址，因此本地 vLLM、Ollama 或 LM Studio 的兼容端点可用。
 
 当前不会做启动时联网探测。配置页的“测试连接”是用户显式触发的一次性检查：它只使用当前表单
-中的 API Key、Base URL 和 Model，不读写 `.env`，并在 12 秒上限内强制模型调用零参数
-`willy_connection_check`。为避免在页面回显凭据，已保存的 API Key 不会回填；重启后再次测试时，
+中的 API Key、Base URL 和 Model，不读写 `.env`，并在 12 秒上限内要求模型调用零参数
+`willy_connection_check`。请求使用 OpenAI-compatible 的 `tool_choice="auto"`，但服务端仍必须在响应中
+收到且仅接受该指定工具调用；纯文本、其他工具或空调用均不通过。这样兼容拒绝强制
+`tool_choice="required"`、但能正确自动调用工具的 reasoning 网关，不会放宽 Willy 的动作契约。为避免在页面回显凭据，已保存的 API Key 不会回填；重启后再次测试时，
 用户必须重新填写 Key，否则返回 `invalid_test_api_key`，不会错误地把该本地校验归因于服务端。
-一次成功响应同时证明 Chat Completions、所选模型与 function calling 可用；保存动作仍只写本机
-`.env`，且需要重启前端使 Agent 重载 client。
+一次成功响应同时证明 Chat Completions、所选模型与自动 function calling 可用；保存动作仍只写本机
+`.env`，且需要重启前端使 Agent 重载 client。`tests.llm_eval.live_protocol_runner` 还提供显式 opt-in
+的脱敏三段协议探针：文本和自动工具调用是产品门禁，`required` 工具选择仅记录 provider 兼容性，
+不作为当前自动工具路径的失败依据。
 
 Base URL 经格式校验后按用户原值使用，绝不自动补 `/v1` 或重写路径。版本前缀是 OpenAI-compatible
 服务的常见差异：部分服务要求 `/v1`，而另一些服务（包括默认 DeepSeek 地址）不要求。配置页对此
@@ -239,11 +243,14 @@ ResolvedTool(
 
 ## 4. 预检与运行时序
 
-预检分为三层：
+预检分为四层：
 
-1. **能力发现（已实现）**：每个新 run 创建后、进入步骤前，非阻塞扫描全部外部工具并写入脱敏报告；缺少未选中的工具不使服务不可用。
-2. **方案预检（已实现）**：配置与后端确定后，按该流程需要的模块检查所需工具。当前没有自动切换后端；必需工具不可用时在执行前返回结构化失败。
-3. **工步预检**：进入外部命令前，再验证当前输入、附属文件、可执行权限和子进程环境。软件可发现不代表当前任务一定可运行。
+1. **配置页依赖预检（已实现）**：用户显式点击“预检运行依赖”后，`dependency_preflight.py` 将量子、拓扑和模拟划分为可替代链路组，逐项展示 G16/G09/ORCA、Sobtop、LigParGen/BOSS/Open Babel/C shell、GROMACS 及内置 Multiwfn/Packmol 的可用性与来源。每组只要存在一条完整受支持替代链路即满足；三组都满足时才报告“满足完成完整 MD 流程的最小链路”。这是建议性结果，绝不创建 run、改变状态机或阻止本地任务启动。
+2. **能力发现（已实现）**：每个新 run 创建后、进入步骤前，非阻塞扫描全部外部工具并写入脱敏报告；缺少未选中的工具不使服务不可用。
+3. **方案预检（已实现）**：配置与后端确定后，按该流程需要的模块检查所需工具。当前没有自动切换后端；必需工具不可用时在执行前返回结构化失败。
+4. **工步预检**：进入外部命令前，再验证当前输入、附属文件、可执行权限和子进程环境。软件可发现不代表当前任务一定可运行。
+
+配置页预检只会对可用、由 `PATH`、兼容变量或受限默认目录自动发现的**外部**工具补写缺失的本机 `.env` `WILLY_*` 项，并以原子替换方式设为 `0600`。它不覆盖启动进程环境、已有 `.env` 的 `WILLY_*` 设置或 ORCA 相关任一显式键；内置 Vendor 路径永不写入 `.env`。写入失败只给出提示，不改变预检结论或本地任务可提交性。报告只公开状态和来源，不公开绝对路径、环境变量值、日志或密钥。
 
 预检报告包含工具 ID、脱敏状态、来源（`willy_env`、`dotenv`、`legacy_env`、`default`、`path`）
 和预留版本字段。每个新 run 将该快照固化至 `run_manifest.json` 的私有
@@ -286,6 +293,7 @@ Packmol 已登记为受管工具，`resolve_tool("packmol")` 与 `env_checker` �
 ## 5. 模块职责与迁移
 
 - `env_registry.py`：工具声明、路径解析、校验、子进程环境构造和脱敏能力报告。
+- `dependency_preflight.py`：配置页调用的建议性分组预检；读取 registry、核验内置 Vendor，并仅补写自动发现的缺失外部 `WILLY_*` 默认项。它不创建工程、不进入状态机，也不替代执行期检查。
 - `step_registry.py`：维护主流程 step 及其执行模块、外部工具和内置依赖的归属关系。
 - `env_checker.py`：保留现有 `check_all()`、`check_module()`、`ensure()` API，按执行模块
   注册表生成依赖归属并适配 `env_registry` 的报告，避免现有调用方一次性破坏。
@@ -296,8 +304,9 @@ Packmol 已登记为受管工具，`resolve_tool("packmol")` 与 `env_checker` �
 - Run Assistant：通过 `tools_get_environment_run` 只读获取脱敏能力摘要，可解释“工具不可用”，
   没有环境变量读写或任意路径读取权限；当前不会自动改用后端。
 
-迁移期间，`env_checker` 继续是所有外部依赖检查的唯一入口；registry 是它的内部实现，
-不是第二套平行检查器。
+执行期的外部依赖强制检查仍以 `env_checker` 为唯一入口；`env_registry` 是它的内部实现。
+配置页的 `dependency_preflight` 仅用于部署前发现和默认配置补全，不能作为执行许可，也不构成第二套
+运行时阻断逻辑。
 
 ## 6. 验收与回归
 
@@ -307,6 +316,7 @@ Packmol 已登记为受管工具，`resolve_tool("packmol")` 与 `env_checker` �
 - `.env` 白名单加载与进程环境覆盖关系。
 - OpenAI-compatible LLM 的通用变量、DeepSeek 兼容回退、URL/模型校验和密钥脱敏。
 - 表单值的一次性连通性测试：强制工具调用、12 秒上限、八类公开错误、无持久化与无敏感信息泄露。
+- 配置页依赖预检：分组的替代链路判定、内置 Vendor 的存在/可执行性、自动发现的 `WILLY_*` 默认项写入、已有设置不覆盖、写入失败降级，以及失败结果不影响本地任务启动。
 - 缺失、路径不存在、目录误作二进制、不可执行、必要附属程序缺失等状态。
 - BOSS 无入参加载探针的启动异常、超时及负信号退出均归类为 `runtime_unavailable`；非负的参数提示退出码仅证明加载器可用，不替代真实 LigParGen fixture。
 - ORCA 动态库环境和 LigParGen/BOSS 环境只作用于目标子进程。

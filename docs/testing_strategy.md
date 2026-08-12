@@ -2,9 +2,11 @@
 
 > 维护角色：6 号测试工程师
 > 最后更新：2026-08-12
-> 当前基线：2026-08-12 完整 `pytest -q` 为 816 passed、9 skipped（收集 825 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 843 条记录）。本轮新增托管网关的服务端名额自助申请、前 50 名自动批准、默认 grant、重复公钥去重、待审批过期释放、来源节流、固定上游、设备签名/nonce、撤销、过期/篡改令牌、白名单、额度账本、超时预留、回环管理员控制面、客户端私有身份文件、令牌刷新、设备状态/剩余 Token 查询、客户端到实际 ASGI 网关的协议契约，以及客户端部署包对部署 profile、虚拟环境和本地运行态的隔离；同时覆盖 schema-v2 `run_manifest.json` 的 section CAS、新旧格式读取、终态非破坏性迁移、环境能力和 MDP 协议 metadata 收敛、当前版本远程任务页的本地固定/输入冻结边界，以及可视化元素图例、PDB 原子前缀解析、氢原子保留和图例/画面统一色表。模拟验收同时覆盖温度均值、势能归一化线性斜率、真空区/密度非阻塞行为、净电荷容差边界，以及 Packmol 残留输出隔离、前置/进程结构化证据和证据门控，并新增 OPLS 专属的 LigParGen GRO 五列残基字段恢复、结构化日志，以及 Packmol ABI/终态升级回归；外部工具和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
+> 当前基线：2026-08-12 完整 `pytest -q` 为 835 passed、9 skipped（收集 844 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 862 条记录）。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；本轮其余回归覆盖 schema-v2 `run_manifest.json`、环境能力和 MDP metadata、可视化解析、温度/势能验收、Packmol ABI/终态、OPLS 字段恢复和结构化日志。外部工具和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
 
-> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **816 passed、9 skipped**（收集 825 条 pytest），测试台账为 **825 pytest + 18 LLM = 843 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要和前端建议，以及客户端部署包的本地运行态隔离均已有本地回归；目标机仍需使用兼容 Packmol 构建进行真实复测。
+> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **835 passed、9 skipped**（收集 844 条 pytest），测试台账为 **844 pytest + 18 LLM = 862 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要和前端建议，以及客户端部署包的本地运行态隔离均已有本地回归；目标机仍需使用兼容 Packmol 构建进行真实复测。
+
+> 网关冻结边界：当前发行版的前端、LLM provider、网关/管理端启动器和托管客户端包命令均拒绝托管路径；归档的 ASGI、账本和 fake-upstream 测试仅用于后续维护，不构成产品入口或部署验收。
 
 ## 1. 目标与原则
 
@@ -21,8 +23,8 @@
 |------|------|------|------|
 | 单元 | `unit` | ErrorKind、解析器、状态机、环境注册 | 默认执行 |
 | 契约 | `contract` | config v2、tool schema、产物、manifest、检查点、拓扑组装 | 默认执行 |
-| 集成 | `integration` | 编排器、前端 API、run registry、后处理、模拟执行、托管网关 ASGI/账本/本机控制面/客户端协议 | 默认执行，外部进程由替身控制 |
-| 网关离线验收 | `gateway_acceptance` | 设备令牌、撤销、Token 额度、超时 unknown 预留清理、tool call 透传、SQLite 脱敏审计与流式拒绝 | 默认执行；可单独选择；仅临时 SQLite、ASGI 内存 transport 与脚本化 fake upstream |
+| 集成 | `integration` | 编排器、前端 API、run registry、后处理、模拟执行、归档托管网关 ASGI/账本/本机控制面/客户端协议 | 默认执行，外部进程由替身控制 |
+| 网关离线回归（后续版本资产） | `gateway_acceptance` | 设备令牌、撤销、Token 额度、超时 unknown 预留清理、tool call 透传、SQLite 脱敏审计与流式拒绝 | 默认执行；兼容性保障，不构成本版本发布验收；仅临时 SQLite、ASGI 内存 transport 与脚本化 fake upstream |
 | 外部 smoke | `external` | G16、ORCA、Sobtop、LigParGen/BOSS/Open Babel/C shell、GROMACS 的具名预检，以及内置 Multiwfn 的真实进程验收；G09 仅保留环境契约预检和用户提示，不执行本版本可靠全链路 smoke | 仅 `--run-external` |
 | LLM 连通性 | `llm_connection` | 已配置 OpenAI-compatible 端点的实际 Chat Completions 与工具调用 | 仅 `--run-llm-connection` |
 | LLM 行为评估 | `llm_eval` | 诊断、工具选择、重试、升级 | 独立的 mock eval 命令 |
@@ -45,7 +47,7 @@ pytest -m unit -q
 pytest -m contract -q
 pytest -m integration -q
 
-# 网关离线验收：不创建 socket，不调用真实上游，也不触碰模拟运行目录。
+# 网关离线回归（后续版本资产）：不创建 socket，不调用真实上游，也不触碰模拟运行目录。
 pytest -m gateway_acceptance -q
 
 # 真实外部工具验收，只在目标环境执行。
@@ -83,15 +85,15 @@ python3 -m tests.llm_eval.run_eval
 | 模拟协议、MDP、后处理 | `contract` + `integration`；覆盖 LLM 伪确认拒绝、首次调用升级和公开提示；目标环境补 GROMACS smoke |
 | 拓扑后端 | `contract` + `integration`；目标环境补 Sobtop/OPLS smoke |
 | 量子后端 | 日常回归 + 目标环境的对应量子 smoke |
-| Agent prompt 或工具行为 | 相关 pytest 集 + LLM mock eval |
+| Agent prompt 或工具行为 | 相关 pytest 集 + LLM mock eval；用户可见 Prompt 还必须覆盖九段结构化上下文、服务端事实绑定、预算刷新，以及完整配置/日志尾部/产物清单不进入首轮或 tool-call 后续轮次 |
 | LLM 配置页或连接测试 | `tests/test_llm_config.py` + `tests/test_frontend_api.py` + `tests/test_app_ui.py`；目标端点补 `--run-llm-connection` |
 | 当前工程可视化 | `tests/test_frontend_api.py` + `tests/test_app_ui.py`；覆盖运行目录/结构文件双选择器、目录切换后的文件隔离、启动锁优先/最新数字目录回退、PDB/MOL2 白名单、完整文件名和查看器渲染 |
 | GROMACS 实时 ETA | `tests/test_mdrun_eta.py` + `tests/test_run_assistant.py` + 模拟执行回归；目标环境补 `mdrun -v` 真实 smoke |
 | 确认停止与失活对账 | `tests/test_frontend_api.py` + `tests/test_app_ui.py` + `tests/test_pipeline_state.py` + `tests/test_pipeline_launch.py` + `tests/test_pipeline_orchestrator.py`；覆盖仅按钮的服务端两次确认、失败回执可重试、文本中止/暂停词不停止、前端轮询只读、GROMACS ETA/阶段产物存活证据、进程组仍存活时不误中止、revision 竞争放弃写入和失活事件审计；目标环境补 GROMACS checkpoint-first stop smoke |
 | 量子或拓扑外部命令 | `tests/test_process_lifecycle.py` + 受影响后端契约回归；覆盖进程组 `SIGINT -> SIGTERM -> SIGKILL`、停止/超时的脱敏审计与既有 `StepResult` 错误分类；目标环境补对应真实 smoke |
 | 协议调整待确认 | `tests/test_pending_action.py` + `tests/test_app_ui.py` + `tests/test_frontend_api.py` + `tests/test_pipeline_orchestrator.py`；覆盖脱敏待确认方案展示、等待状态不降级为未知、无歧义批准语、替代方案的 action ID 替换与配置不变、无回复/暂停/否决保持等待、非 `awaiting_confirmation` 状态的控制拒绝并回退只读问答，以及跨 run 或过期 action 拒绝 |
-| 运行助理性能、降级与状态时间线 | `tests/test_run_assistant.py` + `tests/test_frontend_api.py` + `tests/test_app_ui.py` + LLM mock eval；覆盖独立气泡、关闭连续消息合并、同一状态原位刷新、状态转换封存、错误/方案去重、确认后新状态卡与 LLM 上下文隔离；目标环境补真实远程模型耗时 smoke |
-| 外部环境解析、预检或部署变量 | `tests/test_env_registry.py` + `tests/test_env_checker.py` + 受影响模块回归 |
+| 运行助理性能、降级与状态时间线 | `tests/test_run_assistant.py` + `tests/test_frontend_api.py` + `tests/test_app_ui.py` + LLM mock eval；覆盖独立气泡、关闭连续消息合并、同一状态原位刷新、状态转换封存、错误/方案去重、确认后新状态卡与 LLM 上下文隔离；目标环境补真实模型耗时 smoke |
+| 外部环境解析、配置页依赖预检、预检或部署变量 | `tests/test_env_registry.py` + `tests/test_env_checker.py` + `tests/test_dependency_preflight.py` + 受影响模块回归 |
 | 发布 | 全量 pytest、相关 LLM eval、质量契约（编译与测试用例台账漂移检查）、相关 external preflight/真实执行证据、验收记录 |
 
 本地编排回归必须覆盖：新 run 不继承旧 `done_steps`；Step 2 Agent 只补上游产物时会重跑 Step 2；Step 3 对配置中任一缺失的 `*_opt.fchk` 失败，而不是以部分结果继续进入拓扑层；修复工具必须保留实际步骤身份；EQ 失败必须生成脱敏待确认方案，未授权不得修改配置、重跑或启动 PROD；替代方案必须生成新 action ID、使旧动作失效、保留 `awaiting_confirmation` 且不改写配置；批准当前动作后必须按 `awaiting_confirmation -> retrying -> running` 流转，并只能从其受限的 Step 9 或 Step 7 重跑，且成功的 EQ 许可与 checkpoint 仍是 PROD 的前置条件；历史公开状态越过仍在运行的 EQ 时只能修正状态，不得改写模拟文件。
@@ -109,7 +111,7 @@ Smoke 只确认最小真实链路可启动并生成可消费产物，不替代�
 5. 每个 external case 先写 `preflight` 证据。该记录只能表示工具/fixture 是否就绪；真实执行必须另写 `execution` 证据，并记录已声明产物的相对路径、大小和 SHA-256。不得以预检成功或只有退出码 0 声称科学链路通过。
 6. 成功后清理临时 workspace；失败时保留脱敏的失败类别、fixture 指纹、能力摘要和 JUnit/证据 JSON。fixture 原文、许可证、原始日志、完整命令行和密钥不得上传为 CI artifact。
 
-最小案例规划：Sobtop 使用 `EC.mol2 + EC.chg`；GROMACS 使用预置小体系依次验证 EM、EQ、PROD；G16/ORCA 各使用单分子输入；G09 仅保留环境契约和用户提示，不纳入本版本可靠全链路验收；内置 Multiwfn 使用固定版本的单分子 fchk；LigParGen 在完整 `BOSSdir`、Open Babel 与 C shell 配置后执行中性小分子案例。后处理/分析、科学体系预测和 SSH/Slurm 不属于本版本公开验收范围。
+最小案例规划：Sobtop 使用 `EC.mol2 + EC.chg`；GROMACS 使用预置小体系依次验证 EM、EQ、PROD；G16/ORCA 各使用单分子输入；G09 仅保留环境契约和用户提示，不纳入本版本可靠全链路验收；内置 Multiwfn 使用固定版本的单分子 fchk；LigParGen 在完整 `BOSSdir`、Open Babel 与 C shell 配置后执行中性小分子案例。后处理/分析、科学体系预测和其他实验性组件不属于本版本公开验收范围。
 
 
 ## 5. 当前缺口与实施顺序
@@ -123,9 +125,9 @@ Smoke 只确认最小真实链路可启动并生成可消费产物，不替代�
 
 M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
 
-## 6. 本版本完整验收计划（不含网关）
+## 6. 本版本本地工作流验收计划
 
-本节定义本地 Willy 工作流的发布候选验收，不新增、修改或验收网关、SSH/Slurm 远程执行、后处理/分析或科学体系预测。当前成熟方案只要求受支持 profile 严格完成十步并以最终无错误状态结束。G09 仅保留接口和前端未验证提示，不计入本版本 profile。
+本节定义本地 Willy 工作流的发布候选验收，不新增、修改或验收实验性组件、后处理/分析或科学体系预测。当前成熟方案只要求受支持 profile 严格完成十步并以最终无错误状态结束。G09 仅保留接口和前端未验证提示，不计入本版本 profile。
 
 “完整”指每项公开能力同时具有确定性回归、至少一个失败边界、适用时的真实执行证据和用户可见结果验证。本版本主流程的通过条件是十步完成且最终无错误，不生成科学体系结论。0 号负责总门禁，6 号维护矩阵和证据，1/2/3/4 号分别提供量子、拓扑、模拟和前端的 fixture、阈值及失败场景。
 
@@ -138,7 +140,7 @@ M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
 | E. GROMACS 十步协议 | Packmol/PBC 审计、残留输出隔离、EM -> EQ -> PROD、checkpoint 连续性、最终无错误和阶段产物完整 | MDP/建盒/阶段许可/产物契约测试；密度和真空区仅保留非阻塞诊断 | 每个已承诺 profile 均须真实完成 Step 1--10，进程正常退出，状态 `done`，manifest/status 和 `.tpr/.gro/.xtc/.edr` 通过校验；不推断科学收敛或目标体系性质 |
 | F. 错误恢复与控制 | 错误公开摘要、知识检索来源标记、多方案选择、`awaiting_confirmation -> retrying -> running`、停止实际终止受管进程 | mock LayerAgent/LLM、pending-action、状态机和进程生命周期测试；覆盖未确认/暂停文本无副作用、选择方案但未确认仍等待、确认后只从许可步骤重跑、失败回退等待状态 | 人工触发一个可控 EQ 失败和一个子进程停止场景；前端必须显示最新错误/方案气泡，PROD 不得在 EQ 未验收时启动，停止后目标 PGID 不再存活 |
 | G. 真实 LLM 兼容 | 已配置 OpenAI-compatible 服务能完成连接测试、工具调用、超时/格式错误降级，且不泄露凭据 | LLM 配置、错误提示、tool schema 和 mock eval；mock eval 覆盖无效工具参数、越层调用、重复确认与模型超时 | 以 `--run-llm-connection` 单次验证用户配置的端点；再对真实模型运行最小配置生成和受控错误解释。请求、响应、Key、Authorization 和原始 prompt 均不写入证据 |
-| H. 前端端到端 | 方案生成、文本确认、状态卡、错误/方案独立气泡、停止二次确认、运行目录/结构文件选择和冻结远程页 | 现有 Gradio 配置与 API 集成回归；新增浏览器级 smoke 覆盖首屏、方案确认、等待确认、停止和工程切换 | 浏览器 smoke 使用临时本地服务和 fake 外部执行器，不调用真实科学软件；验证可见文案、控件状态和气泡顺序，不检查模型自然语言措辞 |
+| H. 前端端到端 | 方案生成、文本确认、状态卡、错误/方案独立气泡、停止二次确认和运行目录/结构文件选择 | 现有 Gradio 配置与 API 集成回归；新增浏览器级 smoke 覆盖首屏、方案确认、等待确认、停止和工程切换 | 浏览器 smoke 使用临时本地服务和 fake 外部执行器，不调用真实科学软件；验证可见文案、控件状态和气泡顺序，不检查模型自然语言措辞 |
 
 ### 6.1 外部执行矩阵与证据分级
 
@@ -155,7 +157,7 @@ M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
 2. **R1，外部后端**：在授权验收机依次执行 D 的四个最小 profile，并对每个 profile 保存 preflight 与 execution 证据。某一已承诺 profile 缺软件、许可证、fixture 或成功记录时，候选版本不得宣称支持该 profile。
 3. **R2，模拟协议**：执行 E 的每个已承诺 profile 十步完整链路；失败时保留脱敏证据并回归至 F 的受控恢复用例。
 4. **R3，产品增强（非本版本主流程门禁）**：真实 LLM、浏览器 E2E、通用运行助理功能可独立验收，但不改变十步成熟方案结论。
-5. **R4，发布复核**：0、5、6 号确认 A-F、四条 profile 证据、文档台账和发布 commit 一致；不得把 G09、科学预测、后处理或 SSH/Slurm 写入本版本可用能力。
+5. **R4，发布复核**：0、5、6 号确认 A-F、四条 profile 证据、文档台账和发布 commit 一致；不得把 G09、科学预测、后处理或实验性组件写入本版本可用能力。
 
 新增或修改测试时，6 号必须在 `tests/reports/test_case_catalog.md` 中保留 A-F 对应的可追溯 case；G/H 属于后续产品增强时再单独登记。未覆盖的公开能力应在本节或 `project_gap_analysis.md` 标为缺口，不得以默认 pytest 全绿替代已承诺 profile 的真实十步证据。
 
@@ -274,13 +276,13 @@ GROMACS 在加载 oneAPI 前因缺少 MKL 动态库不可运行，加载后可�
 运行环境；不证明磁盘扫描能力，也不证明 G16、formchk 或 GROMACS 已完成真实执行。后续真实进程、产物和
 超时结果必须另行登记，G-01 与 G-03 维持开放。
 
-### 6.9 2026-08-11 本机网关健康检查
+### 6.9 历史网关健康检查（不属于本版本验收）
 
 本机 `managed_gateway.json` 的 loopback 部署描述指向 `http://127.0.0.1:8789`。绕过环境代理后，
 只读 `GET /healthz` 返回 HTTP 200 和 `{"status":"ok"}`；经代理访问返回 502，仅作为代理路径
 异常记录，不作为网关本身故障。该检查没有读取或记录任何设备身份、访问令牌、上游 Key 或管理员秘密。
 
-**结果：通过（本机监听健康端点）。** 真实双机 TLS、远程客户端部署描述、设备注册/令牌交换和真实
+**结果：通过（历史本机监听健康端点记录）。** 真实双机 TLS、远程客户端部署描述、设备注册/令牌交换和真实
 上游 tool-calling 仍未验收，不能直接据此启动远程完整 E2E。
 
 ### 6.10 2026-08-11 第二台受控验收机：真实 BYOK DeepSeek 工具调用
@@ -309,8 +311,20 @@ prompt、原始响应或服务端错误体。该配置不能作为当前需要�
 在目标机重新保存正确配置并复测，报告连接测试成功。未记录 Key、Authorization、原始响应或完整异常。
 
 **结果：通过（人工复测）。** 当前 GPT 中转站配置已具备普通连接和工具调用验收证据；首次失败只作为
-配置复制错误的诊断记录保留。连接测试严格性修改仍待实现：应使用自动工具选择但校验实际返回的
-`willy_connection_check`，并将服务端明确拒绝强制选择归类为 `tool_call_unsupported`。
+配置复制错误的诊断记录保留。当前代码已使用自动工具选择并校验实际返回的
+`willy_connection_check`，服务端明确拒绝强制选择的兼容分类也已加入回归；本节历史人工证据仍不替代
+当前版本协议探针和真实 Agent 评测。
+
+### 6.14 2026-08-12 LLM 协议与受控恢复收敛
+
+6.10--6.11 暴露的是 provider 的强制 `tool_choice` 兼容差异，而不是模型文本质量问题。现已实现：
+
+- 连接页使用 `tool_choice="auto"` 来验证模型的正常工具选择能力；恢复的 DIAGNOSE/RECOVER 阶段只公开一个唯一工具并使用 `tool_choice="required"` 强制调用，量子输入审计则使用具名 `tool_choice`。服务端仍核对工具名、参数、层级和归一化审计范围。纯文本、空调用、多调用、跨层调用、未登记工具和非对象 JSON 参数均安全终态化，不执行工具。
+- `LayerAgent` 固定按 `DIAGNOSE -> RECOVER` 执行。诊断阶段只公开只读诊断工具；恢复阶段只公开当前 `RecoveryPolicy` 的 `retry_safe` 白名单。输入契约、运行环境缺失、确认、派生 run 和锁冲突由服务端直接终态化；LLM 传输/协议错误不会消耗科学重试次数。
+- Config Agent 固定按“语义提取 -> 服务端规范化 -> 强制量子输入审计 -> 无工具严格 JSON -> 服务端校验”执行。审计阶段只公开 `tools_inspect_quantum_inputs`；未实际调用、参数不匹配或审计范围不匹配均以 `invalid_quantum_input` 拒绝。
+- 评分器只以实际工具名、JSON Schema、调用顺序、层级和策略白名单评分，禁止以 LLM 调用数或重试次数代理工具选择得分。18 个本地 mock 场景回归均通过；每个工具驱动恢复均为“先诊断、后本层允许修复”，EQ/PROD 的科学协议修改保持等待用户确认。
+
+新增 `python -m tests.llm_eval.live_protocol_runner` 只发送三个脱敏 fake-tool 探针：文本与自动工具调用为硬门禁；`tool_choice="required"` 的结果只作为兼容诊断。2026-08-12 当前 BYOK 协议探针 3/3 通过，配置 Agent 分段审计 5/5 通过（3 个需要审计的场景均实际调用审计工具）。恢复 Agent 的真实模型 + fake executor 矩阵为 17/18：17 个场景满足工具契约，`q_scf_001` 已完成诊断但恢复阶段未返回允许的修复工具，服务端记录 `model_no_tool_call` 并安全升级；该失败保留为当前 G-09 的真实模型稳定性缺口，不能用 mock 结果覆盖。
 
 ### 6.12 2026-08-11 第二台受控验收机：Packmol 运行时 ABI 不兼容
 

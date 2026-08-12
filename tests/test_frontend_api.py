@@ -799,86 +799,69 @@ def test_llm_config_notice_shows_the_loaded_model_or_a_safe_fallback(monkeypatch
     assert frontend_api.get_llm_config_notice().endswith("当前模型：*当前无可用模型*。")
 
 
-def test_managed_mode_persists_only_the_mode_and_never_an_endpoint_or_registration_credential(tmp_path, monkeypatch):
+def test_managed_mode_is_blocked_without_writing_or_refreshing(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
-    monkeypatch.setattr(frontend_api, "_refresh_agent_llm_client", lambda: None)
+    refresh_calls = []
+    monkeypatch.setattr(frontend_api, "_refresh_agent_llm_client", lambda: refresh_calls.append(True))
     (tmp_path / ".env").write_text("OTHER_SETTING=keep\nWILLY_LLM_API_KEY=byok-secret\n")
 
     message = frontend_api.save_llm_mode("managed")
 
     saved = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert message == "已选择托管 LLM 网关。"
-    assert "WILLY_LLM_MODE=managed" in saved
+    assert message == "当前版本仅支持本地 API Key，托管网关已冻结。"
+    assert "WILLY_LLM_MODE" not in saved
     assert "byok-secret" in saved
     assert "gateway.example" not in saved
     assert "invite" not in saved.lower()
 
-    assert frontend_api.save_llm_mode("byok") == "已选择自带 API Key。"
-    assert "WILLY_LLM_MODE" not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert refresh_calls == []
 
 
-def test_selecting_managed_mode_does_not_create_device_identity_until_ui_registration(tmp_path, monkeypatch):
+def test_managed_status_registration_and_connection_are_frozen_without_network(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     monkeypatch.setattr(frontend_api, "_refresh_agent_llm_client", lambda: None)
-    (tmp_path / "managed_gateway.json").write_text(
-        '{"schema_version":1,"profile_id":"home-gateway","label":"Home","base_url":"http://127.0.0.1:8789","model":"willy-default"}',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        frontend_api,
-        "ManagedIdentityStore",
-        lambda: (_ for _ in ()).throw(AssertionError("mode persistence must not create an identity")),
-    )
-
-    assert frontend_api.save_llm_mode("managed") == "已选择托管 LLM 网关。"
+    monkeypatch.setattr(frontend_api, "load_managed_gateway_profile", lambda *_: (_ for _ in ()).throw(AssertionError("frozen path must not read profile")))
+    monkeypatch.setattr(frontend_api, "managed_gateway_usage_snapshot", lambda *_: (_ for _ in ()).throw(AssertionError("frozen path must not access gateway")))
+    assert frontend_api.get_managed_gateway_status()["code"] == "managed_gateway_frozen"
+    assert frontend_api.request_managed_gateway_registration() == "当前版本仅支持本地 API Key，托管网关已冻结。"
+    assert frontend_api.test_managed_gateway_connection()["code"] == "managed_gateway_frozen"
 
 
-def test_managed_status_and_notice_are_redacted_when_profile_is_unavailable(monkeypatch):
-    from willy.managed_gateway import ManagedGatewayError
-
-    monkeypatch.setattr(frontend_api, "load_managed_gateway_profile", lambda _root: (_ for _ in ()).throw(ManagedGatewayError("managed_profile_missing")))
+def test_managed_status_compatibility_response_is_frozen(monkeypatch):
     status = frontend_api.get_managed_gateway_status()
     assert status == {
         "ok": False,
-        "code": "managed_profile_missing",
-        "message": "托管网关配置尚不可用，请联系部署者。",
+        "code": "managed_gateway_frozen",
+        "message": "当前版本仅支持本地 API Key，托管网关已冻结。",
     }
 
     managed = SimpleNamespace(model="willy-default", provider_mode="managed")
     monkeypatch.setattr(frontend_api, "load_llm_settings", lambda _root: managed)
+    assert frontend_api.get_llm_config_status() == "当前版本仅支持本地 API Key，托管网关已冻结。"
     notice = frontend_api.get_llm_config_notice()
-    assert "设备私钥只保存在本机" in notice
-    assert "willy-default" in notice
-    assert "API-key" not in notice
+    assert "当前模型：*willy-default*。" in notice
+    assert "设备私钥" not in notice
 
 
-def test_managed_connection_check_uses_the_device_provider_and_hides_protocol_details(monkeypatch):
-    from willy.managed_gateway import ManagedGatewayError
-
-    profile = SimpleNamespace(profile_id="home-gateway", model="willy-default")
-    settings = SimpleNamespace(model="willy-default", provider_mode="managed", managed_profile=profile)
-    monkeypatch.setattr(frontend_api, "load_llm_settings", lambda _root: settings)
+def test_legacy_managed_config_notice_directs_user_to_byok(monkeypatch):
     monkeypatch.setattr(
         frontend_api,
-        "managed_gateway_usage_snapshot",
-        lambda _profile: {
-            "daily": {"settled_tokens": 125, "reserved_tokens": 25, "limit": 1_000_000},
-            "monthly": {"settled_tokens": 5_000, "reserved_tokens": 0, "limit": 10_000_000},
-        },
+        "load_llm_settings",
+        lambda _root: (_ for _ in ()).throw(
+            frontend_api.LLMConfigError("当前版本仅支持本地 API Key，托管网关已冻结")
+        ),
     )
 
+    notice = frontend_api.get_llm_config_notice()
+
+    assert "历史托管网关设置" in notice
+    assert "保存用户自配的 API Key" in notice
+
+
+def test_managed_connection_check_is_frozen_without_network(monkeypatch):
     result = frontend_api.test_managed_gateway_connection()
-    assert result["ok"] is True
-    assert "本日剩余 Token：999,850" in result["suggestion"]
-    assert "本月剩余 Token：9,995,000" in result["suggestion"]
-
-    monkeypatch.setattr(
-        frontend_api,
-        "managed_gateway_usage_snapshot",
-        lambda _profile: (_ for _ in ()).throw(ManagedGatewayError("managed_device_not_registered")),
-    )
-    denied = frontend_api.test_managed_gateway_connection()
-    assert denied["code"] == "managed_not_registered"
+    assert result["ok"] is False
+    assert result["code"] == "managed_gateway_frozen"
 
 
 class _ConnectionError(Exception):
@@ -918,7 +901,7 @@ def _connection_client(*, response=None, error=None):
     return client
 
 
-def test_llm_connection_uses_transient_form_values_and_forces_a_tool_call(tmp_path, monkeypatch):
+def test_llm_connection_uses_transient_form_values_and_requires_an_automatic_tool_call(tmp_path, monkeypatch):
     secret = "test-connection-secret"
     client = _connection_client(response=_tool_call_response())
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
@@ -939,7 +922,7 @@ def test_llm_connection_uses_transient_form_values_and_forces_a_tool_call(tmp_pa
     call = client.chat.completions.create.call_args.kwargs
     assert call["model"] == "compatible-model"
     assert call["timeout"] == frontend_api.LLM_CONNECTION_TIMEOUT_S
-    assert call["tool_choice"]["function"]["name"] == "willy_connection_check"
+    assert call["tool_choice"] == "auto"
     assert call["tools"][0]["function"]["name"] == "willy_connection_check"
     assert secret not in str(result)
 

@@ -55,3 +55,31 @@ def test_quantum_parameter_effects_require_confirmation_or_fork():
     )
     assert not charge.allowed
     assert charge.fork_only
+
+
+def test_step_specific_recovery_policy_does_not_cross_forcefield_or_md_stages():
+    policy = default_recovery_policy(build_default_tool_catalog())
+    catalog = build_default_tool_catalog()
+
+    opls = policy.authorize(
+        layer="topology", error_kind=ErrorKind.LIGPARGEN_FAILED, step=4,
+        tool=catalog.require("tools_retry_topo_opls"), arguments={"molecule_name": "EC"}, attempt=0,
+    )
+    gaff = policy.authorize(
+        layer="topology", error_kind=ErrorKind.LIGPARGEN_FAILED, step=4,
+        tool=catalog.require("tools_retry_topo_gaff"), arguments={"molecule_name": "EC"}, attempt=0,
+    )
+    assert opls.allowed
+    assert not gaff.allowed
+
+    em = policy.authorize(
+        layer="simulation", error_kind=ErrorKind.EM_NOT_CONVERGED, step=8,
+        tool=catalog.require("tools_retry_em"), arguments={"work_dir": "run"}, attempt=0,
+    )
+    assert em.allowed
+    eq_protocol = policy.authorize(
+        layer="simulation", error_kind=ErrorKind.EQ_NOT_CONVERGED, step=9,
+        tool=catalog.require("tools_retry_eq"), arguments={"work_dir": "run"}, attempt=0,
+    )
+    assert not eq_protocol.allowed
+    assert eq_protocol.requires_confirmation

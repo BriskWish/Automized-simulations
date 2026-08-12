@@ -11,7 +11,7 @@ from typing import Iterable, Mapping
 
 from willy.action_contract import ActionEffect, ActionToolCatalog, ToolDeclaration
 from willy.errors import ErrorKind
-from willy.step_registry import EQ_STEP, PROD_STEP, STEP_REGISTRY
+from willy.step_registry import EM_STEP, EQ_STEP, PROD_STEP, STEP_REGISTRY
 
 
 @dataclass(frozen=True)
@@ -107,20 +107,57 @@ def default_recovery_policy(catalog: ActionToolCatalog) -> RecoveryPolicy:
         ))
 
     # A stage cannot jump to a later stage while repairing an upstream failure.
+    # Specific rules bind recovery to the failed step/error rather than letting
+    # broad layer defaults cross forcefield or simulation-stage boundaries.
     rules.extend([
         RecoveryPolicyRule(
+            policy_id="quantum.resp", layer="quantum",
+            error_kinds=(ErrorKind.RESP_FAILED.value,), steps=(3,),
+            allowed_tools=("tools_diagnose_error_quantum", "tools_retry_chg_g16", "tools_retry_chg_g09", "tools_retry_chg_orca"),
+            max_attempts=3,
+        ),
+        RecoveryPolicyRule(
+            policy_id="topology.sobtop", layer="topology",
+            error_kinds=(ErrorKind.SOBTOP_FAILED.value, ErrorKind.FILE_NOT_FOUND.value), steps=(4,),
+            allowed_tools=("tools_diagnose_error_topology", "tools_retry_topo_gaff"),
+            max_attempts=3,
+        ),
+        RecoveryPolicyRule(
+            policy_id="topology.ligpargen", layer="topology",
+            error_kinds=(ErrorKind.LIGPARGEN_FAILED.value,), steps=(4,),
+            allowed_tools=("tools_diagnose_error_topology", "tools_retry_topo_opls"),
+            max_attempts=3,
+        ),
+        RecoveryPolicyRule(
+            policy_id="topology.assembly", layer="topology",
+            error_kinds=(ErrorKind.CONFIG_INVALID.value,), steps=(STEP_REGISTRY.by_id("topology_assemble").index,),
+            allowed_tools=("tools_diagnose_error_topology", "tools_retry_top_assembly"),
+            max_attempts=3,
+        ),
+        RecoveryPolicyRule(
+            policy_id="simulation.em", layer="simulation",
+            error_kinds=(ErrorKind.EM_NOT_CONVERGED.value, ErrorKind.GROMPP_FAILED.value,
+                         ErrorKind.ENGINE_FAILURE.value, ErrorKind.MDRUN_FAILED.value),
+            steps=(EM_STEP,), allowed_tools=("tools_diagnose_error_simulation", "tools_retry_em"),
+            max_attempts=3, restart_step=EM_STEP,
+        ),
+        RecoveryPolicyRule(
             policy_id="simulation.eq", layer="simulation",
-            error_kinds=(ErrorKind.EQ_NOT_CONVERGED.value, ErrorKind.EQUILIBRATION_FAILED.value,
-                         ErrorKind.ENGINE_FAILURE.value, ErrorKind.NUMERICAL_INSTABILITY.value),
+            # An EQ failure may require a scientific protocol change. The
+            # orchestrator owns proposal and explicit confirmation before a
+            # rerun, so no EQ error may fall through to a broad automatic
+            # simulation recovery rule.
+            error_kinds=("*",),
             steps=(EQ_STEP,), allowed_tools=("tools_diagnose_error_simulation", "tools_retry_eq", "tools_retry_em"),
-            max_attempts=3, requires_confirmation=False, restart_step=EQ_STEP,
+            max_attempts=3, requires_confirmation=True, restart_step=EQ_STEP,
         ),
         RecoveryPolicyRule(
             policy_id="simulation.prod", layer="simulation",
-            error_kinds=(ErrorKind.MDRUN_FAILED.value, ErrorKind.RECOVERY_CONFLICT.value,
-                         ErrorKind.ENGINE_FAILURE.value),
+            # Changing a production continuation can invalidate scientific
+            # output, therefore it is also a user-confirmed policy boundary.
+            error_kinds=("*",),
             steps=(PROD_STEP,), allowed_tools=("tools_diagnose_error_simulation", "tools_retry_prod"),
-            max_attempts=3, requires_confirmation=False, restart_step=PROD_STEP,
+            max_attempts=3, requires_confirmation=True, restart_step=PROD_STEP,
         ),
         RecoveryPolicyRule(
             policy_id="topology.fork", layer="topology",

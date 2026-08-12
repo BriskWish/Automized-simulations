@@ -21,15 +21,16 @@ from pathlib import Path
 from typing import TypedDict
 
 from willy._paths import get_project_root
+from willy.dependency_preflight import DependencyPreflightReport
 from willy.llm_config import (
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL,
     LLMConfigError,
+    MANAGED_GATEWAY_ENABLED,
     create_openai_client,
     form_llm_settings,
     load_llm_settings,
     validate_llm_values,
-    load_llm_provider_mode,
 )
 from willy.managed_gateway import (
     ManagedGatewayError,
@@ -199,15 +200,16 @@ _LLM_CONNECTION_PUBLIC_ERRORS: dict[str, tuple[str, str]] = {
         "托管网关连接超时",
         "检查网关负载、网络路径和防火墙设置后重试。",
     ),
+    "managed_gateway_frozen": (
+        "托管网关已冻结",
+        "当前版本仅支持在本机配置 OpenAI-compatible API Key。",
+    ),
 }
 
 
 def get_llm_provider_mode() -> str:
-    """Return a UI-safe mode even when a local file is temporarily malformed."""
-    try:
-        return load_llm_provider_mode(ROOT)
-    except LLMConfigError:
-        return "byok"
+    """Return the sole provider exposed by the current release."""
+    return "byok"
 
 def get_llm_config_status() -> str:
     """Report LLM configuration state without ever returning a credential."""
@@ -218,6 +220,8 @@ def get_llm_config_status() -> str:
     if settings is None:
         return "尚未配置 OpenAI-compatible LLM 服务。"
     if getattr(settings, "provider_mode", "byok") == "managed":
+        if not MANAGED_GATEWAY_ENABLED:
+            return "当前版本仅支持本地 API Key，托管网关已冻结。"
         profile = getattr(settings, "managed_profile", None)
         label = getattr(profile, "label", "托管网关")
         try:
@@ -239,10 +243,19 @@ def get_llm_config_notice() -> str:
     """Return the configuration-page privacy notice without exposing a key."""
     try:
         settings = load_llm_settings(ROOT)
-    except LLMConfigError:
+    except LLMConfigError as error:
+        if "托管网关已冻结" in str(error):
+            return (
+                "检测到历史托管网关设置。本版本已冻结该入口；"
+                "请填写并保存用户自配的 API Key、Base URL 和 Model 后继续使用。"
+            )
         settings = None
     model = settings.model if settings is not None else "当前无可用模型"
-    if settings is not None and getattr(settings, "provider_mode", "byok") == "managed":
+    if (
+        MANAGED_GATEWAY_ENABLED
+        and settings is not None
+        and getattr(settings, "provider_mode", "byok") == "managed"
+    ):
         return (
             "当前使用托管 LLM 网关；设备私钥只保存在本机受保护身份文件，"
             "接入申请由服务器计数并由管理员批准。LLM prompt 会经过网关运营者控制的服务。"
@@ -253,6 +266,19 @@ def get_llm_config_notice() -> str:
         "您提供的LLM只会在您电脑本地的.env配置。"
         f"当前模型：*{model}*。"
     )
+
+
+def run_local_dependency_preflight() -> DependencyPreflightReport:
+    """Run the advisory local dependency check requested from configuration UI.
+
+    This deliberately has no connection to launch eligibility.  A user can
+    still submit a local task after an incomplete report, where the normal
+    step-level dependency boundary remains responsible for an actionable
+    execution error.
+    """
+    from willy.dependency_preflight import run_dependency_preflight
+
+    return run_dependency_preflight(ROOT)
 
 
 def save_llm_config(api_key: str, base_url: str, model: str) -> str:
@@ -299,9 +325,11 @@ def save_llm_config(api_key: str, base_url: str, model: str) -> str:
 
 
 def save_llm_mode(mode: str) -> str:
-    """Persist only the local provider mode; managed endpoint fields stay immutable."""
+    """Compatibility entry point that refuses the archived managed provider."""
     normalized = mode.strip().lower() if isinstance(mode, str) else ""
-    if normalized not in {"byok", "managed"}:
+    if normalized == "managed" and not MANAGED_GATEWAY_ENABLED:
+        return "当前版本仅支持本地 API Key，托管网关已冻结。"
+    if normalized != "byok":
         return "LLM 模式无效。"
     env_path = ROOT / ".env"
     try:
@@ -310,8 +338,6 @@ def save_llm_mode(mode: str) -> str:
             line for line in existing_lines
             if line.split("=", 1)[0].strip() != "WILLY_LLM_MODE"
         ]
-        if normalized == "managed":
-            updated_lines.append("WILLY_LLM_MODE=managed")
         fd, temp_name = tempfile.mkstemp(prefix=".env-", suffix=".tmp", dir=ROOT)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -322,18 +348,18 @@ def save_llm_mode(mode: str) -> str:
             Path(temp_name).unlink(missing_ok=True)
     except OSError:
         return "LLM 模式保存失败，请检查项目目录的写入权限。"
-    if normalized == "managed":
-        try:
-            load_managed_gateway_profile(ROOT)
-        except ManagedGatewayError:
-            # The mode selection is valid even if a deployment profile arrives later.
-            pass
     _refresh_agent_llm_client()
-    return "已选择托管 LLM 网关。" if normalized == "managed" else "已选择自带 API Key。"
+    return "已选择自带 API Key。"
 
 
 def get_managed_gateway_status() -> dict[str, object]:
-    """Return a redacted local managed-profile/identity status for the UI."""
+    """Compatibility response for the frozen managed gateway UI contract."""
+    if not MANAGED_GATEWAY_ENABLED:
+        return {
+            "ok": False,
+            "code": "managed_gateway_frozen",
+            "message": "当前版本仅支持本地 API Key，托管网关已冻结。",
+        }
     try:
         profile = load_managed_gateway_profile(ROOT)
         state = managed_identity_status(profile)
@@ -350,7 +376,9 @@ def get_managed_gateway_status() -> dict[str, object]:
 
 
 def request_managed_gateway_registration() -> str:
-    """Submit this machine's public key for one server-counted registration slot."""
+    """Compatibility entry point that never creates an identity while frozen."""
+    if not MANAGED_GATEWAY_ENABLED:
+        return "当前版本仅支持本地 API Key，托管网关已冻结。"
     try:
         profile = load_managed_gateway_profile(ROOT)
         status = request_managed_registration(profile, store=ManagedIdentityStore())
@@ -485,10 +513,10 @@ def test_llm_connection(api_key: str, base_url: str, model: str) -> LLMConnectio
                 "content": "Call willy_connection_check with an empty object. Do not reply with text.",
             }],
             tools=[_LLM_CONNECTION_TOOL],
-            tool_choice={
-                "type": "function",
-                "function": {"name": _LLM_CONNECTION_TOOL_NAME},
-            },
+            # Some compatible providers support automatic function calling but
+            # reject forced ``tool_choice`` in their reasoning mode.  The
+            # returned call remains mandatory for a successful check.
+            tool_choice="auto",
             temperature=0,
             max_tokens=16,
             timeout=LLM_CONNECTION_TIMEOUT_S,
@@ -505,7 +533,9 @@ def test_llm_connection(api_key: str, base_url: str, model: str) -> LLMConnectio
 
 
 def test_managed_gateway_connection() -> LLMConnectionResult:
-    """Check the gateway and return this device's remaining token quota."""
+    """Compatibility check that performs no network operation while frozen."""
+    if not MANAGED_GATEWAY_ENABLED:
+        return _connection_result(False, "managed_gateway_frozen")
     try:
         settings = load_llm_settings(ROOT)
     except LLMConfigError:

@@ -228,6 +228,10 @@ def test_config_agent_requires_an_input_audit_and_freezes_audited_charge(tmp_pat
         ),
     )
     responses = iter([
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            tool_calls=None,
+            content=json.dumps({"backend": "g16", "residues": {"Li": 1}}),
+        ))]),
         SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[tool_call], content=""))]),
         SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=None, content=json.dumps(config)))]),
     ])

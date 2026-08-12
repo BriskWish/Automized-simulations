@@ -1,6 +1,6 @@
 # Willy 命名规范
 
-> 版本 1.4 · 最后核验 2026-08-08 · 适用于所有 `src/willy/` 下的模块、文件、LLM tool 名称
+> 版本 1.5 · 最后核验 2026-08-12 · 适用于所有 `src/willy/` 下的模块、文件、LLM tool 名称
 
 ## 实施状态
 
@@ -9,7 +9,7 @@
 | LLM tool 名称: `tools_{操作}_{目标}_{scope/backend}` | ✅ 已完成 — 全部 50 个 tool 已命名 |
 | Tool 模块文件: `toolist_{scope}.py` | ✅ 已完成 — 5 个文件 |
 | Agent 文件: `agent_{scope}.py` | ✅ 已完成 — 5 个文件（含只读运行助理） |
-| prompts 拆分到各 agent 文件 | ✅ 已完成 — `prompts.py` 已删除，每个 `agent_{scope}.py` 持有自己的 prompt |
+| Prompt 领域规则与共享契约 | ✅ 已完成 — `prompts.py` 已删除；各 `agent_{scope}.py` 持有领域规则，`prompt_contract.py` 持有版本化九段上下文和通用权限边界 |
 | 执行模块命名: `{动作}_{backend}.py` | ✅ 已完成 — `struct_g16.py` / `mdp.py` / `topo_gaff.py` 等 |
 
 **当前 agent ↔ toolist ↔ 执行模块对应关系：**
@@ -187,6 +187,7 @@ agent_{scope}.py
    - 实现层特定的 `handle_failure` 逻辑（如需重写）
 3. `layer_agent.py` 作为基类/基础设施，不遵循 `agent_` 前缀规则
 4. 未来新增 scope 时新增 `agent_{new_scope}.py`
+5. 用户可见的动态 Prompt 不得自行拼接完整配置、原始日志、绝对路径或产物清单；复用 `prompt_contract.py` 的九段结构化上下文，并由 Agent 仅提供经白名单归约的领域事实。
 
 ### `pipeline_orchestrator._init_agents` 实施结果
 
@@ -218,6 +219,7 @@ src/willy/
 ├── agent_simulation.py      ← Layer 3: Simulation Agent (含 SIMULATION_AGENT_PROMPT)
 ├── agent_run.py             ← Run Assistant（含 RUN_AGENT_PROMPT，只读）
 ├── layer_agent.py           ← Agent 基类（不遵循 agent_ 命名）
+├── prompt_contract.py       ← 用户可见助理的共享 Prompt 契约（非 agent）
 │
 ├── toolist_global.py        ← Layer 0 工具定义 + handler
 ├── toolist_quantum.py       ← Layer 1 工具定义 + handler
@@ -246,7 +248,7 @@ src/willy/
 
 | 维度 | 之前 | 之后 |
 |------|------|------|
-| prompt 归属 | `prompts.py` 集中存放，pipeline 跨层 import | 各自 `agent_{scope}.py` 内部持有 |
+| prompt 归属 | `prompts.py` 集中存放，pipeline 跨层 import | 各 `agent_{scope}.py` 持有领域规则；`prompt_contract.py` 统一动态上下文、权限和输出边界 |
 | tool 定义 | `*_tools.py` 分散命名 | 统一 `toolist_{scope}.py` |
 | LLM tool 名 | 口语化：`retry_chg_maker` / `retry_orca_chg_maker` | 结构化：`tools_retry_chg_g16` / `tools_retry_chg_orca` |
 | agent 文件 | 只有 `agent.py` + `layer_agent.py`，Layer 1-3 无独立文件 | 每层一个 `agent_{scope}.py` |

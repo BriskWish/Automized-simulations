@@ -2,7 +2,7 @@
 
 > 维护范围：`src/willy/remote_execution.py`、`src/willy/remote_registry.py`、`src/willy/simulation/` 的 GROMACS 适配、`frontend_api.py`、`app.py`、运行状态与远程执行测试。
 >
-> 状态：后续版本规划。本版本明确不加入 SSH、Slurm 或其他远程 GROMACS 执行；前端远程任务页保持“暂不支持”，全部输入冻结且不会将远程意图传入方案助理。本文件只保留未来版本的边界设计，不属于当前版本验收缺口或可用能力。
+> 状态：后续版本规划。本版本明确不加入 SSH、Slurm 或其他远程 GROMACS 执行；前端不提供远程任务入口，也不会将远程意图传入方案助理。本文件只保留未来版本的边界设计，不属于当前版本验收缺口或可用能力。
 >
 > 最后更新：2026-08-09。
 
@@ -131,7 +131,7 @@ profile 中的资源请求必须经本地 schema 校验并由用户在远程任�
 
 ## 6. 前端与 LLM 上下文
 
-“本地任务”是当前版本唯一可提交的入口；其方案助理固定写入 `execution.md.backend=local`。相邻的“远程任务”页保留为功能预告，但 SSH/Slurm 模式和 profile 输入均为禁用控件，显示“本版本暂不支持远程执行”，不会读取 profile、连接远端、提交任务，也不会向方案助理传递远程选择。它不显示或回填密码、私钥、绝对远端路径、完整 host、命令或原始日志。
+“本地任务”是当前版本唯一可提交的入口；其方案助理固定写入 `execution.md.backend=local`。当前前端不展示远程任务页、SSH/Slurm 模式或 profile 输入，不会读取 profile、连接远端、提交任务，也不会向方案助理传递远程选择。后续重新开放时仍不得显示或回填密码、私钥、绝对远端路径、完整 host、命令或原始日志。
 
 远程模式的配置方案确认必须展示“本地前序步骤 + 远程 MD 层”的边界和所选 profile 名称。Config Agent 注入的事实仅为 `remote_mode`、profile ID、启动器类型和脱敏预检结果；Simulation Agent 只接收已归类的阶段错误；Run Assistant 的新增只读事实是远端连接、同步、scheduler/job 状态和远端 GROMACS ETA。
 
@@ -144,7 +144,7 @@ profile 中的资源请求必须经本地 schema 校验并由用户在远程任�
 - 新增 `remote_registry.py`，严格解析私有 profile、权限、SSH alias、直连/Slurm schema 和脱敏 capability。
 - 扩展 `config_schema.py` / `workflow_config.py`，明确 `execution.md`，默认 `local`，并冻结到 run 配置。
 - 增加 `remote_execution.py` 的不可变 command/transfer/状态数据模型、预检接口和标准化错误。
-- 增加 remote profile 的前端只读 API；profile 选择和向 Config Agent 传递受限上下文延后至远程执行器接入时恢复。当前 UI 固定本地执行，并明确展示远程不可用。
+- 增加 remote profile 的前端只读 API；profile 选择和向 Config Agent 传递受限上下文延后至远程执行器接入时恢复。当前 UI 固定本地执行，远程入口保持移除状态。
 
 验收：无 profile 不影响现有本地 run；非法 profile、宽松权限、未知 profile、非受信任 host policy、非结构化 Slurm 资源、生成方案后切换 profile 均被拒绝且不启动子进程；Phase 2 前的远程确认不可静默回退本机；所有公开输出无密钥、host、路径和命令。
 
@@ -159,7 +159,7 @@ profile 中的资源请求必须经本地 schema 校验并由用户在远程任�
 
 ### Phase 3：恢复远程任务栏与运行助理
 
-- 在 SSH 执行器验收后，解除“远程任务”页的冻结，新增模式/profile 选择、连接测试和脱敏能力卡。
+- 在 SSH 执行器验收后，新增独立“远程任务”页、模式/profile 选择、连接测试和脱敏能力卡。
 - 运行助理新增远端只读状态/ETA/sync 事实；快速路径不调用 LLM。
 - 所有远程任务卡、状态卡和错误卡独立成气泡，避免与欢迎语或旧 run 信息混合。
 

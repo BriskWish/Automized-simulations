@@ -12,6 +12,10 @@ def test_mock_eval_public_report_excludes_prompts_traces_and_tool_arguments(tmp_
 
     assert report["mode"] == "mock"
     assert report["total"] == 6
+    # The harness scores actual diagnostic/recovery tool calls, schema,
+    # policy, and order instead of proxy LLM-call counts. RESP is included in
+    # the quantum diagnostic schema, so all six declared quantum routes now
+    # satisfy the same contract.
     assert report["passed"] == 6
     serialized = path.read_text(encoding="utf-8").lower()
     assert "trace" not in serialized

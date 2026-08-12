@@ -22,7 +22,7 @@ tests/reports/                   自动生成的测试目录与时间戳审计�
 | 理解整体架构、主流程和当前能力 | [`Willy.md`](Willy.md) |
 | 查团队职责、文档所有权和共同约束 | [`employees.md`](employees.md) |
 | 查分子参数、基组、力场、MD 参数或运行诊断证据状态 | [`knowledge.md`](knowledge.md)、[`knowledge_mdrun.md`](knowledge_mdrun.md) |
-| 理解量子、拓扑、模拟/后处理、远程 GROMACS、托管 LLM 网关或外部软件运行环境 | [`quantum_design.md`](quantum_design.md)、[`topology_design.md`](topology_design.md)、[`simulation_design.md`](simulation_design.md)、[`remote_execution_design.md`](remote_execution_design.md)、[`gateway.md`](gateway.md)、[`environment_registry_design.md`](environment_registry_design.md) |
+| 理解量子、拓扑、模拟/后处理或外部软件运行环境；查阅远程/Gateway 后续设计 | [`quantum_design.md`](quantum_design.md)、[`topology_design.md`](topology_design.md)、[`simulation_design.md`](simulation_design.md)、[`remote_execution_design.md`](remote_execution_design.md)、[`gateway.md`](gateway.md)、[`environment_registry_design.md`](environment_registry_design.md) |
 | 给前端或调用方接入状态与运行审计 | [`status_api.md`](status_api.md) |
 | 制定修订路线、确定边界和验收规则 | [`revision_strategy.md`](revision_strategy.md) |
 | 建设运行助理、运行历史与受控续跑 | [`run_assistant_design.md`](run_assistant_design.md) |
@@ -58,8 +58,8 @@ tests/reports/                   自动生成的测试目录与时间戳审计�
 | [`topology_design.md`](topology_design.md) | GAFF/OPLS 参数化、主拓扑和 ITP 修订契约。 |
 | [`simulation_design.md`](simulation_design.md) | GROMACS 输入、EM/EQ/PROD、回滚和产物契约。 |
 | [`environment_registry_design.md`](environment_registry_design.md) | 外部软件发现、环境变量优先级、预检和子进程环境的统一设计。 |
-| [`remote_execution_design.md`](remote_execution_design.md) | 仅 MD 层的 SSH/Slurm GROMACS 执行、profile、同步、停止、前端边界与验收计划。 |
-| [`gateway.md`](gateway.md) | 托管 LLM 网关、设备注册、白名单、用量、双模式客户端和安全发布计划。 |
+| [`remote_execution_design.md`](remote_execution_design.md) | 后续版本参考：MD 层 SSH/Slurm GROMACS 执行、profile、同步、停止和验收边界。 |
+| [`gateway.md`](gateway.md) | 后续版本参考：托管 LLM 网关、设备注册、白名单、用量、双模式客户端和安全发布计划。 |
 | [`status_api.md`](status_api.md) | 流水线状态、run 级审计字段和前端消费接口。 |
 
 ### 执行计划与运行类

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "batch_id": "live-protocol-20260812T094012Z",
+  "created_at": "2026-08-12T09:40:12.306837+00:00",
+  "software": {
+    "project_version": "0.2.0",
+    "python": "3.12.3",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2",
+    "tools": {
+      "python": "3.12.3",
+      "willy": "0.2.0",
+      "pytest": "9.1.1"
+    }
+  },
+  "config": {
+    "evaluation_mode": "live_protocol_fake_tools",
+    "model": "gpt-5.6-terra",
+    "endpoint_host": "api.forza0310.cn",
+    "configuration_fingerprint": "99404cb05cc00ca47ac4b30e411cacf9b938ff16364ca0a60c68fffcf29706e1"
+  },
+  "stages": [
+    {
+      "name": "text",
+      "phase": "live_protocol_fake_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "llm_calls": 1,
+        "tool_calls": 0,
+        "valid_tool_calls": 0,
+        "response_latency_ms": 1960.25
+      },
+      "checks": {
+        "failure_category": "",
+        "recommended_action": ""
+      },
+      "artifacts": []
+    },
+    {
+      "name": "natural_tool",
+      "phase": "live_protocol_fake_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "llm_calls": 1,
+        "tool_calls": 1,
+        "valid_tool_calls": 1,
+        "response_latency_ms": 1702.53
+      },
+      "checks": {
+        "failure_category": "",
+        "recommended_action": ""
+      },
+      "artifacts": []
+    },
+    {
+      "name": "required_tool",
+      "phase": "live_protocol_fake_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "llm_calls": 1,
+        "tool_calls": 1,
+        "valid_tool_calls": 1,
+        "response_latency_ms": 2101.19
+      },
+      "checks": {
+        "failure_category": "",
+        "recommended_action": ""
+      },
+      "artifacts": []
+    }
+  ],
+  "acceptance": {
+    "conclusion": "passed",
+    "completed": {
+      "cases": 3,
+      "passed": 3,
+      "failed": 0
+    },
+    "gates": {
+      "text": "passed",
+      "natural_tool": "passed",
+      "required_tool": "passed"
+    },
+    "preflight": {
+      "text_connectivity": "passed",
+      "model_tool_calling": "passed",
+      "required_tool_choice_compatibility": "passed"
+    },
+    "failure_categories": {},
+    "model": "gpt-5.6-terra"
+  }
+}

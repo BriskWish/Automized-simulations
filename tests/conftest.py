@@ -47,6 +47,7 @@ _TEST_LAYER_BY_FILE = {
     "test_mdrun_knowledge.py": "contract",
     "test_gateway.py": "integration",
     "test_gateway_admin.py": "integration",
+    "test_gateway_archive.py": "integration",
     "test_managed_gateway.py": "integration",
     "test_topology_contract.py": "integration",
 }

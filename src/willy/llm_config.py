@@ -29,6 +29,9 @@ LLM_BASE_URL_ENV = "WILLY_LLM_BASE_URL"
 LLM_MODEL_ENV = "WILLY_LLM_MODEL"
 LLM_PROVIDER_MODE_ENV = "WILLY_LLM_MODE"
 LEGACY_DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
+# The managed gateway protocol is retained as an archived implementation, but
+# this release deliberately exposes only the local BYOK provider.
+MANAGED_GATEWAY_ENABLED = False
 
 
 class LLMConfigError(ValueError):
@@ -92,20 +95,27 @@ def validate_llm_values(api_key: str, base_url: str, model: str) -> tuple[str, s
     return key, url, resolved_model
 
 
-def load_llm_provider_mode(project_root: str | Path | None = None) -> Literal["byok", "managed"]:
-    """Resolve the local mode choice; endpoint details are never browser input."""
+def load_llm_provider_mode(project_root: str | Path | None = None) -> Literal["byok"]:
+    """Resolve the local provider mode.
+
+    ``managed`` is retained as an archived selector for old ``.env`` files.
+    In the frozen release it is ignored and safely falls back to local BYOK;
+    no gateway profile is read and no file is rewritten here.
+    """
     value, _ = _configured_value(LLM_PROVIDER_MODE_ENV, project_root)
     mode = value.lower() if value else "byok"
-    if mode not in {"byok", "managed"}:
-        raise LLMConfigError("LLM 模式只能是 byok 或 managed")
-    return mode  # type: ignore[return-value]
+    if mode == "managed" and not MANAGED_GATEWAY_ENABLED:
+        return "byok"
+    if mode != "byok":
+        raise LLMConfigError("LLM 模式只能是 byok")
+    return "byok"
 
 
 def load_llm_settings(project_root: str | Path | None = None) -> LLMSettings | None:
     """Resolve one OpenAI-compatible service, or ``None`` when no key exists."""
     root = Path(project_root) if project_root is not None else get_project_root()
     mode = load_llm_provider_mode(root)
-    if mode == "managed":
+    if mode == "managed":  # pragma: no cover - reserved for a future release
         from willy.managed_gateway import ManagedGatewayError, load_managed_gateway_profile
 
         try:
@@ -147,6 +157,8 @@ def load_llm_settings(project_root: str | Path | None = None) -> LLMSettings | N
 def create_openai_client(settings: LLMSettings):
     """Construct the SDK client for a resolved OpenAI-compatible endpoint."""
     if settings.provider_mode == "managed":
+        if not MANAGED_GATEWAY_ENABLED:
+            raise LLMConfigError("当前版本仅支持本地 API Key，托管网关已冻结")
         from willy.managed_gateway import ManagedGatewayError, create_managed_openai_client
 
         if settings.managed_profile is None:
@@ -187,6 +199,8 @@ def configured_llm_client(project_root: str | Path | None = None):
     if settings is None:
         return None, None
     if settings.provider_mode == "managed":
+        if not MANAGED_GATEWAY_ENABLED:
+            raise LLMConfigError("当前版本仅支持本地 API Key，托管网关已冻结")
         from willy.managed_gateway import managed_identity_status
 
         if settings.managed_profile is None or managed_identity_status(settings.managed_profile) == "not_registered":

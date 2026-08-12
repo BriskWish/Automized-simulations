@@ -164,12 +164,14 @@ python3 -m tests.llm_eval.run_eval
 
 - `action_contract.py` 从五个 toolist 的 JSON Schema 与 `TOOL_META` 构建唯一的 50 项工具目录，声明 `read_only`、`retry_safe`、`requires_confirmation`、`requires_fork`、`destructive` 等效果等级；Config Agent 的 `tools_inspect_quantum_inputs` 与模拟层的 `tools_lookup_mdrun_knowledge` 均为只读、低风险工具。
 - `recovery_policy.py` 按 layer、错误类型、步骤和工具效果裁决重试上限、确认要求与 fork 限制；模型不能通过参数提升权限。
-- `LayerAgent` 对 JSON、tool 和 LLM 异常均写入受限的结构化决策；`llm_budget.py` 对单个 run 限制调用次数、累计时长、单次超时和连续失败熔断。
-- 确定性回归与 18 个离线 mock LLM 场景覆盖跨层工具隔离、恢复身份、升级和确认边界。
+- `LayerAgent` 以服务端状态机固定 `DIAGNOSE -> RECOVER`：诊断阶段只公开一个只读工具，恢复阶段只公开一个本层、当前错误和步骤允许的 `retry_safe` 工具，并以 `tool_choice="required"` 强制该唯一动作。服务端仍将其校验为该唯一工具名，并校验参数、层级和策略；文本、空调用、多工具、跨层工具和非法参数均终态升级。
+- 确认、派生 run、输入契约、运行依赖和锁冲突在模型调用前由策略终态化；EQ/PROD 的协议变更维持 `awaiting_confirmation`，不消耗修复次数。LLM 传输/协议失败写入受限决策且不调用 `start_retry`。`llm_budget.py` 继续限制单 run 调用次数、累计时长、单次超时和连续失败熔断。
+- Config Agent 已分为语义提取、服务端规范化、只暴露量子审计工具并以具名 `tool_choice` 固定执行的审计、无工具严格 JSON 与服务端校验五段；审计缺失不再以追加文本提醒后继续。
+- 评分器只接受真实观察到的工具名、参数 schema、顺序、层级和策略白名单，取消以 LLM 调用次数或重试次数代理工具得分。静态矩阵覆盖全部 `ErrorKind`、13 类配置和 20 类协议条件；18 个离线 mock 场景覆盖跨层工具隔离、恢复身份、升级和确认边界。
 
 仍需完成：
 
-- 在真实远程 LLM 服务上验证模型兼容性、超时和失败降级；该验证属于产品增强，必须显式 opt-in，不能由默认回归代替。
+- 使用当前 BYOK 配置先运行脱敏文本/自动工具协议探针，再运行 fake executor 的真实模型评测；2026-08-12 协议探针 3/3、配置 Agent 5/5 通过，恢复矩阵 17/18，唯一 `q_scf_001` 因模型在恢复阶段未调用允许的修复工具而由服务端安全升级。该验证属于产品增强，必须显式 opt-in，不能由默认回归代替；G-09 在稳定性修复或端点兼容性明确前保持开放。
 - 随实际修复策略扩展，持续将高影响动作收敛到可审计的确认或派生 run 流程。
 
 验收标准：

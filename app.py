@@ -15,13 +15,9 @@ from willy.frontend_api import (
     stop_pipeline,
     is_pipeline_running,
     get_llm_config_notice,
-    get_llm_provider_mode,
-    get_managed_gateway_status,
-    request_managed_gateway_registration,
+    run_local_dependency_preflight,
     save_llm_config,
-    save_llm_mode,
     test_llm_connection,
-    test_managed_gateway_connection,
     get_latest_run_control_state,
     run_assistant_pending_message,
     chat_run_assistant,
@@ -270,63 +266,6 @@ footer { display: none !important; }
     color: var(--button-secondary-text-color);
 }
 
-#llm-provider-mode .wrap {
-    display: grid !important;
-    gap: 0.65rem !important;
-    grid-template-columns: minmax(0, 1fr) !important;
-}
-
-#llm-provider-mode .wrap > label {
-    align-items: center;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    border-radius: 6px;
-    box-sizing: border-box;
-    color: var(--text);
-    cursor: pointer;
-    display: flex;
-    font-weight: 600;
-    gap: 0.7rem;
-    min-height: 3.4rem;
-    padding: 0.75rem 0.9rem;
-    transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
-}
-
-#llm-provider-mode .wrap > label input[type="radio"] {
-    appearance: none !important;
-    background: var(--input-bg) !important;
-    border: 2px solid #7c8580 !important;
-    border-radius: 50%;
-    flex: 0 0 auto;
-    height: 1.05rem;
-    margin: 0;
-    width: 1.05rem;
-}
-
-#llm-provider-mode .wrap > label input[type="radio"]:checked {
-    background: radial-gradient(circle at center, #111111 0 0.27rem, transparent 0.29rem) !important;
-    border-color: #1d2b24 !important;
-}
-
-#llm-provider-mode .wrap > label:has(input[type="radio"]:checked) {
-    background: #d5e5dc;
-    border-color: #2e6349;
-    box-shadow: 0 0.3rem 0.85rem rgba(46, 99, 73, 0.22);
-    color: #1d4634;
-}
-
-#llm-provider-mode .wrap > label:focus-within {
-    outline: 2px solid var(--status-running);
-    outline-offset: 2px;
-}
-
-.gradio-container.willy-dark #llm-provider-mode .wrap > label:has(input[type="radio"]:checked) {
-    background: #1e4938;
-    border-color: #66b88d;
-    box-shadow: 0 0.3rem 0.85rem rgba(0, 0, 0, 0.38);
-    color: #e6f4e9;
-}
-
 #stop-pipeline-button:disabled {
     background: #858d89 !important;
     border-color: #858d89 !important;
@@ -472,23 +411,6 @@ footer { display: none !important; }
     flex: 0 0 auto;
     height: 650px !important;
     margin-top: 0;
-}
-
-#remote-task-page {
-    margin: 0 auto;
-    max-width: 52rem;
-    padding: 1.25rem 0;
-}
-
-#remote-task-page .panel-title {
-    margin-bottom: 0.85rem;
-}
-
-#remote-capability-summary {
-    border-left: 3px solid var(--run-title);
-    color: var(--muted-text);
-    margin-top: 0.65rem;
-    padding-left: 0.8rem;
 }
 
 #proposal-input-row,
@@ -846,7 +768,7 @@ BEGINNER_GUIDE_HTML = """
 </section>
 <section class="guide-section">
     <h2>六、其他</h2>
-    <p>RDF、RMSD等可视化图表、SSH服务器连接为后续功能开发，欢迎各位用户提出宝贵意见和建议！</p>
+    <p>RDF、RMSD 等可视化图表仍为后续功能开发，欢迎各位用户提出宝贵意见和建议！</p>
 </section>
 """
 
@@ -1815,53 +1737,30 @@ def _test_llm_connection(api_key, base_url, model):
     )
 
 
-def _managed_gateway_status_markdown() -> str:
-    status = get_managed_gateway_status()
-    if not status.get("ok"):
-        return "托管网关描述尚不可用。请使用部署者随安装包提供的配置。"
-    state = status.get("device_state")
-    state_message = {
-        "not_registered": "本机尚未确认接入。确认后将发送设备公钥。",
-        "pending_or_approved": "本机已登记。管理员批准后可使用“检查托管服务”验证。",
-    }.get(state, "本机身份状态未知。")
-    return f"**{status['label']}** · 模型别名：`{status['model']}`。\n\n{state_message}"
-
-
-def _select_llm_mode(mode: str):
-    """Persist the provider selection without creating a device identity."""
-    normalized = mode if mode in {"managed", "byok"} else "byok"
-    result = save_llm_mode(normalized)
-    managed = normalized == "managed"
-    return (
-        gr.update(visible=managed),
-        gr.update(visible=not managed),
-        gr.update(value=get_llm_config_notice()),
-        gr.update(value=result),
+def _run_dependency_preflight():
+    """Render the advisory local dependency report without gating task launch."""
+    yield (
+        gr.update(value="正在检查本机运行依赖与内置 Vendor 软件..."),
+        gr.update(interactive=False),
+    )
+    try:
+        result = run_local_dependency_preflight()
+        markdown = result.get("markdown") if isinstance(result, Mapping) else ""
+        if not isinstance(markdown, str) or not markdown.strip():
+            markdown = "**依赖预检未返回有效结果。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
+    except Exception:
+        markdown = "**依赖预检执行失败。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
+    yield (
+        gr.update(value=markdown),
+        gr.update(interactive=True),
     )
 
-
-def _request_managed_gateway_registration():
-    """Request a single server-counted slot for this device public key."""
-    return request_managed_gateway_registration(), _managed_gateway_status_markdown()
-
-
-def _test_managed_gateway_connection():
-    """Expose only a public status while the device-bound check runs."""
-    yield gr.update(value="正在检查托管服务..."), gr.update(interactive=False)
-    result = test_managed_gateway_connection()
-    yield gr.update(value=_format_llm_connection_result(result)), gr.update(interactive=True)
-
-
-_REMOTE_MODE_PREVIEW_CHOICES = [
-    ("SSH", "ssh"),
-    ("Slurm", "slurm"),
-]
 
 _LOCAL_EXECUTION_CONTEXT = {
     "execution_mode": "local",
     "execution_profile_id": "local-default",
     "available": True,
-    "summary": "本版本仅支持本机 GROMACS；远程 SSH/Slurm 执行尚未开放。",
+    "summary": "本版本仅支持本机 GROMACS 执行。",
 }
 
 
@@ -1869,7 +1768,7 @@ def _proposal_execution_summary(context: Mapping[str, object]) -> str:
     """Render the selected intent and its server-side freeze boundary."""
     summary = context.get("summary")
     if not isinstance(summary, str) or not summary:
-        return "执行偏好暂不可读取；生成方案前不会选择远程执行。"
+        return "执行偏好暂不可读取；生成方案前不会启动计算。"
     return f"**当前方案执行方式**：{summary}"
 
 
@@ -2134,69 +2033,19 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                         gr.HTML("<div class='panel-title'>图表绘制</div>")
                         gr.HTML("<div class='development-placeholder'>开发中...</div>")
 
-        with gr.Tab("远程任务"):
-            with gr.Column(elem_id="remote-task-page"):
-                gr.HTML("<div class='panel-title'>远程任务</div>")
-                gr.Markdown(
-                    "**本版本暂不支持远程执行。**\n\n"
-                    "SSH/Slurm 的执行方式和配置输入已冻结；不会连接远程主机、"
-                    "不会提交任务，也不会影响本地任务的方案或流水线。",
-                    elem_id="remote-task-unavailable-notice",
-                )
-                execution_mode = gr.Radio(
-                    choices=_REMOTE_MODE_PREVIEW_CHOICES,
-                    value=None,
-                    label="远程执行方式（已冻结）",
-                    interactive=False,
-                    elem_id="remote-mode-selector",
-                )
-                execution_profile = gr.Dropdown(
-                    choices=[],
-                    value=None,
-                    label="远程执行配置（已冻结）",
-                    allow_custom_value=False,
-                    interactive=False,
-                    elem_id="remote-profile-selector",
-                )
-                remote_capability_summary = gr.Markdown(
-                    "远程 profile、连接预检、文件传输和调度提交将在后续版本开放。",
-                    elem_id="remote-capability-summary",
-                )
-
         with gr.Tab("配置"):
             llm_base_url, llm_model = llm_form_defaults()
-            llm_configuration_notice = gr.Markdown(get_llm_config_notice(), elem_id="llm-configuration-notice")
-            api_key_status = gr.Markdown("", elem_id="llm-configuration-status")
-            llm_mode = gr.Radio(
-                choices=[("托管网关（服务器）", "managed"), ("自带 API Key", "byok")],
-                value=get_llm_provider_mode(),
-                label="LLM 使用方式",
-                elem_id="llm-provider-mode",
+            gr.Markdown("### 1. LLM 配置", elem_id="llm-configuration-heading")
+            llm_configuration_notice = gr.Markdown(
+                get_llm_config_notice(),
+                elem_id="llm-configuration-notice",
             )
-            with gr.Column(visible=get_llm_provider_mode() == "managed") as managed_llm_config:
-                managed_gateway_status = gr.Markdown(
-                    _managed_gateway_status_markdown(), elem_id="managed-gateway-status",
-                )
-                with gr.Row():
-                    managed_register = gr.Button("确认接入", variant="primary", elem_id="managed-gateway-register")
-                    managed_test = gr.Button("检查托管服务", variant="secondary", elem_id="managed-gateway-test")
-                managed_register.click(
-                    fn=_request_managed_gateway_registration,
-                    outputs=[api_key_status, managed_gateway_status],
-                    trigger_mode="once",
-                    concurrency_limit=1,
-                    concurrency_id="managed-gateway-register",
-                    show_progress="hidden",
-                )
-                managed_test.click(
-                    fn=_test_managed_gateway_connection,
-                    outputs=[api_key_status, managed_test],
-                    trigger_mode="once",
-                    concurrency_limit=1,
-                    concurrency_id="managed-gateway-test",
-                    show_progress="hidden",
-                )
-            with gr.Column(visible=get_llm_provider_mode() != "managed") as byok_llm_config:
+            api_key_status = gr.Markdown("", elem_id="llm-configuration-status")
+            gr.Markdown(
+                "本版本仅支持用户自配 OpenAI-compatible API Key；托管网关配置入口已冻结。",
+                elem_id="llm-provider-notice",
+            )
+            with gr.Column() as byok_llm_config:
                 api_key_input = gr.Textbox(
                     label="OpenAI-compatible API Key",
                     placeholder="sk-***你的API key***",
@@ -2238,10 +2087,29 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                     inputs=[api_key_input, llm_base_url_input, llm_model_input],
                     outputs=[api_key_input, api_key_status],
                 )
-            llm_mode.change(
-                fn=_select_llm_mode,
-                inputs=[llm_mode],
-                outputs=[managed_llm_config, byok_llm_config, llm_configuration_notice, api_key_status],
+
+            gr.Markdown("### 2. 运行依赖预检", elem_id="dependency-preflight-heading")
+            gr.Markdown(
+                "检查本机外部软件、环境变量和内置 Vendor 软件。发现的外部工具会写入本项目 "
+                "`.env` 的缺失 `WILLY_*` 默认项；不会覆盖已有配置，也不会阻止本地任务启动。",
+                elem_id="dependency-preflight-notice",
+            )
+            dependency_preflight_button = gr.Button(
+                "预检运行依赖",
+                variant="secondary",
+                elem_id="dependency-preflight-button",
+            )
+            dependency_preflight_status = gr.Markdown(
+                "尚未执行依赖预检。",
+                elem_id="dependency-preflight-status",
+            )
+            dependency_preflight_button.click(
+                fn=_run_dependency_preflight,
+                outputs=[dependency_preflight_status, dependency_preflight_button],
+                trigger_mode="once",
+                concurrency_limit=1,
+                concurrency_id="dependency-preflight",
+                show_progress="hidden",
             )
 
         with gr.Tab("新手指南"):
@@ -2261,7 +2129,7 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                             <h2>参与者</h2>
                             <ul>
                                 <li>项目整体统筹：小w </li>
-                                <li>架构、交付、质量、网关：ChatGPT 5.6-terra </li>
+                                <li>架构、交付、质量：ChatGPT 5.6-terra </li>
                                 <li>前端、文档、测试、Tools等领域工程：ChatGPT 5.6-terra， DeepSeek V4 Pro </li>
                             </ul>
                         </section>
@@ -2278,7 +2146,6 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                             <ul>
                                 <li>扩展更多的工具链集成。</li>
                                 <li>提供历史运行对比，以及受控的后处理和图表能力。</li>
-                                <li>提供对服务器上的GROMACS软件远程控制功能。</li>
                             </ul>
                         </section>
                     </div>

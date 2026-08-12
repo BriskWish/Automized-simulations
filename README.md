@@ -2,11 +2,11 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **版本 0.2.0**：新增受控托管 LLM 网关服务器及 Willy 客户端 `managed/byok` provider，支持设备注册、短期令牌、模型白名单、额度和撤销审计。当前定位为本机/受控局域网试运行；OIDC、多实例、生产数据库、备份告警和公网部署仍未声明可用。
+> **版本 0.3.0**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版强化了配置生成、量子输入审计和受控错误恢复的 LLM 契约。
 
 > 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证；2026-08-11 的四条真实 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，使用 7 ns EQ、2 ns PROD，且根目录配置在批次结束后恢复。
 
-本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测、后处理/分析和 SSH/Slurm 远程执行不属于本版本公开能力。
+本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测和后处理/分析不属于本版本公开能力。
 
 ```
 用户: "Li 80, TFSI 80, FEC 300, 350K, 20ns"
@@ -79,23 +79,27 @@ pip install -e .
 
 ### 配置 LLM
 
-启动应用后，在“配置”页选择“自带 API Key”或“托管网关（服务器）”。前者允许填写 API Key、Base URL 和 Model；“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`。后者由安装包预置部署者提供的 `managed_gateway.json`；用户点击“确认接入”时才生成本机设备密钥并提交公钥，由网关按服务端名额自动批准或进入待审批，不会显示或接收上游 Key、Base URL 或邀请码。保存本机 BYOK 配置或切换模式后，应用会刷新 provider，无需重启。
+启动应用后，在“配置”页填写用户自有的 API Key、Base URL 和 Model。“测试连接”只使用当前表单值验证 Chat Completions 与工具调用，不会保存配置，也不会自动补 `/v1`；保存后应用会刷新本地 provider，无需重启。托管网关配置入口在本版本冻结。
 
 ```bash
 cp .env.example .env
 # 编辑 .env，填入 API Key、Base URL 和 Model
 ```
 
+配置页的“运行依赖预检”会在创建工程前按量子、拓扑和模拟三组展示内置 Vendor 与外部依赖的满足状态；每组任一完整可替代链路可用即通过。它会将从 `PATH` 或受限默认目录发现的可用外部软件写入缺失的 `WILLY_*` 默认项，不覆盖已有进程环境或 `.env` 设置，也不会阻止本地任务启动。实际运行仍按任务选定的后端和步骤进行强制预检。
+
 外部软件可使用 `WILLY_G16_BIN`、`WILLY_G09_BIN`、`WILLY_G09_FORMCHK_BIN`、`WILLY_ORCA_HOME`、`WILLY_GMX_BIN`、
 `WILLY_LIGPARGEN_BIN`、`WILLY_BOSS_HOME`、`WILLY_OBABEL_BIN`、`WILLY_CSH_BIN`
 等白名单变量覆盖发现结果；详细优先级和旧变量兼容规则见
 [`docs/environment_registry_design.md`](docs/environment_registry_design.md)。Sobtop 与 Packmol 为项目内置工具；OPLS-AA 的 Open Babel/C shell/BOSS 必须通过预检。
 
-### 检查环境
+### 命令行检查环境
 
 ```bash
 python3 -m willy.env_checker
 ```
+
+该命令列出逐模块的严格执行依赖；它不写入配置。日常首次部署优先使用配置页的“预检运行依赖”。
 
 ### 启动
 
@@ -174,7 +178,7 @@ AutomizedSimulations/
 │   ├── recovery_policy.py  ← 失败恢复白名单与重试上限
 │   ├── llm_config.py / llm_budget.py ← LLM 配置与运行级预算
 │   ├── config_schema.py / config_store.py ← 配置外层校验与原子写入
-│   ├── env_registry.py / env_checker.py ← 工具发现与依赖预检
+│   ├── env_registry.py / env_checker.py / dependency_preflight.py ← 工具发现、执行期预检与配置页建议性预检
 │   ├── pipeline_orchestrator.py ← 10 步主流程编排
 │   ├── pipeline_launch.py / pipeline_state.py / step_registry.py ← 启动、状态与步骤契约
 │   ├── run_registry.py / run_store.py / run_provenance.py ← run 审计、事务与溯源
@@ -200,8 +204,8 @@ AutomizedSimulations/
 │   ├── employees.md        ← 团队分工与共识
 │   ├── simulation_design.md ← 模拟设计
 │   ├── environment_registry_design.md ← 外部环境设计
-│   ├── remote_execution_design.md ← 远程执行设计
-│   ├── gateway.md           ← 托管 LLM 网关设计
+│   ├── remote_execution_design.md ← 后续版本远程执行参考
+│   ├── gateway.md           ← 后续版本网关参考
 │   ├── revision_strategy.md ← 修订路线与重构清单
 │   ├── testing_strategy.md ← 测试与发布门禁
 │   ├── run_assistant_design.md ← 运行助理计划

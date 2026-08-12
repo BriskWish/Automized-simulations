@@ -35,7 +35,7 @@ MANAGED_GATEWAY_PROFILE_FILENAME = "managed_gateway.json"
 _PROFILE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _MODEL_ALIAS = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _DEVICE_ID = re.compile(r"^[a-f0-9]{32}$")
-_CLIENT_VERSION = "0.2.0"
+_CLIENT_VERSION = "0.3.0"
 _REQUEST_TIMEOUT_S = 12.0
 
 

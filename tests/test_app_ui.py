@@ -300,9 +300,9 @@ def test_about_tab_exposes_project_summary_and_official_account_qr_code():
 
     assert "关于" in str(config)
     assert "Willy-方案助理" in str(config)
-    assert "架构、交付、质量、网关：ChatGPT 5.6-terra" in str(config)
+    assert "架构、交付、质量：ChatGPT 5.6-terra" in str(config)
     assert "重跑续跑计划" in str(config)
-    assert "服务器上的GROMACS软件远程控制功能" in str(config)
+    assert "服务器上的GROMACS软件远程控制功能" not in str(config)
     assert {
         "about-page",
         "about-qr-section",
@@ -358,7 +358,7 @@ def test_beginner_guide_sits_between_configuration_and_about_tabs():
         "LigParGen（仅 OPLS-AA 路径）",
         "完整 Open Babel 3",
         "WILLY_BOSS_HOME",
-        "RDF、RMSD等可视化图表、SSH服务器连接",
+        "RDF、RMSD 等可视化图表",
     ):
         assert guide_text in app_module.BEGINNER_GUIDE_HTML
     assert "#beginner-guide-page .guide-section" in app_module.APP_CSS
@@ -398,6 +398,46 @@ def test_configuration_tab_exposes_generic_llm_fields():
         for component in config["components"]
         if component["type"] == "button"
     )
+    elem_ids = {component["props"].get("elem_id") for component in components}
+    assert {
+        "llm-configuration-heading",
+        "dependency-preflight-heading",
+        "dependency-preflight-notice",
+        "dependency-preflight-button",
+        "dependency-preflight-status",
+    }.issubset(elem_ids)
+    component_order = [component["props"].get("elem_id") for component in components]
+    assert component_order.index("llm-configuration-heading") < component_order.index("dependency-preflight-heading")
+    assert "不会阻止本地任务启动" in str(config)
+
+
+def test_dependency_preflight_action_only_locks_its_own_button(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "run_local_dependency_preflight",
+        lambda: {"markdown": "**当前依赖满足完整 MD 最小链路。**"},
+    )
+
+    updates = list(app_module._run_dependency_preflight())
+
+    assert updates[0][0]["value"] == "正在检查本机运行依赖与内置 Vendor 软件..."
+    assert updates[0][1]["interactive"] is False
+    assert "满足完整 MD 最小链路" in updates[-1][0]["value"]
+    assert updates[-1][1]["interactive"] is True
+
+
+def test_dependency_preflight_failure_reenables_its_button(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "run_local_dependency_preflight",
+        lambda: (_ for _ in ()).throw(RuntimeError("private failure detail")),
+    )
+
+    updates = list(app_module._run_dependency_preflight())
+
+    assert "依赖预检执行失败" in updates[-1][0]["value"]
+    assert "private failure detail" not in updates[-1][0]["value"]
+    assert updates[-1][1]["interactive"] is True
 
 
 def test_llm_connection_action_shows_loading_and_public_success_or_failure(monkeypatch):
@@ -448,45 +488,26 @@ def test_saving_llm_config_does_not_trigger_connection_test(monkeypatch):
     assert test_calls == []
 
 
-def test_llm_configuration_exposes_mutually_exclusive_managed_controls():
+def test_llm_configuration_exposes_only_local_byok_controls():
     config = app_module.app.get_config_file()
     elem_ids = {component["props"].get("elem_id") for component in config["components"]}
 
-    assert {
+    assert {"llm-provider-notice", "test-llm-connection-button"}.issubset(elem_ids)
+    assert "本版本仅支持用户自配 OpenAI-compatible API Key" in str(config)
+    assert "托管网关配置入口已冻结" in str(config)
+    assert "一次性邀请码" not in str(config)
+    assert "托管网关（服务器）" not in str(config)
+    assert not {
         "llm-provider-mode",
         "managed-gateway-status",
         "managed-gateway-register",
         "managed-gateway-test",
-        "test-llm-connection-button",
-    }.issubset(elem_ids)
-    assert "托管网关（服务器）" in str(config)
-    assert "确认接入" in str(config)
-    assert "一次性邀请码" not in str(config)
-    assert "#llm-provider-mode .wrap" in app_module.APP_CSS
-    assert "grid-template-columns: minmax(0, 1fr) !important;" in app_module.APP_CSS
-    assert 'input[type="radio"]:checked' in app_module.APP_CSS
-    assert "radial-gradient(circle at center, #111111" in app_module.APP_CSS
-    assert '#llm-provider-mode .wrap > label:has(input[type="radio"]:checked)' in app_module.APP_CSS
-    assert "box-shadow: 0 0.3rem 0.85rem" in app_module.APP_CSS
-
-
-def test_managed_mode_switch_and_self_service_registration(monkeypatch):
-    mode_calls = []
-    monkeypatch.setattr(app_module, "save_llm_mode", lambda mode: mode_calls.append(mode) or "模式已保存")
-    monkeypatch.setattr(app_module, "get_llm_config_notice", lambda: "托管提示")
-
-    managed_column, byok_column, notice, status = app_module._select_llm_mode("managed")
-    assert mode_calls == ["managed"]
-    assert managed_column["visible"] is True
-    assert byok_column["visible"] is False
-    assert notice["value"] == "托管提示"
-    assert status["value"] == "模式已保存"
-
-    monkeypatch.setattr(app_module, "request_managed_gateway_registration", lambda: "设备已申请")
-    monkeypatch.setattr(app_module, "_managed_gateway_status_markdown", lambda: "等待管理员批准")
-    registration_status, gateway_status = app_module._request_managed_gateway_registration()
-    assert registration_status == "设备已申请"
-    assert gateway_status == "等待管理员批准"
+    }.intersection(elem_ids)
+    dependency_text = str(config["dependencies"])
+    assert "_select_llm_mode" not in dependency_text
+    assert "_request_managed_gateway_registration" not in dependency_text
+    assert "_test_managed_gateway_connection" not in dependency_text
+    assert "#llm-provider-mode" not in app_module.APP_CSS
 
 
 def test_theme_toggle_is_a_borderless_fixed_control_at_the_bottom_right():
@@ -1038,7 +1059,7 @@ def test_parameter_shorthand_is_revision_request_but_question_is_not():
     assert app_module._requests_pending_action_revision("为什么要调整 tau_t？") is False
 
 
-def test_remote_task_tab_is_frozen_and_local_task_is_the_active_entry():
+def test_current_ui_exposes_local_task_only():
     config = app_module.app.get_config_file()
     tab_labels = [
         component["props"].get("label")
@@ -1049,38 +1070,13 @@ def test_remote_task_tab_is_frozen_and_local_task_is_the_active_entry():
         component["props"].get("elem_id")
         for component in config["components"]
     }
-    radio_labels = {
-        component["props"].get("label")
-        for component in config["components"]
-        if component["type"] == "radio"
-    }
-    dropdown_labels = {
-        component["props"].get("label")
-        for component in config["components"]
-        if component["type"] == "dropdown"
-    }
-
-    assert tab_labels.index("本地任务") < tab_labels.index("远程任务") < tab_labels.index("配置")
-    assert {
-        "remote-task-page",
-        "remote-mode-selector",
-        "remote-profile-selector",
-        "remote-capability-summary",
-        "remote-task-unavailable-notice",
-    }.issubset(elem_ids)
-    assert "远程执行方式（已冻结）" in radio_labels
-    assert "远程执行配置（已冻结）" in dropdown_labels
+    assert tab_labels.index("本地任务") < tab_labels.index("配置")
+    assert "远程任务" not in tab_labels
+    assert not any(elem_id and elem_id.startswith("remote-") for elem_id in elem_ids)
     assert "主机地址" not in str(config)
     assert "私钥路径" not in str(config)
     assert "远程命令" not in str(config)
-    assert "#remote-capability-summary" in app_module.APP_CSS
-    assert "本版本暂不支持远程执行" in str(config)
-    controls = {
-        component["props"].get("elem_id"): component["props"]
-        for component in config["components"]
-    }
-    assert controls["remote-mode-selector"]["interactive"] is False
-    assert controls["remote-profile-selector"]["interactive"] is False
-    assert "value" not in controls["remote-mode-selector"]
+    assert "#remote-task-page" not in app_module.APP_CSS
     assert "refresh-remote-status-button" not in elem_ids
     assert app_module._LOCAL_EXECUTION_CONTEXT["execution_mode"] == "local"
+    assert "远程" not in app_module._LOCAL_EXECUTION_CONTEXT["summary"]

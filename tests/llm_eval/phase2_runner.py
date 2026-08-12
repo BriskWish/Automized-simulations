@@ -25,11 +25,32 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from types import SimpleNamespace
 
 from willy.errors import StepResult, StepError, ErrorKind, DiagnosisResult
 from .scenarios import SCENARIOS, ErrorScenario, MockLLMResponse
 from .harness import AgentTrace, ToolCallRecord
 from .scorer import Scorer, EvalResult
+
+
+class CountingLLMClient:
+    """Proxy an OpenAI-compatible client while retaining only call timings."""
+
+    def __init__(self, client):
+        self._client = client
+        self.call_count = 0
+        self.call_durations_s: list[float] = []
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create_completion),
+        )
+
+    def _create_completion(self, **kwargs):
+        started = time.monotonic()
+        self.call_count += 1
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        finally:
+            self.call_durations_s.append(time.monotonic() - started)
 
 # ============================================================
 # MockToolExecutor —— 受控的工具执行结果
@@ -225,7 +246,7 @@ class Phase2Harness:
                  llm_client, model: str = "deepseek-chat"):
         self.scenario = scenario
         self.tmp_path = tmp_path
-        self.llm_client = llm_client
+        self.llm_client = CountingLLMClient(llm_client)
         self.model = model
         self.trace = AgentTrace(
             scenario_id=scenario.scenario_id,
@@ -297,18 +318,16 @@ class Phase2Harness:
         self.trace.duration_s = time.time() - t_start
         self.trace.final_success = result.success
         self.trace.escalated = result.escalated
+        self.trace.recovery_terminal_reason = str(
+            result.extra.get("recovery_terminal_reason", "")
+        )
         self.trace.max_retries_configured = agent.max_retries
         self.trace.total_tool_calls = len(self._mock_executor.call_records)
         self.trace.tool_calls = self._mock_executor.call_records
         self.trace.retry_count = self._mock_executor._repair_attempt
 
-        # LLM 调用次数通过监控 API 调用来估算
-        # 简化: tool_calls 数量 + 最终响应
-        self.trace.total_llm_calls = (
-            self._mock_executor._diagnose_count +
-            self._mock_executor._repair_attempt +
-            1  # 最终响应
-        )
+        self.trace.total_llm_calls = self.llm_client.call_count
+        self.trace.provider_call_durations_s = list(self.llm_client.call_durations_s)
 
         if result.escalated and "escalation" in result.extra:
             self.trace.escalation_info = result.extra["escalation"]
@@ -316,8 +335,18 @@ class Phase2Harness:
         return self.trace
 
     def _create_layer_agent(self):
-        """创建 Agent 并注入真实 LLM client。"""
-        kw = dict(llm_client=self.llm_client, max_retries=5)
+        """Create an Agent with the production recovery policy and fake tools."""
+        from willy.action_contract import build_default_tool_catalog
+        from willy.recovery_policy import default_recovery_policy
+
+        catalog = build_default_tool_catalog()
+        kw = dict(
+            llm_client=self.llm_client,
+            model=self.model,
+            max_retries=5,
+            recovery_policy=default_recovery_policy(catalog),
+            tool_catalog=catalog,
+        )
 
         if self.scenario.layer == "quantum":
             from willy.agent_quantum import QuantumAgent
@@ -403,7 +432,20 @@ def run_phase2(
             for i, s in enumerate(scenarios)
         }
         for future in as_completed(futures):
-            result = future.result()
+            scenario = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                # One provider/network failure must not discard the remaining
+                # matrix. Keep only a bounded exception class/message in the
+                # in-memory trace; public reports never persist raw details.
+                trace = AgentTrace(
+                    scenario_id=scenario.scenario_id,
+                    layer=scenario.layer,
+                    escalated=True,
+                    errors_encountered=[f"{type(exc).__name__}: {str(exc)[:200]}"],
+                )
+                result = scorer.score(trace, scenario)
             with results_lock:
                 results.append(result)
 
