@@ -1,6 +1,6 @@
 # Willy 项目缺口与风险台账
 
-> 最后核验：2026-08-13，基于发布 `v0.4.0`。本文只记录当前可执行缺口和已分配任务；历史已解决事项列在文末，文档状态和责任人以 [`document_registry.md`](document_registry.md) 为准。
+> 最后核验：2026-08-13，基于发布 `v0.4.0` 及 Python 3.10 发布门禁修复提交 `e9617f1`。本文只记录当前可执行缺口和已分配任务；历史已解决事项列在文末，文档状态和责任人以 [`document_registry.md`](document_registry.md) 为准。
 
 ## 当前稳定基线
 
@@ -15,6 +15,16 @@ execution JSON/JUnit 尚未归档，因此 G-03 保持开放。
 
 本版本成熟方案的边界是：受支持 profile 从 Step 1 严格完成 Step 10，受管进程正常退出，最终状态为 `done`，阶段产物和 manifest/status 通过校验，且无未处理错误。该结论是流程完整性结论，不是科学体系预测。科学预测、后处理/分析、G09 可靠全链路和离子 OPLS 仍不属于本版本可用范围。
 
+### 2026-08-13 新环境验收增量
+
+新 Ubuntu 22.04 WSL 已安装 ORCA 与 GROMACS，并已完成内置 Packmol 周期盒和裸 GROMACS CUDA 最小运行。该环境现在可执行：
+
+1. 当前提交 `e9617f1` 的干净 Python 安装与默认回归；
+2. 显式 `WILLY_GMX_BIN` 下的 Willy 受管 GROMACS smoke；
+3. `orca_sobtop_electrolyte` 真实十步 profile。
+
+该环境没有 G16、LigParGen/BOSS，不能验收另外三条 profile。清除 `WILLY_GMX_BIN` 后 gmx 显示未配置是设计预期，不是 Willy 缺陷；裸 `gmx` CUDA 成功只作为硬件证据，不能替代 Willy 受管调用。ORCA profile 启动前必须确认 `orca` 和同安装目录的 `orca_2mkl` 均由 registry 解析为可用。
+
 ## 当前任务配置
 
 以下任务用于 v0.4.0 稳定版的收口和下一版准备；“非阻塞”任务不改变当前十步成熟方案声明。
@@ -22,9 +32,9 @@ execution JSON/JUnit 尚未归档，因此 G-03 保持开放。
 | 任务 | 负责人 | 当前动作 | 完成证据 | 优先级 |
 |------|------|------|------|------|
 | T-00 源码发行边界 | 开发者、0 号、5 号 | 已确定 GitHub 完整源码检出是唯一支持形态；不发布 wheel、PyPI、独立安装包或可运行 staging。README 已明确项目原创代码免费使用、再分发须事先授权，以及不向 `vendor/` 授予权利 | README、环境文档、预检和发布说明均只承诺源码检出运行；不得将第三方文件的可见性误表述为 Willy 授权 | 已关闭 |
-| T-01 发布环境复现 | 0 号、6 号 | 已实现不读取 `md_run/`、`.env` 或 `WILLY_*` 覆盖的隔离安装门禁；受控验收机的真实十步运行已证明兼容 Packmol 与标准外部环境可用。仍需在干净 Python 环境重装依赖，锁定 Python/OS/外部工具版本，运行 `pip check` 和默认回归 | 可重放的环境报告、`pytest -q`、compileall、测试台账无漂移 | P1 |
+| T-01 发布环境复现 | 0 号、6 号 | 已实现隔离安装门禁；新 Ubuntu 22.04 WSL 已有 ORCA、GROMACS 和 CUDA，仍需在当前提交 `e9617f1` 的全新含 pip 虚拟环境安装 `.[test]`，完成 `pip check`、默认回归、显式 `WILLY_GMX_BIN`/ORCA 解析和受管 smoke | 脱敏环境报告、`pytest -q`、compileall、测试台账无漂移，以及 Willy 解析显式配置的 gmx/orca | P1 |
 | T-02 第三方组件治理 | 0 号、5 号 | 已登记受管 vendor 的完整性、版本与许可状态；Packmol/Multiwfn 有可审计许可和哈希，Sobtop、精简 Open Babel、3Dmol 仍未补齐来源或再分发依据。外部 Gaussian、ORCA、LigParGen、BOSS、完整 Open Babel 不随项目提供 | README 版本/许可表与 `vendor/manifest.json` 一致；对未核实 vendor 补齐上游书面依据，或从公开 Git 源码中移除 | P1 |
-| T-03 外部 profile 可重放 | 0 号、6 号 | 已实现四个具名 profile 的只读终态/产物哈希证据契约；G16 + Sobtop 已在授权机完成真实十步运行，待归档为标准证据；其余三条在授权验收机串行重放，不纳入默认 CI | 四条 execution 证据、产物哈希、版本摘要和 JUnit | P1 |
+| T-03 外部 profile 可重放 | 0 号、6 号 | 四个具名 profile 的终态证据契约已实现；G16 + Sobtop 已有真实十步证据，新 WSL 可优先重放 ORCA + Sobtop；G16 + LigParGen、ORCA + LigParGen 仍需具备相应外置依赖的验收机 | 四条 execution JSON/JUnit、产物哈希、版本摘要；每条 `state=done` 且 Step 1--10 完成 | P1 |
 | T-04 网关部署安全（后续版本资产） | 7 号、0 号 | 保留网关协议和部署安全检查；本版本不开放入口、不做远程部署验收 | 后续版本独立部署检查清单和失败边界；不得写入当前发布主路径 | 后续 |
 | T-05 运行助理扩展 | 3 号、4 号、0 号 | 在现有状态、ETA、EQ 确认和停止基础上补通用错误指导、项目说明问答、resume/fork 和历史保留 | 每项能力有独立状态契约、mock eval 和用户可见结果 | P2 |
 | T-06 真实 LLM/BYOK 证据 | 4 号、6 号、0 号 | 先运行文本/自动工具协议探针，再以 fake executor 实测恢复和配置；浏览器 smoke 与外部执行严格分开；只保留脱敏结果 | 当前协议探针、真实模型 fake-tool 评测、浏览器同网络命名空间 JUnit/截图或明确失败记录 | P1 |
@@ -40,9 +50,9 @@ execution JSON/JUnit 尚未归档，因此 G-03 保持开放。
 | 编号 | 缺口 | 事实依据 | 关闭条件 |
 |------|------|------|------|
 | G-00 | 源码发行形态 | 已关闭：唯一支持形态已确定为 GitHub 完整源码检出与可编辑安装；根目录 `LICENSE.md` 与 README 写明 Willy 原创代码的免费使用和再分发授权边界。wheel、PyPI、独立安装包及可运行 staging 不属于本版本交付物 | 不再作为验收缺口；若未来切换到安装包或外置依赖模式，重新开启独立发行设计与干净安装验收 |
-| G-01 | 干净环境的依赖可复现性尚未形成发布证据 | 第二台受控 Ubuntu 验收机已证明在无 `WILLY_*` 覆盖时可经标准软件环境从 PATH 自动发现 G16、formchk 和 GROMACS；原 Packmol 需要 `GLIBC_2.34` 而宿主为 `GLIBC_2.31`。现内置 Packmol 已在 Ubuntu 20.04/glibc 2.31 重建为最大 `GLIBC_2.29`；在该验收机完成的 `md__202608120002` 已实际走完十步并产出 EM/EQ/PROD 固定产物，进一步证明兼容二进制可用于真实流程。代码已新增隔离安装、`pip check` 与最小环境门禁；当前主机缺少 `ensurepip`，门禁准确记录为 `python_venv_unavailable`，尚非干净安装通过证据 | 完成 T-01；在干净环境安装 Python venv 支持，保存脱敏环境报告和 `pip check`，更新验收机检出并重跑默认门禁 |
+| G-01 / T-01 | 开发者在新 WSL 的全新检出中创建含 pip 的虚拟环境，安装测试依赖并执行依赖预检、默认回归和最小受管 smoke | 0 号制定清单，6 号生成报告 | `pip check`、compileall、默认 pytest、显式 `WILLY_GMX_BIN`/ORCA 解析和 Willy 受管 smoke 均通过；保存版本、环境摘要和脱敏结果 |
 | G-02 | 仓内第三方组件的来源/许可证/再分发证据尚不完整 | Packmol 21.2.3（MIT）和 Multiwfn 3.8(dev)-2025-02-14（随附免费再分发/引用条款）已登记版本、哈希和许可证。Sobtop、精简 Open Babel 与遗留 3Dmol 的仓内负载仍无可审计的精确来源或再分发依据；README 只能声明 Willy 不拥有且不授予其权利，不能补足上游授权。Gaussian、ORCA、LigParGen、BOSS 和完整 Open Babel 均为用户外置安装 | 完成 T-02；为每个仓内第三方负载补齐上游书面许可、精确版本/来源和哈希，或将未核实负载从公开 Git 源码删除；不能用 Willy 作者的免责声明替代第三方授权 |
-| G-03 | 真实 profile 尚未形成当前版本的完整可重放 external 验收记录 | 已有历史批次证据；受控验收机的 `md__202608120002` 已以 G16 + Sobtop（GAFF/UFF）完成 Step 1--10，`state=done`、无公开错误，且 EM/EQ/PROD 固定产物存在，构成 1/4 路线的只读运行核验。四条具名 profile 的终态/阶段许可/产物哈希校验器已实现，但该路线尚未归档标准化 execution JSON/JUnit，另三条尚未在当前验收机重放；默认 CI 不执行高成本外部软件 | 完成 T-03；归档首条的脱敏 execution 证据与 JUnit，并在授权机重放其余三条具名 profile |
+| G-03 / T-03 | 开发者在新 WSL 单独运行 `orca_sobtop_electrolyte`，不调用四 profile 串行脚本 | 6 号提供 external profile 证据校验器和脱敏模板 | ORCA + Sobtop 从 Step 1 到 Step 10 完成，状态 `done`，阶段许可与固定产物哈希通过；保存 execution JSON/JUnit，失败也保存固定 issue code |
 
 ### P2：产品增强和治理
 
@@ -89,9 +99,9 @@ execution JSON/JUnit 尚未归档，因此 G-03 保持开放。
 
 | 缺口 | 开发者必须执行的人工验证 | AI 协作角色 | 通过条件与证据 |
 |------|------|------|------|
-| G-01 / T-01 | 开发者在干净机器或全新虚拟环境按已裁决的发行形态安装项目，实际运行预检、默认回归和最小导入 | 0 号制定清单，6 号生成报告 | 新环境无隐式旧配置；`pip check`、编译、默认测试和预检均通过；保存 Python/OS/工具版本及脱敏命令结果 |
+| G-01 / T-01 | 开发者在新 WSL 的全新检出中创建含 pip 的虚拟环境，安装测试依赖并执行依赖预检、默认回归和最小受管 smoke | 0 号制定清单，6 号生成报告 | `pip check`、compileall、默认 pytest、显式 `WILLY_GMX_BIN`/ORCA 解析和 Willy 受管 smoke 均通过；保存版本、环境摘要和脱敏结果 |
 | G-02 / T-02 | 开发者逐项核对仓内第三方二进制、示例数据和许可证，检查上游下载来源、精确版本、文件哈希与再分发书面依据；未核实项应从公开 Git 源码移除 | 5 号维护 vendor 清单，0 号审查边界 | 每个仓内第三方文件都有来源/许可证/版本/哈希与再分发依据，或不再随公开源码检出提供；不能用 Willy 的项目条款覆盖上游许可 |
-| G-03 / T-03 | 开发者归档已完成的 G16+Sobtop 运行的标准化脱敏证据，并在授权验收机串行运行 ORCA+Sobtop、G16+LigParGen、ORCA+LigParGen 三条剩余真实十步 profile | 6 号提供 external case、证据 schema 和结果校验 | 四条均从 Step 1 到 Step 10 完成，进程正常退出、状态为 `done`、产物契约通过；保存脱敏 execution JSON、JUnit 和产物哈希 |
+| G-03 / T-03 | 开发者在新 WSL 单独运行 `orca_sobtop_electrolyte`，不调用四 profile 串行脚本 | 6 号提供 external profile 证据校验器和脱敏模板 | ORCA + Sobtop 从 Step 1 到 Step 10 完成，状态 `done`，阶段许可与固定产物哈希通过；保存 execution JSON/JUnit，失败也保存固定 issue code |
 | G-05 / G-09 / T-06 | 开发者使用真实 OpenAI-compatible/BYOK 端点先运行 `python -m tests.llm_eval.live_protocol_runner`，再以 fake executor 运行恢复和配置评测，最后完成一次连接测试、方案生成和浏览器确认流程，并验证浏览器与后端处于同一网络命名空间 | 4 号提供 UI 检查点，6 号提供脱敏证据模板 | 文本与自动工具调用协议通过；每个应恢复场景实际观察到合法诊断后修复，确认型场景零工具且等待确认；量子审计未调用工具时安全拒绝。连接、等待、确认、停止和工程切换均符合预期；只保存脱敏结果、截图或 JUnit，不保存 Key、Authorization、prompt 或原始响应 |
 | G-06 / T-05 | 开发者人为制造 EQ 错误，分别测试查询状态、等待确认、修改方案、确认重跑、暂停文本和实际中止 | 3 号提供状态/进程观测工具，4 号提供气泡与控件检查点 | 未确认不执行；修改方案产生新 action；确认后从许可步骤重跑；暂停文本不杀进程；中止按钮能结束受管进程；保存状态/气泡顺序记录 |
 | G-07 / T-07 | 开发者逐个触发输入错误、外部依赖缺失、grompp/EQ/PROD 失败和 LLM 配置错误，观察用户文案与开发诊断是否分离 | 0 号维护错误分类，3/4 号提供各层错误样例和日志校验 | 前端只显示文件/操作级摘要和解决建议；私有日志含结构化 `run_id/step/error_kind`；无底层密钥、完整命令或原始日志泄露 |

@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+.venv/
 .willy/
 .pipeline.lock
 startup_audit.json
