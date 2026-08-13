@@ -2,7 +2,7 @@
 
 > 维护角色：6 号测试工程师
 > 最后更新：2026-08-13
-> 当前基线：2026-08-13 完整 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 925 条记录）。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；本轮其余回归覆盖 schema-v2 `run_manifest.json`、环境能力和 MDP metadata、可视化解析、温度/势能验收、Packmol ABI/终态、OPLS 字段恢复和结构化日志。外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
+> 当前基线：2026-08-13 完整 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 925 条记录）。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；本轮其余回归覆盖 schema-v2 `run_manifest.json`、环境能力和 MDP metadata、可视化解析、温度/势能验收、Packmol ABI/终态、OPLS 字段恢复和结构化日志。外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。Python 3.10 的测试 extras 会安装 `tomli`，作为发布门禁读取 TOML 的兼容解析器；Python 3.11 及以上继续使用标准库 `tomllib`。
 
 > **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest），测试台账为 **907 pytest + 18 LLM = 925 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要、前端建议、四条 profile 的只读终态证据契约、发布工件审计和客户端部署包运行态隔离均已有本地回归；目标机兼容 Packmol 的完整十步重放与浏览器实际运行仍需开发者验证。当前 staging 的 vendor 审计通过不等于它能运行 Sobtop 主链，wheel 也不属于支持的运行形态；这两项由 G-00/T-00 先行裁决。
 

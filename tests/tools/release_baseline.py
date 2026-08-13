@@ -18,9 +18,13 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from typing import Any
 import xml.etree.ElementTree as ET
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 CI support
+    import tomli as tomllib
 
 from tests.reporting.batch_report import (
     artifact_record,
