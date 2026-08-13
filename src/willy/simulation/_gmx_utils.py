@@ -1018,8 +1018,8 @@ def _gmx_missing_result(stage: str, started_at: float, inputs: GromacsInputs) ->
         step_name=f"md_{stage}", step_index=stage_step_index(stage), success=False,
         error=StepError(
             kind=ErrorKind.DEPENDENCY_MISSING,
-            message="未在当前 PATH 中找到 GROMACS 命令 gmx",
-            hint="安装 GROMACS 并确认 `gmx --version` 可在启动 Willy 的同一环境中执行",
+            message="未配置 GROMACS 可执行文件",
+            hint="将 GROMACS 可执行文件路径设置为 WILLY_GMX_BIN 后重新运行",
         ),
         duration_s=time.time() - started_at,
         extra={"inputs": _inputs_dict(inputs)},

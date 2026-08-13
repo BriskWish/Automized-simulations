@@ -160,7 +160,7 @@ _DEPENDENCY_DEFINITIONS: tuple[_DependencyDefinition, ...] = (
     _DependencyDefinition("BOSSdir", "envvar", "BOSSdir", "设置 WILLY_BOSS_HOME；兼容 BOSSdir，默认目录为 ~/boss/boss", tool_id="boss"),
     _DependencyDefinition("Open Babel", "binary", "obabel", "设置 WILLY_OBABEL_BIN 或将带格式插件的 obabel 加入 PATH", tool_id="obabel"),
     _DependencyDefinition("C shell", "binary", "csh", "设置 WILLY_CSH_BIN 或将 csh 加入 PATH（BOSS 脚本必需）", tool_id="csh"),
-    _DependencyDefinition("gmx", "binary", "gmx", "设置 WILLY_GMX_BIN 或将 gmx 加入 PATH", tool_id="gmx"),
+    _DependencyDefinition("gmx", "binary", "gmx", "设置 WILLY_GMX_BIN 为 GROMACS 可执行文件路径", tool_id="gmx"),
     _DependencyDefinition(
         "packmol", "file_exec", str(ROOT / "vendor" / "packmol"),
         "项目内置 Packmol 文件缺失", tool_id="packmol", bundled_dependency_id="packmol",

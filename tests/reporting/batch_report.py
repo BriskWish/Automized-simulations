@@ -23,6 +23,7 @@ BATCH_REPORT_SCHEMA_VERSION = 1
 _SECRET_KEY = re.compile(r"(?:api.?key|secret|token|password|credential|private.?key)", re.I)
 _RAW_KEY = re.compile(r"(?:raw|log|stderr|stdout|traceback|command|env(?:ironment)?)", re.I)
 _VERSION = re.compile(r"\b\d+(?:\.\d+){1,4}(?:[-+][0-9A-Za-z.-]+)?\b")
+_REASON_CODE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 
 
 class BatchReportError(ValueError):
@@ -132,6 +133,14 @@ def validate_batch_report(report: Mapping[str, Any]) -> dict[str, Any]:
             raise BatchReportError(f"报告缺少字段: {field}")
     if not isinstance(payload["stages"], list) or not payload["stages"]:
         raise BatchReportError("报告至少需要一个阶段")
+    for index, stage in enumerate(payload["stages"]):
+        if not isinstance(stage, Mapping):
+            raise BatchReportError(f"阶段必须是对象: stages[{index}]")
+        reason_code = stage.get("reason_code", "")
+        if reason_code and (
+            not isinstance(reason_code, str) or not _REASON_CODE.fullmatch(reason_code)
+        ):
+            raise BatchReportError(f"阶段原因码无效: stages[{index}]")
     if not isinstance(payload["acceptance"], Mapping):
         raise BatchReportError("acceptance 必须是对象")
     conclusion = payload["acceptance"].get("conclusion")
@@ -192,10 +201,18 @@ def report_from_command_results(
     checks = []
     for name, result in results.items():
         status = str(result.get("status", "not_run"))
+        supplied_reason_code = result.get("reason_code", "")
+        reason_code = (
+            supplied_reason_code
+            if isinstance(supplied_reason_code, str)
+            and _REASON_CODE.fullmatch(supplied_reason_code)
+            else ""
+        )
         stages.append({
             "name": name,
             "status": status,
             "phase": str(result.get("phase", name)),
+            "reason_code": reason_code,
             "metrics": {
                 str(key): int(value)
                 for key, value in dict(result.get("metrics", {})).items()
@@ -205,7 +222,14 @@ def report_from_command_results(
             "artifacts": [dict(item) for item in result.get("artifacts", []) if isinstance(item, Mapping)],
         })
         checks.append({"name": name, "status": status})
-    conclusion = "passed" if all(item["status"] == "passed" for item in checks) else "failed"
+    if any(item["status"] == "failed" for item in checks):
+        conclusion = "failed"
+    elif any(item["status"] == "blocked" for item in checks):
+        conclusion = "blocked"
+    elif all(item["status"] == "passed" for item in checks):
+        conclusion = "passed"
+    else:
+        conclusion = "not_run"
     return build_batch_report(
         batch_id=batch_id,
         project_version=project_version,

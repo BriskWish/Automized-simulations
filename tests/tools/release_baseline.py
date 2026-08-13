@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -34,15 +35,39 @@ ROOT = Path(__file__).resolve().parents[2]
 _IGNORED_DIRECTORIES = frozenset({
     ".git", ".pytest_cache", ".venv", "__pycache__", "md_run", "test-results",
 })
+_BASELINE_ENVIRONMENT_KEYS = frozenset({
+    "HOME", "LANG", "LC_ALL", "PATH", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "TZ",
+})
 
 
 def _copy_ignore(directory: str, names: list[str]) -> set[str]:
     ignored = {name for name in names if name in _IGNORED_DIRECTORIES}
+    # Keep public templates such as .env.example, but never copy an actual
+    # dotenv file into a release-test workspace.
+    ignored.update(
+        name
+        for name in names
+        if name == ".env" or (name.startswith(".env.") and name != ".env.example")
+    )
     current = Path(directory).resolve()
     source_root = Path(os.environ.get("WILLY_BASELINE_SOURCE", ROOT)).resolve()
     if current == source_root / "tests" and "reports" in names:
         ignored.add("reports")
     return ignored
+
+
+def _baseline_environment() -> dict[str, str]:
+    """Return the minimal host environment needed for Python-only gates.
+
+    In particular, do not inherit ``WILLY_*`` overrides from a developer's
+    active application session.  The gates receive their isolated paths only
+    after this function returns.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _BASELINE_ENVIRONMENT_KEYS
+    }
 
 
 def _project_version(root: Path) -> str:
@@ -61,6 +86,63 @@ def _run(name: str, command: list[str], *, cwd: Path, env: dict[str, str]) -> di
         "returncode": completed.returncode,
         "duration_s": round(time.monotonic() - started, 3),
         "status": "passed" if completed.returncode == 0 else "failed",
+    }
+
+
+def _run_isolated_install(
+    name: str,
+    *,
+    source_root: Path,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    """Install the source copy in a disposable venv and run only Python gates.
+
+    The venv lives under the temporary baseline copy.  It has no access to
+    ``md_run`` and this routine deliberately contains no scientific-tool
+    command, fixture or environment discovery.
+    """
+    started = time.monotonic()
+    if importlib.util.find_spec("ensurepip") is None:
+        return {
+            "name": name,
+            "returncode": 0,
+            "duration_s": 0.0,
+            "status": "blocked",
+            "reason_code": "python_venv_unavailable",
+        }
+    venv_dir = source_root / ".release-venv"
+    environment = dict(env)
+    environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    environment["PIP_NO_INPUT"] = "1"
+    commands = (
+        [sys.executable, "-m", "venv", str(venv_dir)],
+        [str(venv_dir / "bin" / "python"), "-m", "pip", "install", "--upgrade", "pip"],
+        [str(venv_dir / "bin" / "python"), "-m", "pip", "install", "-e", ".[test]"],
+        [str(venv_dir / "bin" / "python"), "-m", "pip", "check"],
+        [str(venv_dir / "bin" / "python"), "-c", "import willy"],
+    )
+    returncode = 0
+    try:
+        for command in commands:
+            completed = subprocess.run(
+                command,
+                cwd=source_root,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if completed.returncode:
+                returncode = completed.returncode
+                break
+    finally:
+        shutil.rmtree(venv_dir, ignore_errors=True)
+    return {
+        "name": name,
+        "returncode": returncode,
+        "duration_s": round(time.monotonic() - started, 3),
+        "status": "passed" if returncode == 0 else "failed",
+        "reason_code": "" if returncode == 0 else "isolated_install_failed",
     }
 
 
@@ -126,12 +208,19 @@ def create_baseline(source: Path, destination: Path, *, batch_id: str) -> Path:
         copied_junit = copy_root / "test-results" / "pytest.xml"
         copied_catalog = copied_reports / "test_case_catalog.md"
         copied_eval = copied_reports / "mock_llm_eval.json"
-        environment = dict(os.environ)
+        environment = _baseline_environment()
         environment.update({
+            # The copy has not necessarily been installed yet (for example
+            # when ensurepip is unavailable), so every Python-only gate must
+            # import this copy rather than an editable package on the host.
+            "PYTHONPATH": str(copy_root / "src"),
             "WILLY_ROOT": str(copy_root),
             "WILLY_EXTERNAL_SMOKE_FIXTURES": str(copy_root / "tests" / "fixtures" / "external"),
             "WILLY_EXTERNAL_SMOKE_EVIDENCE_DIR": str(copy_root / "tests" / "reports" / "external-smoke"),
         })
+        # Keep the release baseline limited to Python-level gates.  In
+        # particular, none of these commands may invoke a scientific tool or
+        # inspect an active run directory.
         commands = {
             "pytest": [sys.executable, "-m", "pytest", "-q", f"--junitxml={copied_junit.relative_to(copy_root)}"],
             "compileall": [sys.executable, "-m", "compileall", "-q", "src", "tests"],
@@ -139,11 +228,17 @@ def create_baseline(source: Path, destination: Path, *, batch_id: str) -> Path:
             "mock_llm_eval": [sys.executable, "-m", "tests.llm_eval.run_eval", "--json-output", str(copied_eval.relative_to(copy_root))],
         }
         results: dict[str, dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=len(commands), thread_name_prefix="release-gate") as executor:
+        with ThreadPoolExecutor(max_workers=len(commands) + 1, thread_name_prefix="release-gate") as executor:
             pending = {
                 executor.submit(_run, name, command, cwd=copy_root, env=environment): name
                 for name, command in commands.items()
             }
+            pending[executor.submit(
+                _run_isolated_install,
+                "isolated_install",
+                source_root=copy_root,
+                env=environment,
+            )] = "isolated_install"
             for future in as_completed(pending):
                 name = pending[future]
                 results[name] = future.result()
@@ -164,7 +259,12 @@ def create_baseline(source: Path, destination: Path, *, batch_id: str) -> Path:
             project_version=_project_version(copy_root),
             config=config_record(copy_root / "config.json", root=copy_root),
             results=results,
-            tools=collect_tool_versions(("pytest", "gmx", "g16", "g09", "orca", "sobtop")),
+            tools={
+                **collect_tool_versions(("pytest",)),
+                # The active interpreter can carry stale editable metadata;
+                # a source baseline must identify the copied source itself.
+                "willy": _project_version(copy_root),
+            },
         )
         return write_batch_report(destination / "batch_report.json", report)
 

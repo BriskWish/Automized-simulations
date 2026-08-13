@@ -6,6 +6,7 @@ from pathlib import Path
 
 from willy.env_registry import (
     AVAILABLE,
+    MISSING,
     MISCONFIGURED,
     RUNTIME_UNAVAILABLE,
     build_tool_env,
@@ -48,6 +49,19 @@ def test_dotenv_standard_override_is_loaded_from_project_root(tmp_path, monkeypa
     assert result.status == AVAILABLE
     assert result.source == "dotenv"
     assert result.executable == gmx.resolve()
+
+
+def test_gmx_does_not_fall_back_to_path(tmp_path, monkeypatch):
+    path_gmx = _executable(tmp_path / "gmx")
+    monkeypatch.delenv("WILLY_GMX_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    result = resolve_tool("gmx", project_root=tmp_path)
+
+    assert path_gmx.exists()
+    assert result.status == MISSING
+    assert result.source == "willy_env"
+    assert result.public_reason == "未设置 WILLY_GMX_BIN"
 
 
 def test_dotenv_value_uses_process_environment_before_dotenv(tmp_path, monkeypatch):

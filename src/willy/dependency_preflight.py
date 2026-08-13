@@ -140,7 +140,7 @@ _GROUPS = (
                 (_Requirement("gmx", "GROMACS", tool_id="gmx"), _PACKMOL),
             ),
         ),
-        "安装 GROMACS，或设置 WILLY_GMX_BIN 后重新检查。",
+        "安装 GROMACS 后，将其可执行文件路径设置为 WILLY_GMX_BIN 后重新检查。",
     ),
 )
 
@@ -155,7 +155,6 @@ _PERSISTED_ENV: dict[str, tuple[str, str]] = {
     "g09_formchk": ("WILLY_G09_FORMCHK_BIN", "executable"),
     "orca": ("WILLY_ORCA_HOME", "home"),
     "orca_2mkl": ("WILLY_ORCA_2MKL_BIN", "executable"),
-    "gmx": ("WILLY_GMX_BIN", "executable"),
     "ligpargen": ("WILLY_LIGPARGEN_BIN", "executable"),
     "obabel": ("WILLY_OBABEL_BIN", "executable"),
     "csh": ("WILLY_CSH_BIN", "executable"),

@@ -370,6 +370,27 @@ def _resolve_binary(spec: ToolSpec, project_root: str | Path | None) -> Resolved
     return ResolvedTool(spec.tool_id, spec.label, MISSING, source="path", public_reason="未在 PATH 中找到可执行文件")
 
 
+def _resolve_gmx(project_root: str | Path | None) -> ResolvedTool:
+    """Resolve GROMACS from Willy's explicit configuration only.
+
+    GROMACS installations often need a matching runtime environment.  This
+    project therefore deliberately does not infer a ``gmx`` binary from PATH:
+    the user must make the selected installation explicit through
+    ``WILLY_GMX_BIN`` in the process environment or the project ``.env``.
+    """
+    spec = TOOL_SPECS["gmx"]
+    value, source = _configured_value(spec.binary_env, project_root)
+    if value:
+        return _binary_result(spec, value, source, strict=True)
+    return ResolvedTool(
+        spec.tool_id,
+        spec.label,
+        MISSING,
+        source="willy_env",
+        public_reason="未设置 WILLY_GMX_BIN",
+    )
+
+
 def _resolve_multiwfn(project_root: str | Path | None) -> ResolvedTool:
     """Resolve only Willy's bundled Multiwfn runtime."""
     spec = TOOL_SPECS["multiwfn"]
@@ -482,6 +503,8 @@ def resolve_tool(tool_id: str, project_root: str | Path | None = None) -> Resolv
         return _resolve_multiwfn(project_root)
     if tool_id == "packmol":
         return _resolve_packmol(project_root)
+    if tool_id == "gmx":
+        return _resolve_gmx(project_root)
     if tool_id in {"orca", "orca_2mkl"}:
         return _resolve_orca_helper(spec, project_root)
     return _resolve_binary(spec, project_root)

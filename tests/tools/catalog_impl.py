@@ -20,7 +20,7 @@ COLLECTION_SUMMARY = re.compile(r"^(\d+) tests collected")
 CATEGORIES = {
     "A": {
         "title": "UI 与前端交互",
-        "files": {"test_app_ui.py", "test_frontend_api.py", "test_browser_workflow.py"},
+        "files": {"test_app_ui.py", "test_frontend_api.py", "test_browser_workflow.py", "test_e2e_gate.py"},
         "description": "Gradio 布局、确认式操作、可视化、状态展示、公开错误边界与 fake-executor 浏览器验收。",
     },
     "B": {
@@ -94,8 +94,11 @@ CATEGORIES = {
     },
     "J": {
         "title": "外部 Smoke 与发布证据",
-        "files": {"test_external_smoke.py", "test_batch_report.py"},
-        "description": "外部工具预检、fixture 完整性、脱敏批次报告、证据归档和 required 发布门禁。",
+        "files": {
+            "test_external_smoke.py", "test_external_profile_evidence.py", "test_batch_report.py",
+            "test_release_baseline.py", "test_release_staging.py",
+        },
+        "description": "外部工具预检、四条 profile 的只读终态证据、fixture 完整性、脱敏批次报告、证据归档和 required 发布门禁。",
     },
     "K": {
         "title": "托管 LLM 网关归档",
@@ -162,7 +165,11 @@ FILE_TARGETS = {
     "test_itp_namespace.py": "willy.topology.itp_namespace / OPLS-AA assembly namespace",
     "test_topology_contract.py": "willy.topology 后端与产物契约",
     "test_external_smoke.py": "willy.external_smoke / self-hosted CI gate",
+    "test_external_profile_evidence.py": "willy.external_profile_evidence / four-profile terminal evidence",
     "test_batch_report.py": "tests.reporting.batch_report",
+    "test_release_baseline.py": "tests.tools.release_baseline isolated release gate",
+    "test_release_staging.py": "scripts.build_release_staging / approved vendor staging",
+    "test_e2e_gate.py": "tests.e2e browser gate policy",
     "test_gateway.py": "willy_gateway FastAPI/SQLite gateway contract",
     "test_gateway_admin.py": "willy_gateway loopback administrator control plane",
     "test_gateway_offline_acceptance.py": "willy_gateway 离线 fake-upstream 验收",

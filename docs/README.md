@@ -1,6 +1,6 @@
 # Willy 文档索引
 
-> 本文件是 `docs/` 的唯一导航入口。文档用途、责任人和生命周期状态以 [`document_registry.md`](document_registry.md) 为准。最后整理：2026-08-11。
+> 本文件是 `docs/` 的唯一导航入口。文档用途、责任人和生命周期状态以 [`document_registry.md`](document_registry.md) 为准。最后整理：2026-08-13。
 
 ## 文档架构
 

@@ -605,8 +605,8 @@ def _run_gmx_checked(
         result = run_gmx(args, workspace, timeout=timeout_s, input_text=input_text)
     except FileNotFoundError as exc:
         raise PostprocessError(
-            "未在当前 PATH 中找到 GROMACS 命令 gmx。",
-            "安装 GROMACS 并确认启动 Willy 的同一环境可执行 gmx。",
+            "未配置 GROMACS 可执行文件。",
+            "将 GROMACS 可执行文件路径设置为 WILLY_GMX_BIN 后重新运行。",
             str(exc),
             ErrorKind.DEPENDENCY_MISSING,
         ) from exc

@@ -16,6 +16,13 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 
+def _browser_unavailable(message: str) -> None:
+    """Skip local convenience runs but fail an explicitly required CI gate."""
+    if os.environ.get("WILLY_E2E_REQUIRED", "").strip().lower() in {"1", "true", "yes"}:
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as socket_handle:
         socket_handle.bind(("127.0.0.1", 0))
@@ -24,7 +31,11 @@ def _free_port() -> int:
 
 @pytest.fixture
 def browser_api():
-    return pytest.importorskip("playwright.sync_api", reason="requires the optional Playwright browser runtime")
+    try:
+        from playwright import sync_api
+    except ImportError:
+        _browser_unavailable("requires the optional Playwright browser runtime")
+    return sync_api
 
 
 @pytest.fixture
@@ -101,4 +112,4 @@ def test_browser_workflow_uses_fake_executor_without_touching_a_real_run(browser
             assert screenshot.stat().st_size > 0
             browser.close()
     except browser_api.Error as exc:
-        pytest.skip(f"Playwright Chromium is unavailable: {exc}")
+        _browser_unavailable(f"Playwright Chromium is unavailable: {exc}")

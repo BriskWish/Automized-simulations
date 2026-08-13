@@ -50,6 +50,8 @@ _TEST_LAYER_BY_FILE = {
     "test_gateway_archive.py": "integration",
     "test_managed_gateway.py": "integration",
     "test_topology_contract.py": "integration",
+    "test_external_profile_evidence.py": "contract",
+    "test_release_staging.py": "contract",
 }
 
 

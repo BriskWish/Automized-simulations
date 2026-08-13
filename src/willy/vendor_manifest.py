@@ -22,7 +22,8 @@ from willy._paths import get_project_root
 MANIFEST_RELATIVE_PATH = Path("vendor") / "manifest.json"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_READY = "release_ready"
-_PENDING_STATUSES = {"evidence_pending", "exclude_from_release_artifact"}
+_EVIDENCE_PENDING = "evidence_pending"
+_EXCLUDED_FROM_RELEASE = "exclude_from_release_artifact"
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class VendorComponentAudit:
 
     component_id: str
     distribution_status: str
+    release_excluded_paths: tuple[str, ...]
     integrity_issues: tuple[str, ...]
     release_issues: tuple[str, ...]
 
@@ -76,6 +78,7 @@ class VendorManifestAudit:
                 {
                     "component_id": component.component_id,
                     "distribution_status": component.distribution_status,
+                    "release_excluded_paths": list(component.release_excluded_paths),
                     "integrity_issues": list(component.integrity_issues),
                     "release_issues": list(component.release_issues),
                 }
@@ -107,10 +110,113 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _release_exclusion_paths(component: Mapping[str, object]) -> tuple[str, ...]:
+    exclusion = component.get("release_exclusion")
+    if not isinstance(exclusion, Mapping):
+        return ()
+    raw_paths = exclusion.get("paths")
+    if not isinstance(raw_paths, list):
+        return ()
+    return tuple(value for value in raw_paths if isinstance(value, str))
+
+
+def _is_valid_exclusion_path(value: object) -> bool:
+    if not isinstance(value, str) or not value or Path(value).is_absolute():
+        return False
+    parts = Path(value.rstrip("/")).parts
+    return bool(parts) and all(part not in {"", ".", ".."} for part in parts)
+
+
+def _path_is_excluded(path: str, excluded_paths: tuple[str, ...]) -> bool:
+    return any(
+        path.startswith(excluded) if excluded.endswith("/") else path == excluded
+        for excluded in excluded_paths
+    )
+
+
+def _release_artifact_issues(component: Mapping[str, object], artifact_root: Path) -> list[str]:
+    """Check a prepared artifact without executing or altering its contents."""
+    component_id = component.get("id")
+    if not isinstance(component_id, str) or not component_id:
+        return ["invalid_component_id"]
+
+    status = component.get("distribution_status")
+    files = component.get("files")
+    if not isinstance(files, list):
+        return [f"missing_file_inventory:{component_id}"]
+
+    issues: list[str] = []
+    artifact_vendor = artifact_root / "vendor"
+    if status == _EXCLUDED_FROM_RELEASE:
+        for excluded_path in _release_exclusion_paths(component):
+            if not _is_valid_exclusion_path(excluded_path):
+                continue
+            candidate = artifact_vendor / excluded_path
+            if candidate.exists():
+                issues.append(f"excluded_vendor_path_present:{component_id}:{excluded_path}")
+        return issues
+
+    if status != _RELEASE_READY:
+        return [f"unreleasable_vendor_component:{component_id}:{status}"]
+
+    for record in files:
+        if not isinstance(record, Mapping):
+            continue
+        relative = record.get("path")
+        if not isinstance(relative, str):
+            continue
+        candidate = _safe_vendor_file(artifact_vendor, relative)
+        if candidate is None:
+            issues.append(f"unsafe_release_vendor_file:{component_id}:{relative}")
+        elif candidate.is_symlink() or not candidate.is_file():
+            issues.append(f"release_vendor_file_missing:{component_id}:{relative}")
+        else:
+            expected_size = record.get("size_bytes")
+            if isinstance(expected_size, int) and candidate.stat().st_size != expected_size:
+                issues.append(f"release_vendor_file_size_mismatch:{component_id}:{relative}")
+            expected_hash = record.get("sha256")
+            if isinstance(expected_hash, str) and _SHA256.fullmatch(expected_hash):
+                if _sha256_file(candidate) != expected_hash:
+                    issues.append(f"release_vendor_file_sha256_mismatch:{component_id}:{relative}")
+    return issues
+
+
 def _release_metadata_issues(component_id: str, component: Mapping[str, object], vendor_root: Path) -> list[str]:
     status = component.get("distribution_status")
-    if status in _PENDING_STATUSES:
-        return [f"distribution_evidence_pending:{component_id}:{status}"]
+    if status == _EVIDENCE_PENDING:
+        return [f"distribution_evidence_pending:{component_id}"]
+    if status == _EXCLUDED_FROM_RELEASE:
+        issues: list[str] = []
+        exclusion = component.get("release_exclusion")
+        excluded_paths = _release_exclusion_paths(component)
+        if not isinstance(exclusion, Mapping):
+            issues.append(f"missing_release_exclusion:{component_id}")
+        else:
+            reason = exclusion.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                issues.append(f"missing_release_exclusion_reason:{component_id}")
+            checks = exclusion.get("manual_verification")
+            if not isinstance(checks, list) or not checks or not all(
+                isinstance(value, str) and value.strip() for value in checks
+            ):
+                issues.append(f"missing_release_exclusion_manual_verification:{component_id}")
+        if not excluded_paths:
+            issues.append(f"missing_release_exclusion_paths:{component_id}")
+        else:
+            for path in excluded_paths:
+                if not _is_valid_exclusion_path(path):
+                    issues.append(f"invalid_release_exclusion_path:{component_id}:{path}")
+        files = component.get("files")
+        if isinstance(files, list) and excluded_paths:
+            for record in files:
+                if isinstance(record, Mapping):
+                    path = record.get("path")
+                    if isinstance(path, str) and not _path_is_excluded(path, excluded_paths):
+                        issues.append(f"uncovered_release_exclusion_file:{component_id}:{path}")
+        # An exclusion describes intent only. It stays a release gate until a
+        # package build proves the excluded paths are absent from its payload.
+        issues.append(f"release_artifact_exclusion_required:{component_id}")
+        return issues
     if status != _RELEASE_READY:
         return [f"invalid_distribution_status:{component_id}"]
 
@@ -133,11 +239,11 @@ def _release_metadata_issues(component_id: str, component: Mapping[str, object],
 
 def _audit_component(component: object, vendor_root: Path) -> VendorComponentAudit:
     if not isinstance(component, Mapping):
-        return VendorComponentAudit("<invalid>", "", ("invalid_component_record",), ())
+        return VendorComponentAudit("<invalid>", "", (), ("invalid_component_record",), ())
 
     component_id = component.get("id")
     if not isinstance(component_id, str) or not component_id:
-        return VendorComponentAudit("<invalid>", "", ("invalid_component_id",), ())
+        return VendorComponentAudit("<invalid>", "", (), ("invalid_component_id",), ())
 
     status = component.get("distribution_status")
     status_text = status if isinstance(status, str) else ""
@@ -177,6 +283,7 @@ def _audit_component(component: object, vendor_root: Path) -> VendorComponentAud
     return VendorComponentAudit(
         component_id,
         status_text,
+        _release_exclusion_paths(component),
         tuple(integrity_issues),
         tuple(_release_metadata_issues(component_id, component, vendor_root)),
     )
@@ -219,6 +326,99 @@ def audit_vendor_manifest(project_root: str | Path | None = None) -> VendorManif
     return VendorManifestAudit(manifest_path, tuple(components), tuple(issues))
 
 
+def release_ready_vendor_files(project_root: str | Path | None = None) -> tuple[str, ...]:
+    """Return manifest-listed vendor files permitted in a release artifact."""
+    root = _project_root(project_root)
+    audit = audit_vendor_manifest(root)
+    if not audit.integrity_ok:
+        raise ValueError("vendor manifest integrity must pass before staging")
+    try:
+        payload = json.loads((root / MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("vendor manifest is unavailable") from exc
+    components = payload.get("components") if isinstance(payload, Mapping) else None
+    if not isinstance(components, list):
+        raise ValueError("vendor manifest components are unavailable")
+    files: list[str] = []
+    for component in components:
+        if not isinstance(component, Mapping) or component.get("distribution_status") != _RELEASE_READY:
+            continue
+        records = component.get("files")
+        if not isinstance(records, list):
+            raise ValueError("release-ready vendor component has no file inventory")
+        for record in records:
+            path = record.get("path") if isinstance(record, Mapping) else None
+            if not isinstance(path, str) or _safe_vendor_file(root / "vendor", path) is None:
+                raise ValueError("release-ready vendor component has an unsafe file path")
+            files.append(path)
+    return tuple(dict.fromkeys(files))
+
+
+def audit_release_artifact(
+    artifact_root: str | Path,
+    *,
+    manifest_project_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Return release-artifact vendor boundary violations.
+
+    ``artifact_root`` is an already-built staging directory, not an archive and
+    not the source checkout. The function never invokes vendor programs; it
+    checks the inclusion/exclusion contract plus declared file sizes and
+    SHA-256 values from the source manifest.
+    """
+    source_root = _project_root(manifest_project_root)
+    artifact = Path(artifact_root).resolve()
+    manifest_path = source_root / MANIFEST_RELATIVE_PATH
+    try:
+        parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ("vendor_manifest_unavailable_for_artifact_audit",)
+    if not isinstance(parsed, Mapping) or not isinstance(parsed.get("components"), list):
+        return ("vendor_manifest_unavailable_for_artifact_audit",)
+
+    artifact_vendor = artifact / "vendor"
+    issues: list[str] = []
+    allowed_files = {"manifest.json"}
+    for component in parsed["components"]:
+        if isinstance(component, Mapping):
+            issues.extend(_release_artifact_issues(component, artifact))
+            if component.get("distribution_status") == _RELEASE_READY:
+                files = component.get("files")
+                if isinstance(files, list):
+                    allowed_files.update(
+                        record["path"]
+                        for record in files
+                        if isinstance(record, Mapping) and isinstance(record.get("path"), str)
+                    )
+
+    artifact_manifest = artifact_vendor / "manifest.json"
+    if artifact_manifest.is_symlink() or not artifact_manifest.is_file():
+        issues.append("release_vendor_manifest_missing")
+    elif artifact_manifest.read_bytes() != manifest_path.read_bytes():
+        issues.append("release_vendor_manifest_mismatch")
+
+    if artifact_vendor.is_dir():
+        for candidate in artifact_vendor.rglob("*"):
+            if candidate.is_dir():
+                continue
+            relative = candidate.relative_to(artifact_vendor).as_posix()
+            if candidate.is_symlink():
+                issues.append(f"release_vendor_symlink_not_allowed:{relative}")
+            elif relative not in allowed_files:
+                issues.append(f"unexpected_release_vendor_file:{relative}")
+    return tuple(issues)
+
+
+def release_artifact_ready(audit: VendorManifestAudit, artifact_issues: tuple[str, ...]) -> bool:
+    """Whether a concrete artifact closes declared exclusion-only release gates."""
+    unresolved = [
+        issue
+        for issue in audit.release_issues
+        if not issue.startswith("release_artifact_exclusion_required:")
+    ]
+    return audit.integrity_ok and not unresolved and not artifact_issues
+
+
 def format_vendor_manifest_audit(audit: VendorManifestAudit) -> str:
     """Render an operator-safe audit summary without machine-local paths."""
     lines = [
@@ -229,6 +429,8 @@ def format_vendor_manifest_audit(audit: VendorManifestAudit) -> str:
     for component in audit.components:
         result = "ok" if not component.integrity_issues else "integrity_failed"
         lines.append(f"- {component.component_id}: {result}; distribution={component.distribution_status}")
+        if component.release_excluded_paths:
+            lines.append(f"  excluded paths: {', '.join(component.release_excluded_paths)}")
     for issue in audit.release_issues:
         lines.append(f"  ! {issue}")
     return "\n".join(lines)

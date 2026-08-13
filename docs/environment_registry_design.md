@@ -2,7 +2,7 @@
 
 > 维护范围：`src/willy/env_registry.py`、`src/willy/env_checker.py` 及外部软件调用适配器。
 > 状态：核心实现完成；启动级全局缓存、版本兼容性判定和自动后端重规划待后续评估。
-> 最后更新：2026-08-12。
+> 最后更新：2026-08-13。
 
 ## 1. 目标与边界
 
@@ -35,7 +35,7 @@ Willy 同时依赖项目内置程序和用户安装的外部程序。当前运�
 | `orca` | `WILLY_ORCA_BIN`、`WILLY_ORCA_HOME` | `ORCA_DIR` | `PATH:orca` |
 | `orca_2mkl` | `WILLY_ORCA_2MKL_BIN`、`WILLY_ORCA_HOME` | `ORCA_DIR` | ORCA 同目录或 `PATH:orca_2mkl` |
 | `multiwfn` | 无（固定内置负载） | 无 | `vendor/multiwfn/.../Multiwfn` |
-| `gmx` | `WILLY_GMX_BIN` | 无 | `PATH:gmx` |
+| `gmx` | `WILLY_GMX_BIN` | 无 | 不自动发现；仅进程环境或 `.env` 中的显式值 |
 | `ligpargen` | `WILLY_LIGPARGEN_BIN` | 无 | `PATH:LigParGen`；执行时以私有兼容入口调用已配置的 `obabel` |
 | `obabel` | `WILLY_OBABEL_BIN` | 无 | `PATH:obabel`；必须是含格式插件和数据文件的完整 Open Babel 安装 |
 | `csh` | `WILLY_CSH_BIN` | 无 | `PATH:csh`；BOSS 运行脚本所必需 |
@@ -79,10 +79,10 @@ Willy 同时依赖项目内置程序和用户安装的外部程序。当前运�
 | 外部组件 | 当前开发机 | 目标范围 | 证据边界 |
 |---|---|---|---|
 | GROMACS | 2025.0 | 计划验收 2023、2024、2025；代码理论下限为提供统一 `gmx` 前端的 5.0 | 仅 2025.0 有本机真实链路证据，其他版本不得表述为已支持 |
-| Packmol | 21.2.3 | Linux x86_64，glibc >= 2.29 | 官方 `v21.2.3` 源码在 Ubuntu 20.04/glibc 2.31、gfortran 9.4.0 上以通用 x86-64 选项构建；本机与 Ubuntu 20.04 最小周期盒 smoke 均通过 |
+| Packmol | 21.2.3 | Linux x86_64，glibc >= 2.29，宿主 `libgfortran.so.5` | 官方 `v21.2.3` 源码在 Ubuntu 20.04/glibc 2.31、gfortran 9.4.0 上以通用 x86-64 选项构建；当前二进制动态依赖 GCC GNU Fortran runtime。Ubuntu/Debian 用户安装 `libgfortran5`，无需配置 Packmol 路径 |
 | Sobtop | 内置 Linux x86_64 二进制 | 固定随仓库版本 | 当前 Linux x86_64/glibc 基线 |
 | Open Babel | 3.1.1 | OPLS 使用完整 Open Babel 3；内置仅为精简运行时 | 完整格式插件仍由用户安装 |
-| Multiwfn | 3.8(dev)，更新于 2025-02-14 | 固定 `3.8-dev-2025-02-14` 的 Linux x86_64 包 | 已接入 vendor，默认不依赖外部安装 |
+| Multiwfn | 3.8(dev)，更新于 2025-02-14 | 固定 `3.8-dev-2025-02-14` 的 Linux x86_64 包，宿主 `libXm.so.4` | 已接入 vendor，不需要配置路径；当前二进制依赖 Motif/X11 runtime，Ubuntu/Debian 用户安装 `libxm4` |
 | ORCA | 6.1.1 | ORCA 6.x | 外部安装、按许可证部署 |
 | Gaussian 16 | 已发现，精确 revision 未探测 | 用户的合法 G16 安装 | 外部安装、按许可证部署 |
 | Gaussian 09 | 当前未发现 | 用户的合法 G09 安装及同安装来源的 `formchk` | 外部安装；必须显式设置两项 G09 变量，不能混用 PATH 中的 G16 `formchk` |
@@ -127,7 +127,7 @@ GAFF+UFF 主链使用已有 `.chg` 时不会调用该菜单，但它不能成为
 正文引用 2012 JCC 和 2024 JCP 论文。发行包必须保留许可证和引用通知；销售修改后的
 Multiwfn 本体前必须取得原作者许可。
 
-### 2.3 Vendor 清单与发布边界
+### 2.3 Vendor 清单、版本与许可边界
 
 `vendor/manifest.json` 是内置运行负载的发行清单：每个受管文件登记大小与 SHA-256，
 并明确其来源、版本、许可证证据和发行状态。运行时不会读取该清单，也不会因为审计而启动
@@ -136,16 +136,64 @@ Packmol、Sobtop、Multiwfn 或 Open Babel；它只由下列只读命令在 CI �
 ```bash
 python3 scripts/verify_vendor_manifest.py
 python3 scripts/verify_vendor_manifest.py --require-release-ready
+python3 scripts/verify_vendor_manifest.py --artifact-root <unpacked-release-root> --require-release-ready
 ```
 
 前者必须始终通过，防止受管二进制和参数文件在未知条件下漂移。后者会将未补齐来源、版本或
 许可证的组件视为发布阻塞。当前 Multiwfn 和 Packmol 已达到 `release_ready`；Sobtop、
-精简 Open Babel 和遗留 `3Dmol-min.js` 均明确标为 `evidence_pending` 或
-`exclude_from_release_artifact`，不能在正式发行前静默通过。Sobtop 示例目录也不属于受管
-运行时；发布包必须在打包规则中排除它，或另行登记其来源、许可证与示例数据保留理由。
+精简 Open Babel 和遗留 `3Dmol-min.js` 均登记为 `exclude_from_release_artifact`，其清单内
+显式列出待排除路径、仓内无法证明的原因和人工核验步骤。排除不是授权结论，也不等于发行
+就绪：在实际打包器能证明这些路径没有进入工件之前，`--require-release-ready` 必须保持失败。
+Sobtop 的整个目录（含示例）均在排除范围内；若后续希望随包发行，必须先单独登记其来源、
+许可证与示例数据保留理由。
 
-这项清单不替代外部科学软件许可证：Gaussian、ORCA、LigParGen、BOSS 与完整 Open Babel
-仍由用户在合法环境中安装，且各 profile 的真实执行证据仍由 external smoke 负责。
+发布构建完成后，还必须将解压后的 staging 根目录传给
+`--artifact-root --require-release-ready`。该纯文件检查验证 `release_ready` 组件所登记文件
+的大小与 SHA-256、清单自身以及其余未登记文件；同时检查 `exclude_from_release_artifact`
+组件的全部登记路径均不在工件中。它不解压归档、不启动程序、不替代许可证人工复核。工件
+通过这一步后，待证据组件的排除才可视为已实际落实；若要把它们重新随包发行，仍需补齐其
+上游来源、精确版本、许可文本与再分发依据。
+
+受控 staging 只用于审计，不是当前项目的交付包。若需要复核 staging 文件边界，可使用：
+
+```bash
+python3 scripts/build_release_staging.py --output /安全的空目录/willy-release
+python3 scripts/verify_vendor_manifest.py \
+  --artifact-root /安全的空目录/willy-release \
+  --require-release-ready
+```
+
+构建器只复制 Git 跟踪的非 vendor 文件，再复制清单中 `release_ready` 的 vendor 文件和同一份
+`vendor/manifest.json`；源工作树和目标目录均必须干净/为空。它不执行任何二进制、不会读取 `.env` 或 `md_run/`，且在
+复制后立即执行同一份 artifact audit。CI 的 quality 门禁执行这两条检查；不得把该 staging 表述为当前可运行发行物。
+
+**当前发行形态（2026-08-13）**：开发者已确定只支持从 GitHub 完整源码检出后运行 `pip install -e .`；
+不发布 wheel、PyPI 包、独立安装包或可运行 staging。普通 wheel 不含根目录资源或 `vendor/` 负载，且
+现有 `get_project_root()` 只识别源码布局，因此不属于支持形态。项目原创代码的免费使用与再分发需事先授权
+边界写在根 README；这不是对第三方组件的授权。仓内 Sobtop、精简 Open Babel 和 3Dmol 的来源/再分发
+依据仍未完成审计，即使它们随当前源码检出可见，也不得据此推断项目拥有或授予其分发权。
+
+外部科学软件不随 Willy 提供。许可证以 2026-08-13 的官方页面核验为准：GROMACS 是
+LGPL-2.1-or-later；Packmol 21.2.3 是 MIT；Multiwfn 3.8(dev)-2025-02-14 随附许可允许免费
+再分发并要求引用。Gaussian 是需签署许可的软件；ORCA 的 EULA 规定其授权不可转让和不可再许可；
+BOSS 5.1 官网只说明向学术用户免费提供并要求登记下载。Open Babel 上游为 GPL-2.0，完整安装由用户提供。
+LigParGen 的上游服务和 Sobtop 页面未在本项目可审计材料中给出可用于本项目再分发的许可证文本，因此保持
+“外部安装/待核实”，不得以“免费”推导再分发权。相关官网链接集中在根 README；各 profile 的真实执行证据
+仍由 external smoke 负责。
+
+核验来源仅用于记录事实，不构成法律意见或对第三方条款的替代解释：
+
+| 组件 | 官方核验来源 | 当前记录结论 |
+|---|---|---|
+| GROMACS | [官方许可说明](https://manual.gromacs.org/current/reference-manual/preface.html) | LGPL-2.1-or-later；用户自行安装，本项目不随附。 |
+| Packmol 21.2.3 | [官方 GitHub 仓库](https://github.com/m3g/packmol)、[v21.2.3 许可](https://github.com/m3g/packmol/blob/v21.2.3/LICENSE) | MIT；本地许可证、版本、构建来源和哈希已登记。 |
+| Multiwfn 3.8(dev) | [上游下载页](http://sobereva.com/multiwfn/) 与仓内 `LICENSE.txt` | 随附条款允许免费分发并要求引用；本地版本和哈希已登记。 |
+| Gaussian 16/09 | [Gaussian 官方许可/价格说明](https://gaussian.com/wp-content/uploads/dl/ousa_com.pdf) | 需要签署许可；用户自行安装，不随附。 |
+| ORCA 6.x | [ORCA EULA](https://orcaforum.kofo.mpg.de/app.php/privacypolicy) | 授权不可转让或再许可；用户自行下载和安装。 |
+| BOSS 5.1 | [Jorgensen 组软件页](https://zarbi.chem.yale.edu/software.html) | 官网说明面向学术用户免费提供且需登记下载；不随附。 |
+| LigParGen | [LigParGen 上游服务](https://zarbi.chem.yale.edu/ligpargen/index.html) | 本项目未获得可审计的再分发许可记录；仅支持用户外置安装。 |
+| Open Babel | [官方许可 FAQ](https://openbabel.org/docs/Introduction/faq.html) | GPL-2.0；完整 OPLS 依赖由用户安装，仓内精简负载仍待溯源。 |
+| Sobtop | [上游页面](http://sobereva.com/soft/sobtop/) | 仓内精确版本、许可和再分发依据尚未核实。 |
 
 ### 2.4 当前开发机审计快照
 
@@ -167,7 +215,8 @@ python3 scripts/verify_vendor_manifest.py --require-release-ready
 ```
 
 这些检查只读，不修改 `config.json`、`md_run/` 或 vendor 文件；`--require-release-ready`
-必须在 Packmol、Sobtop、精简 Open Babel 及遗留资产的证据/排除工作完成后才允许通过。
+必须在 Sobtop、精简 Open Babel 和遗留资产已补齐发行证据，或发布打包器已可验证地排除其
+全部登记路径后才允许通过。
 
 ### 2.5 LLM 服务配置
 

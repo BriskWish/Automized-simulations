@@ -210,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--layer", choices=("quantum", "topology", "simulation"))
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--output", type=Path, default=Path("tests/reports/live_llm_eval.json"))
-    parser.add_argument("--project-version", default="0.3.1")
+    parser.add_argument("--project-version", default="0.4.0")
     args = parser.parse_args(argv)
 
     settings = load_llm_settings()

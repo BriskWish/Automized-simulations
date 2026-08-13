@@ -1,10 +1,10 @@
 # Willy 测试策略与质量门禁
 
 > 维护角色：6 号测试工程师
-> 最后更新：2026-08-12
-> 当前基线：2026-08-12 完整 `pytest -q` 为 835 passed、9 skipped（收集 844 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 862 条记录）。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；本轮其余回归覆盖 schema-v2 `run_manifest.json`、环境能力和 MDP metadata、可视化解析、温度/势能验收、Packmol ABI/终态、OPLS 字段恢复和结构化日志。外部工具和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
+> 最后更新：2026-08-13
+> 当前基线：2026-08-13 完整 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 925 条记录）。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；本轮其余回归覆盖 schema-v2 `run_manifest.json`、环境能力和 MDP metadata、可视化解析、温度/势能验收、Packmol ABI/终态、OPLS 字段恢复和结构化日志。外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。
 
-> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **835 passed、9 skipped**（收集 844 条 pytest），测试台账为 **844 pytest + 18 LLM = 862 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要和前端建议，以及客户端部署包的本地运行态隔离均已有本地回归；目标机仍需使用兼容 Packmol 构建进行真实复测。
+> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest），测试台账为 **907 pytest + 18 LLM = 925 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要、前端建议、四条 profile 的只读终态证据契约、发布工件审计和客户端部署包运行态隔离均已有本地回归；目标机兼容 Packmol 的完整十步重放与浏览器实际运行仍需开发者验证。当前 staging 的 vendor 审计通过不等于它能运行 Sobtop 主链，wheel 也不属于支持的运行形态；这两项由 G-00/T-00 先行裁决。
 
 > 网关冻结边界：当前发行版的前端、LLM provider、网关/管理端启动器和托管客户端包命令均拒绝托管路径；归档的 ASGI、账本和 fake-upstream 测试仅用于后续维护，不构成产品入口或部署验收。
 
@@ -120,8 +120,8 @@ Smoke 只确认最小真实链路可启动并生成可消费产物，不替代�
 |------|------|------|
 | M0 | pytest 配置、分层 marker、外部 opt-in、依赖 extra、CI、脆弱 skip 清理 | 已完成：默认回归不调用外部工具，fresh install 可运行测试 |
 | M1 | 共享 fixture 工厂、步骤注册表、契约矩阵、测试数据和覆盖率基线 | 已完成 StepRegistry、注册表契约测试、fixture bundle 哈希契约、external preflight/证据框架，以及 CI 的默认回归/编译/用例台账漂移门禁；覆盖率阈值待补 |
-| M2 | 将已完成的四条十步真实 profile 固化为 external 用例和发布证据 | 当前四条 profile 均已有独立真实执行报告；CI self-hosted 固化属于后续治理增强 |
-| M3 | LLM 升级决策场景、夜间门禁、发布证据归档 | 发布能追溯到测试、模型行为、完整的 external 执行证据和目标体系结果 |
+| M2 | 将四条十步真实 profile 固化为 external 用例和发布证据 | 四条 profile 的只读终态、阶段许可、固定产物哈希和 JUnit 证据契约已完成；当前版本授权机串行重放仍待开发者提供，CI self-hosted 固化属于后续治理增强 |
+| M3 | LLM 升级决策场景、夜间门禁、发布证据归档 | 发布能追溯到测试、模型行为、完整的 external 执行证据和目标体系结果；在此之前先关闭 G-00，禁止把来源受控 staging 或 wheel 误作完整运行包 |
 
 M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
 
@@ -267,10 +267,9 @@ ORCA profile，根目录 `config.json` 已恢复。
 ### 6.8 2026-08-11 第二台受控验收机：环境自动发现预检
 
 在第二台受控 Ubuntu 20.04.6 验收机的项目检出中，使用 Python 3.11.7 的项目虚拟环境，确认根目录
-不存在 `.env`，并显式清除 `WILLY_G16_BIN`、`WILLY_FORMCHK_BIN` 与 `WILLY_GMX_BIN`。在仅加载
-软件厂商标准环境（oneAPI `setvars.sh`、Gaussian `g16.profile`，以及将 GROMACS 安装目录加入 `PATH`）后，
-`willy.env_registry.resolve_tool()` 将 `g16`、`formchk`、`gmx` 全部解析为 `available`，来源均为 `path`。
-GROMACS 在加载 oneAPI 前因缺少 MKL 动态库不可运行，加载后可被正常发现。
+历史验收机曾在不存在 `.env`、且显式清除 `WILLY_G16_BIN`、`WILLY_FORMCHK_BIN` 与 `WILLY_GMX_BIN` 时，
+通过厂商环境将 `g16`、`formchk`、`gmx` 从 `PATH` 解析为 `available`。该记录仅描述当时行为：**当前版本已收紧
+GROMACS 策略，`gmx` 只接受 `WILLY_GMX_BIN` 的显式进程环境或 `.env` 配置，不再从 `PATH` 发现。**
 
 **结果：通过（环境自动发现）。** 此记录只证明 Willy 不依赖 `WILLY_*` 显式路径即可消费正确初始化的
 运行环境；不证明磁盘扫描能力，也不证明 G16、formchk 或 GROMACS 已完成真实执行。后续真实进程、产物和
@@ -324,7 +323,32 @@ GROMACS 在加载 oneAPI 前因缺少 MKL 动态库不可运行，加载后可�
 - Config Agent 固定按“语义提取 -> 服务端规范化 -> 强制量子输入审计 -> 无工具严格 JSON -> 服务端校验”执行。审计阶段只公开 `tools_inspect_quantum_inputs`；未实际调用、参数不匹配或审计范围不匹配均以 `invalid_quantum_input` 拒绝。
 - 评分器只以实际工具名、JSON Schema、调用顺序、层级和策略白名单评分，禁止以 LLM 调用数或重试次数代理工具选择得分。18 个本地 mock 场景回归均通过；每个工具驱动恢复均为“先诊断、后本层允许修复”，EQ/PROD 的科学协议修改保持等待用户确认。
 
-新增 `python -m tests.llm_eval.live_protocol_runner` 只发送三个脱敏 fake-tool 探针：文本与自动工具调用为硬门禁；`tool_choice="required"` 的结果只作为兼容诊断。2026-08-12 当前 BYOK 协议探针 3/3 通过，配置 Agent 分段审计 5/5 通过（3 个需要审计的场景均实际调用审计工具）。恢复 Agent 的真实模型 + fake executor 矩阵为 17/18：17 个场景满足工具契约，`q_scf_001` 已完成诊断但恢复阶段未返回允许的修复工具，服务端记录 `model_no_tool_call` 并安全升级；该失败保留为当前 G-09 的真实模型稳定性缺口，不能用 mock 结果覆盖。
+新增 `python -m tests.llm_eval.live_protocol_runner` 只发送三个脱敏 fake-tool 探针：文本与自动工具调用为硬门禁；`tool_choice="required"` 的结果只作为兼容诊断。2026-08-12 当前 BYOK 协议探针 3/3 通过，配置 Agent 分段审计 5/5 通过（3 个需要审计的场景均实际调用审计工具）。恢复 Agent 的真实模型 + fake executor 矩阵为 16/18：`q_scf_001` 已完成诊断但恢复阶段未返回允许的修复工具，服务端记录 `model_no_tool_call` 并安全升级；`s_grompp_017` 的 4 次调用中有 1 次为策略禁止调用，只有 3 次同时通过参数 schema 和策略白名单。两项失败均保留为当前 G-09 的真实模型稳定性缺口，不能用 mock 结果覆盖。
+
+### 6.15 四条真实十步 profile 的只读证据契约
+
+`src/willy/external_profile_evidence.py` 将外部完整验收固定为四个具名路线：
+`g16_sobtop_electrolyte`、`orca_sobtop_electrolyte`、`g16_ligpargen_solvents`、
+`orca_ligpargen_solvents`。它不是运行器：不会启动、续跑、停止或扫描 `md_run/`，仅在开发者明确提供一个**已经终态**的 run 目录时读取 `status.json` 和 `run_manifest.json`。
+若 `status.json` 不是 `done`，它在读取该公开状态后立即拒绝，绝不再读取 private manifest 或计算任何产物哈希。
+
+通过条件是 `state=done`、十个步骤均完成且无最终错误，量子后端、拓扑后端和力场族与指定 profile 一致，全部 topology 组件已验证，EM/EQ/PROD 的私有阶段许可分别为 `accepted/accepted/completed`，并且 `topol.top`、`model.pdb` 与每阶段固定 `.tpr/.gro/.xtc/.edr`（EQ/PROD 另含 `.cpt`）非空、重新计算的 SHA-256 与阶段私有记录一致。证据还要求 provenance 含干净工作树的 40 位提交和项目版本，防止把本地未提交改动误计为发布版本验收。
+
+成功后才允许写入脱敏 JSON；其中只保留 profile/run ID、提交摘要、项目版本、终态/阶段状态，以及固定产物名、大小和 SHA-256。不得保存绝对路径、配置内容或其哈希、命令、日志、环境变量、API Key、原始响应或错误细节。验收机可按如下方式事后操作：
+
+```bash
+python3 -m willy.external_profile_evidence \
+  --profile g16_sobtop_electrolyte \
+  --run-dir /受控的已完成运行目录 \
+  --output tests/reports/audits/g16_sobtop_electrolyte.json \
+  --junit-output tests/reports/audits/g16_sobtop_electrolyte.xml
+
+python3 -m willy.external_profile_evidence \
+  --evidence-dir tests/reports/audits \
+  --profiles all
+```
+
+第一条命令对失败 run 返回非零且不写“通过”JSON；若指定 `--junit-output`，则仍写入只含固定 issue code 的失败 JUnit，便于审计。第二条命令只验证已归档的 JSON，不会再读取原运行目录。此契约和其 `tmp_path` 回归已实现；四条在目标机的真实串行重放和开发者签署记录仍属于 G-03/T-03，不能由历史批次或本模块的单元测试替代。
 
 ### 6.12 2026-08-11 第二台受控验收机：Packmol 运行时 ABI 不兼容
 
@@ -356,3 +380,17 @@ SHA-256 为 `b4ec513ea4c950a2af763f60233cd4d20ef705562aa700b3e9daaf6c1addb818`�
 Packmol 输入：返回码为 0，输出含 `Success!`、4 个 `ATOM/HETATM` 记录和一个 `CRYST1` 记录。
 **结果：通过（Packmol 二进制兼容与最小建盒）。** 这不替代更新验收机检出后的 Step 1--10 端到端重跑；
 后者仍是 G-01/G-03 的人工验收项。
+
+### 6.16 2026-08-12 第二台受控验收机：G16 + Sobtop 真实全流程
+
+对已结束的 `md__202608120002` 进行只读核验：远程检出的提交为
+`1fd19be2165f9a65c385cf7466c86a4a384beeb4`，公开状态为 `done`，`done_steps` 为 Step 1--10，
+`error` 与 `error_kind` 均为空。私有记录显示量子后端为 G16、拓扑后端为 Sobtop、力场族为
+GAFF/UFF；EM 和 EQ 阶段许可为 `accepted`，PROD 为 `completed`。`topol.top`、`model.pdb`，
+以及 EM/EQ/PROD 的固定 `.tpr/.gro/.xtc/.edr` 产物均存在，EQ/PROD 的 `.cpt` 亦存在。
+
+**结果：通过（当前受控验收机上的 G16 + Sobtop 真实十步流程）。** 该结果同时证明兼容 Packmol
+构建未再触发此前的 glibc 阻塞，且本次流程没有观察到公开错误。核验只读取终态状态和固定产物存在性，
+未启动、续跑、停止或修改任何模拟。它是四个具名 external profile 中的第 1 条运行证据；仍需使用
+`external_profile_evidence` 归档其标准化脱敏 JSON/JUnit，并完成 ORCA + Sobtop、G16 + LigParGen、
+ORCA + LigParGen 三条当前授权机重放，故 G-01 的干净安装门禁和 G-03 均不关闭。

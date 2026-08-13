@@ -2,11 +2,13 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **版本 0.3.1**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版完善了 OpenAI-compatible 工具调用兼容、配置审计错误提示和本机依赖预检展示。
+> **版本 0.4.0**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版完善了外部依赖确认性、内置运行库说明、GROMACS 显式路径配置、vendor 完整性审计和发布测试门禁。
 
-> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证；2026-08-11 的四条真实 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，使用 7 ns EQ、2 ns PROD，且根目录配置在批次结束后恢复。
+> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证。2026-08-11 的四条 profile 是历史批次成功记录；当前受控验收机已复核 G16 + Sobtop 的一条完整十步运行，其余三条当前版本重放及标准化脱敏证据仍在验收中。
 
 本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测和后处理/分析不属于本版本公开能力。
+
+> **发行边界**：本项目唯一支持的交付形态是 GitHub 上的完整源码检出后进行可编辑安装，不发布 wheel、PyPI 包、独立二进制安装包或受控 staging 作为可运行产品。`vendor/` 中的第三方文件不因 Willy 的公开源码使用条款而获得授权；使用者必须遵守各上游项目的许可、下载和再分发条件。受控 staging 只用于文件与许可审计，不是可运行发行物。
 
 ```
 用户: "Li 80, TFSI 80, FEC 300, 350K, 20ns"
@@ -50,30 +52,33 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 
 ## 快速开始
 
-### 环境要求
+### 环境要求与版本基线
 
-| 依赖 | 用途 | 获取方式 |
-|------|------|------|
-| Python 3.10--3.12 | 运行环境 | 使用发行版或受控环境提供的 3.10+ 解释器；系统 Python 3.8 不受支持 |
-| Gaussian16 / Gaussian09 | 量子化学计算（默认后端为 G16） | 需 license |
-| ORCA 6.x | 量子化学计算（可选后端） | [orcaforum.kofo.mpg.de](https://orcaforum.kofo.mpg.de/) |
-| formchk | Gaussian checkpoint 转换 | 分别配置对应版本的 formchk |
-| Multiwfn（内置） | RESP 电荷拟合 | 随仓库提供 Linux x86_64 负载 |
-| GROMACS | MD 模拟引擎 | `apt install gromacs` |
-| Packmol | 初始盒子构建 | [github.com/mcubeg/packmol](https://github.com/mcubeg/packmol) |
-| Sobtop | 拓扑生成 (GAFF 力场) | [sobereva.com/soft/sobtop](http://sobereva.com/soft/sobtop/) |
-| Open Babel 3（仅 OPLS-AA） | LigParGen 的 SMILES/MOL2 转换 | `apt install openbabel` |
-| C shell（仅 OPLS-AA） | BOSS 运行脚本 | `apt install csh` |
+| 依赖 | 当前项目版本基线 | 用途 | 获取方式与许可状态 |
+|------|------|------|------|
+| Python | 3.10--3.12 | 运行环境 | 系统、conda/mamba 或受控环境提供；系统 Python 3.8 不受支持 |
+| Gaussian 16 | 合法安装，Revision 不自动探测 | 默认量子化学后端 | 用户自行安装；Gaussian 的签署许可软件，不随 Willy 提供或再分发 |
+| Gaussian 09 | 合法安装，Revision 不自动探测 | 保留后端接口 | 用户自行安装；同样属于 Gaussian 许可软件，且本版本不作可靠全链路验收 |
+| formchk | 与所选 G16/G09 同一安装 | Gaussian checkpoint 转换 | 使用同一 Gaussian 合法安装中的程序，不可混用版本 |
+| ORCA | 6.1.1；兼容目标 6.x | 可选量子化学后端 | 用户按 [ORCA EULA](https://orcaforum.kofo.mpg.de/app.php/privacypolicy) 下载并安装；不随 Willy 提供或再分发 |
+| Multiwfn（内置） | 3.8(dev)，2025-02-14 | RESP 电荷拟合、Molden/FCHK 转换 | `vendor/` 最小 Linux x86_64 负载；随附许可证和引用要求 |
+| GROMACS | 开发/真实证据 2025.0；兼容目标 2023--2025 | MD 模拟引擎 | 用户通过系统包或官方构建安装；GROMACS 为 LGPL-2.1-or-later，不随 Willy 提供 |
+| Packmol（内置） | 21.2.3，glibc >= 2.29 | 初始盒子构建 | `vendor/` 的 Linux x86_64 通用构建；MIT，保留 `PACKMOL_LICENSE.txt` |
+| Sobtop | 当前仓内 Linux x86_64 负载，精确发行版本未核实 | GAFF/UFF 拓扑生成 | 上游页面为 [Sobtop](http://sobereva.com/soft/sobtop/)；本项目不声明其著作权或再分发授权，使用者须自行核实上游条款 |
+| LigParGen | 2.1 兼容适配 | OPLS-AA 参数化 | 用户自行安装命令行版本；上游 [LigParGen](https://zarbi.chem.yale.edu/ligpargen/index.html) 未在本项目记录中提供可审计再分发许可 |
+| BOSS | 5.1 | LigParGen 的 OPLS/CM1A 后端 | 用户按 [Jorgensen 组下载流程](https://zarbi.chem.yale.edu/software.html) 获取；官网说明仅向学术用户免费提供，不随 Willy 提供或再分发 |
+| Open Babel | 完整安装 3.1.1；上游当前 3.2.0 | LigParGen 的 SMILES/MOL2 转换 | 用户自行安装完整 Open Babel；上游采用 GPL-2.0，仓内精简运行时版本/构建来源未核实，不作为 OPLS 依赖替代品 |
+| C shell | 由操作系统提供 | BOSS 运行脚本 | 用户通过发行版包管理器安装；遵从相应发行版的许可 |
 
-> 项目 `vendor/` 目录已内置 Packmol、Sobtop、Multiwfn 与精简 Open Babel 运行时。Multiwfn 不需要外部安装或 PATH 配置；OPLS-AA 的 LigParGen/BOSS 链路仍需要另行安装含格式插件和数据文件的完整 Open Babel，以及 C shell。
+> 完整源码检出当前含 Packmol、Sobtop、Multiwfn 与精简 Open Babel 运行负载。Multiwfn 与 Packmol 的版本、哈希和许可文本已登记；Sobtop、精简 Open Babel 与遗留 3Dmol 的精确来源、版本或再分发依据尚未完成审计。它们不属于 Willy 作者声明拥有权利的内容，也不构成向使用者授予的第三方授权。Multiwfn 不需要外部安装或 PATH 配置；OPLS-AA 的 LigParGen/BOSS 链路仍需要用户另行安装 LigParGen、BOSS、含格式插件和数据文件的完整 Open Babel，以及 C shell。
 
 > OPLS-AA 仅能作为与 Sobtop/GAFF 隔离的显式参数化路径。中性有机小分子的 LigParGen/BOSS 参数化、ITP 命名空间、GRO 五列残基字段、Packmol 以及 GROMACS EM/EQ/PROD 已有真实证据；对于单一 Ewald 净电荷 warning，只有总电荷绝对值不超过 `0.15e` 时才按受控规则放行，其他 warning 或更大不平衡仍拒绝。Li+、NO3-、TFSI- 等离子或不含 H 组分不由当前 LigParGen 路径支持，必须提供可验证的外部 OPLS 参数，且不得与 Sobtop 产物混用。
 
-### 安装
+### 源码检出安装
 
 ```bash
-git clone https://github.com/BriskWish/Automized-simulations.git
-cd AutomizedSimulations
+git clone https://github.com/BriskWish/Automized-simulations.git Willy
+cd Willy
 python3.11 -m venv .venv  # 或任何 Python 3.10--3.12 解释器
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -84,6 +89,28 @@ python -V  # 必须为 Python 3.10--3.12
 Ubuntu 20.04 的系统 `python3` 通常是 3.8，不能直接安装本项目。请先通过系统包、机构模块、
 conda/mamba 或其他受控方式取得 Python 3.10--3.12，再以上述解释器创建独立虚拟环境；不要以
 `--ignore-requires-python` 强行安装，也不要修改项目的 Python 下限。
+
+### Linux 内置组件运行库
+
+完整源码检出已包含 Packmol 与 Multiwfn 的 Linux x86_64 可执行文件，**不需要**用户自行寻找或配置
+它们的路径。但当前二进制仍使用宿主机的标准 Linux 运行库：
+
+| 内置组件 | 所需系统库 | 上游来源 | Ubuntu/Debian 安装包 |
+|---|---|---|---|
+| Packmol | `libgfortran.so.5` | [GCC GNU Fortran runtime](https://gcc.gnu.org/fortran/) | `libgfortran5` |
+| Multiwfn | `libXm.so.4` | [Motif X/Motif shared library](https://packages.ubuntu.com/jammy/libs/libxm4) | `libxm4` |
+
+在 Ubuntu 20.04/22.04 等 Debian 系发行版，首次运行前执行一次：
+
+```bash
+sudo apt update
+sudo apt install -y libgfortran5 libxm4
+```
+
+其他发行版请使用其系统包管理器安装提供同名动态库的 GCC Fortran runtime 与 Motif/X11 runtime。
+这两项是操作系统级 ELF 运行库，**不能用 `pip install` 安装**；安装完成后无需设置
+`WILLY_*` 变量，也无需将 Packmol 或 Multiwfn 加入 `PATH`。若缺失，Packmol/Multiwfn 无法启动，
+应先完成系统依赖安装再启动相应工作流。
 
 ### 配置 LLM
 
@@ -96,12 +123,12 @@ cp .env.example .env
 # 编辑 .env，填入 API Key、Base URL 和 Model
 ```
 
-配置页的“运行依赖预检”会在创建工程前按量子、拓扑和模拟三组展示内置 Vendor 与外部依赖的满足状态；每组任一完整可替代链路可用即通过。它会将从 `PATH` 或受限默认目录发现的可用外部软件写入缺失的 `WILLY_*` 默认项，不覆盖已有进程环境或 `.env` 设置，也不会阻止本地任务启动。实际运行仍按任务选定的后端和步骤进行强制预检。
+配置页的“运行依赖预检”会在创建工程前按量子、拓扑和模拟三组展示内置 Vendor 与外部依赖的满足状态；每组任一完整可替代链路可用即通过。它会将从 `PATH` 或受限默认目录发现的可用外部软件写入缺失的 `WILLY_*` 默认项，不覆盖已有进程环境或 `.env` 设置，也不会阻止本地任务启动。**GROMACS 是例外：本版本只读取显式的 `WILLY_GMX_BIN`，不从 `PATH` 或系统位置自动发现，也不自动写入该项。**实际运行仍按任务选定的后端和步骤进行强制预检。
 
 外部软件可使用 `WILLY_G16_BIN`、`WILLY_G09_BIN`、`WILLY_G09_FORMCHK_BIN`、`WILLY_ORCA_HOME`、`WILLY_GMX_BIN`、
 `WILLY_LIGPARGEN_BIN`、`WILLY_BOSS_HOME`、`WILLY_OBABEL_BIN`、`WILLY_CSH_BIN`
 等白名单变量覆盖发现结果；详细优先级和旧变量兼容规则见
-[`docs/environment_registry_design.md`](docs/environment_registry_design.md)。Sobtop 与 Packmol 为项目内置工具；OPLS-AA 的 Open Babel/C shell/BOSS 必须通过预检。
+[`docs/environment_registry_design.md`](docs/environment_registry_design.md)。在完整源码检出中，Sobtop 与 Packmol 由项目路径解析；OPLS-AA 的 Open Babel/C shell/BOSS 必须通过预检。公开发行包的 Sobtop 路径尚未确定，不能假定普通安装包中存在它。
 
 ### 命令行检查环境
 
@@ -169,7 +196,7 @@ LLM 支持中文别名映射：输入"锂离子"自动识别为 Li，"硝酸根"
 ## 目录结构
 
 ```
-AutomizedSimulations/
+Willy/
 ├── app.py                  ← Gradio Web UI
 ├── run_pipeline.py         ← 全流程编排 (10 步)
 ├── config.json             ← 体系配置
@@ -249,6 +276,8 @@ Willy 集成并编排第三方科学软件，但 Willy 作者不拥有其原始�
 
 使用 Sobtop、Packmol 或其他第三方组件时，使用者还应遵守其各自的许可、分发和引用要求。Willy 对这些组件仅提供集成与工作流编排，不主张其原始软件、文档或学术成果的著作权。
 
-## 许可
+## 源码使用与第三方许可
 
-待定
+Willy 的原创源代码以公开源码形式免费提供，可用于任何合法用途，包括研究、学习、评估和内部工作流。任何对 Willy 原创代码的**再分发**，包括重新发布源码或修改版、制作安装包/镜像、或将其并入其他产品，须事先取得项目作者授权。完整条款见 [`LICENSE.md`](LICENSE.md)。本声明不向使用者授予 `vendor/`、外部软件、其文档或学术成果的任何权利；各第三方组件仍完全适用其上游许可证、下载条件和引用要求。
+
+该条款是项目作者的自定义源码使用声明，并非 OSI 定义的标准开源许可证：标准开源许可证要求允许自由再分发。GitHub 公开仓库仅使其他 GitHub 用户可以查看和在 GitHub 服务内 fork；它不替代第三方软件的再分发许可。第三方许可证、版本来源与待核实项见 [`docs/environment_registry_design.md`](docs/environment_registry_design.md)。

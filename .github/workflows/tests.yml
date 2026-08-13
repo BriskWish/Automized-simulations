@@ -40,6 +40,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install package and test dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
+      - name: Verify installed dependency graph
+        run: python -m pip check
       - name: Import package
         run: python -c "import willy"
       - name: Run deterministic pytest suite
@@ -69,6 +71,11 @@ jobs:
         run: python -m compileall -q src tests
       - name: Verify bundled vendor integrity inventory
         run: python scripts/verify_vendor_manifest.py
+      - name: Build and audit approved vendor release staging
+        run: >-
+          python scripts/build_release_staging.py --output /tmp/willy-release-staging &&
+          python scripts/verify_vendor_manifest.py
+          --artifact-root /tmp/willy-release-staging --require-release-ready
       - name: Verify generated test-case catalog is current
         run: python -m tests.tools.generate_test_case_catalog --output tests/reports/test_case_catalog.md && git diff --exit-code -- tests/reports/test_case_catalog.md
 
@@ -88,6 +95,8 @@ jobs:
       - name: Install Chromium runtime
         run: python -m playwright install --with-deps chromium
       - name: Run browser acceptance
+        env:
+          WILLY_E2E_REQUIRED: "1"
         run: python -m pytest -m e2e --run-e2e -q --junitxml=test-results/browser-e2e.xml
       - name: Upload browser report
         if: always()

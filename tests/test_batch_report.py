@@ -11,6 +11,7 @@ from tests.reporting.batch_report import (
     artifact_record,
     build_batch_report,
     config_record,
+    report_from_command_results,
     validate_batch_report,
     write_batch_report,
 )
@@ -72,6 +73,42 @@ def test_batch_report_writer_is_json_and_atomic(tmp_path):
     saved = json.loads(target.read_text(encoding="utf-8"))
     assert saved["schema_version"] == 1
     assert not target.with_name(".batch.json.tmp").exists()
+
+
+def test_batch_report_retains_only_a_bounded_stage_reason_code(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    report = report_from_command_results(
+        batch_id="baseline-reason",
+        project_version="0.3.1",
+        config=config_record(config, root=tmp_path),
+        results={"isolated_install": {"status": "blocked", "reason_code": "python_venv_unavailable"}},
+        tools={"python": "3.12"},
+    )
+
+    assert report["stages"] == [{
+        "name": "isolated_install", "status": "blocked", "phase": "isolated_install",
+        "reason_code": "python_venv_unavailable", "metrics": {}, "artifacts": [],
+    }]
+    assert report["acceptance"]["conclusion"] == "blocked"
+
+
+def test_batch_report_drops_an_unbounded_stage_reason_code(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+
+    report = report_from_command_results(
+        batch_id="baseline-unsafe-reason",
+        project_version="0.3.1",
+        config=config_record(config, root=tmp_path),
+        results={"gate": {
+            "status": "blocked",
+            "reason_code": "runtime output: api_key=not-a-reason-code",
+        }},
+        tools={"python": "3.12"},
+    )
+
+    assert report["stages"][0]["reason_code"] == ""
 
 
 def test_artifact_must_be_relative_to_the_report_root(tmp_path):

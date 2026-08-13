@@ -3,7 +3,7 @@
 ## 一、项目结构
 
 ```
-AutomizedSimulations/
+Willy/
 ├── app.py                   ← Gradio UI (Willy Agent)
 ├── run_pipeline.py          ← CLI 入口：全流程编排 10 步 (产物→md_run/<run_id>/)
 ├── config.json              ← 体系唯一配置源

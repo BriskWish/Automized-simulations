@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Release-facing inventory for bundled runtime payloads. Integrity validation is deterministic and read-only; components marked evidence_pending deliberately block --require-release-ready until their upstream source, version and redistribution terms are recorded.",
+  "purpose": "Release-facing inventory for bundled runtime payloads. Integrity validation is deterministic and read-only. Components with unverified source, version or redistribution terms are explicitly excluded from release artifacts and continue to block --require-release-ready until a package build verifies that exclusion or records the missing evidence.",
   "components": [
     {
       "id": "multiwfn-linux-x86_64",
@@ -42,10 +42,19 @@
     },
     {
       "id": "sobtop-runtime",
-      "distribution_status": "evidence_pending",
+      "distribution_status": "exclude_from_release_artifact",
       "source_url": "http://sobereva.com/soft/sobtop/",
       "version": "unverified",
       "license_files": [],
+      "release_exclusion": {
+        "paths": ["sobtop/"],
+        "reason": "This checkout contains executable and example payloads without a repository-local upstream release identifier, redistribution authorization, or license notice that can be audited for a release artifact.",
+        "manual_verification": [
+          "Obtain the upstream release identifier and source/archive checksum for the exact payload.",
+          "Record the applicable redistribution terms and preserve the upstream license or notice.",
+          "Either add those records and re-audit the component, or verify that the release builder excludes sobtop/ from the final artifact."
+        ]
+      },
       "files": [
         {"path": "sobtop/sobtop", "size_bytes": 17804208, "sha256": "97a78133ccbe7ccd8bcfd1d40eb86b08ad9faa319ad992cbdd671c9bd95dc2ca"},
         {"path": "sobtop/sobtop.exe", "size_bytes": 14447104, "sha256": "b60e1ccf33fdc9cf810b46d9fcdcbb15e6e1bab24c4e6aeeefd3700e0aa9b2ce"},
@@ -60,12 +69,11 @@
         {"path": "sobtop/assign_AT.dat", "size_bytes": 2235, "sha256": "bc25b9db15e9598739548027478b8fec6ba8c4bf8f6e8d316e70d9736a8ec5fa"},
         {"path": "sobtop/bondcrit.dat", "size_bytes": 434, "sha256": "ba7e51a9da408e206cd6e245da9ad7576b0188b491b9b2a921f7ed83b88be116"},
         {"path": "sobtop/bonded_param.dat", "size_bytes": 267053, "sha256": "000637d5f1e6c06426feebfa62bd3953c1b51bac0120b2d63bdac8a514859941"}
-      ],
-      "excluded_from_release_artifact": ["sobtop/examples/", "sobtop/.willy-sobtop.lock"]
+      ]
     },
     {
       "id": "openbabel-minimal-runtime",
-      "distribution_status": "evidence_pending",
+      "distribution_status": "exclude_from_release_artifact",
       "source_url": "https://openbabel.org/",
       "version": "unverified",
       "upstream_license_basis": {
@@ -73,6 +81,22 @@
         "evidence_url": "https://openbabel.org/docs/UseTheLibrary/intro.html"
       },
       "license_files": [],
+      "release_exclusion": {
+        "paths": [
+          "obabel",
+          "obabel.bin",
+          "libopenbabel.so.7",
+          "libopenbabel.so.7.0.0",
+          "libcoordgen.so.3",
+          "libcoordgen.so.3.0.2"
+        ],
+        "reason": "The repository records only a project-level Open Babel reference. It does not contain a local license notice, exact build version, source checksum, or proof that the minimal binary and bundled libraries may be redistributed together.",
+        "manual_verification": [
+          "Identify the exact upstream Open Babel and CoordGen source versions and build provenance.",
+          "Record redistribution obligations and ship their required license notices.",
+          "Either add those records and re-audit the component, or verify that the release builder excludes every listed minimal-runtime file."
+        ]
+      },
       "files": [
         {"path": "obabel", "size_bytes": 145, "sha256": "6809a51450c631e893de06079bb16e3fe5906936b75d511d05e28fe3df93fa58"},
         {"path": "obabel.bin", "size_bytes": 35216, "sha256": "16c9406c1ae6a0f41f22ff8ff6acf5d40ea0888cfe2a10846c9c3a9961d51b67"},
@@ -92,6 +116,15 @@
         "evidence_url": "https://3dmol.org/doc/"
       },
       "license_files": [],
+      "release_exclusion": {
+        "paths": ["3Dmol-min.js"],
+        "reason": "The repository does not contain the exact asset version, source checksum, or its accompanying upstream license notice; runtime code does not require this local legacy asset.",
+        "manual_verification": [
+          "Identify the exact upstream 3Dmol.js release and source checksum.",
+          "Record the applicable license notice and redistribution terms.",
+          "Either add those records and re-audit the asset, or verify that the release builder excludes 3Dmol-min.js."
+        ]
+      },
       "files": [
         {"path": "3Dmol-min.js", "size_bytes": 524112, "sha256": "c24a17b28f38a6fbde99cea746e2d7414da2c60efce65fa75d5293bed204e510"}
       ],
