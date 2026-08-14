@@ -74,9 +74,11 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 
 > OPLS-AA 仅能作为与 Sobtop/GAFF 隔离的显式参数化路径。中性有机小分子的 LigParGen/BOSS 参数化、ITP 命名空间、GRO 五列残基字段、Packmol 以及 GROMACS EM/EQ/PROD 已有真实证据；对于单一 Ewald 净电荷 warning，只有总电荷绝对值不超过 `0.15e` 时才按受控规则放行，其他 warning 或更大不平衡仍拒绝。Li+、NO3-、TFSI- 等离子或不含 H 组分不由当前 LigParGen 路径支持，必须提供可验证的外部 OPLS 参数，且不得与 Sobtop 产物混用。
 
-### 源码检出安装
+### 下载与安装
 
 ```bash
+sudo apt update
+sudo apt install -y libgfortran5 libxm4     #内置Packmol Multiwfn所必需的依赖组件
 git clone https://github.com/BriskWish/Automized-simulations.git Willy
 cd Willy
 python3.11 -m venv .venv  # 或任何 Python 3.10--3.12 解释器
@@ -90,27 +92,7 @@ Ubuntu 20.04 的系统 `python3` 通常是 3.8，不能直接安装本项目。�
 conda/mamba 或其他受控方式取得 Python 3.10--3.12，再以上述解释器创建独立虚拟环境；不要以
 `--ignore-requires-python` 强行安装，也不要修改项目的 Python 下限。
 
-### Linux 内置组件运行库
-
-完整源码检出已包含 Packmol 与 Multiwfn 的 Linux x86_64 可执行文件，**不需要**用户自行寻找或配置
-它们的路径。但当前二进制仍使用宿主机的标准 Linux 运行库：
-
-| 内置组件 | 所需系统库 | 上游来源 | Ubuntu/Debian 安装包 |
-|---|---|---|---|
-| Packmol | `libgfortran.so.5` | [GCC GNU Fortran runtime](https://gcc.gnu.org/fortran/) | `libgfortran5` |
-| Multiwfn | `libXm.so.4` | [Motif X/Motif shared library](https://packages.ubuntu.com/jammy/libs/libxm4) | `libxm4` |
-
-在 Ubuntu 20.04/22.04 等 Debian 系发行版，首次运行前执行一次：
-
-```bash
-sudo apt update
-sudo apt install -y libgfortran5 libxm4
-```
-
-其他发行版请使用其系统包管理器安装提供同名动态库的 GCC Fortran runtime 与 Motif/X11 runtime。
-这两项是操作系统级 ELF 运行库，**不能用 `pip install` 安装**；安装完成后无需设置
-`WILLY_*` 变量，也无需将 Packmol 或 Multiwfn 加入 `PATH`。若缺失，Packmol/Multiwfn 无法启动，
-应先完成系统依赖安装再启动相应工作流。
+安装完成后无需设置`WILLY_*` 变量，也无需将 Packmol 或 Multiwfn 加入 `PATH`。应先完成系统依赖安装再启动相应工作流。
 
 ### 配置 LLM
 
@@ -152,17 +134,8 @@ Li 80, TFSI 80, FEC 300, 350K, 20ns
 ```
 
 Agent 会给出方案确认；紧随方案回复“运行”“开始运行”或“确认运行”后，自动执行当前的 10 步 MD 流程。确认前可在配置中开启可选的全精度 `.trr` 轨迹；`.gro`、`.xtc`、`.edr` 是固定产物。
-
+Agent默认的MD路径为梯度退火模拟，暂不支持核心更改。当前为298K -> 500K -> 500K -> 400K -> 400K -> 298K -> 298K 各步骤分别为2 1 2 1 2 2 ns.可以在方案配置时修改温度点和退火步骤时长。
 界面提供“任务”“配置”和“关于”页签；“关于”页说明项目定位、构建参与者、运行模型、Willy 的职责与后续规划，并展示项目公众号二维码。
-
-### CLI 模式
-
-```bash
-# 确保 config.json 已配置好
-python3 run_pipeline.py          # Gaussian16 后端
-python3 run_pipeline.py g09      # Gaussian09 后端
-python3 run_pipeline.py orca     # ORCA 后端
-```
 
 ## 内置分子
 
@@ -178,6 +151,7 @@ python3 run_pipeline.py orca     # ORCA 后端
 | EC | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 碳酸乙烯酯 |
 | EMC | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 碳酸甲乙酯 |
 | TTE | 溶剂 | 0 | b3lyp/6-311+g(d,p) | 含氟醚 |
+...
 
 LLM 支持中文别名映射：输入"锂离子"自动识别为 Li，"硝酸根"→NO3，依此类推。
 
@@ -185,13 +159,7 @@ LLM 支持中文别名映射：输入"锂离子"自动识别为 Li，"硝酸根"
 
 ## 扩展分子
 
-将 `.gjf` 文件放入 `struct/` 目录，系统自动识别为新分子（默认中性；知识库元数据默认标记为 GAFF）。这既使分子可被识别，也为新 run 提供必需的量子输入。
-
-如需精确参数（电荷、自旋、特殊基组），在 `docs/knowledge.md` 的分子表格中新增一行即可。
-
-## 自定义上传
-
-在 Web UI 中点击"上传结构"按钮，支持 `.gjf`、`.mol2`、`.pdb`、`.xyz` 格式。上传后系统自动刷新分子列表。
+将 `.gjf` 文件放入 `struct/` 目录，系统自动识别为新分子，Willy只会修订分配核数和保存路径，但不会修改已有的基组和电荷数等。新分子可被后续方案识别。
 
 ## 目录结构
 
@@ -256,11 +224,9 @@ Willy/
 
 ## 贡献与协作
 
-GitHub 的 Contributors 图由默认分支上的提交作者自动统计。项目同时记录以下协作角色：
+GitHub 的 Contributors 图由默认分支上的提交作者自动统计。项目记录了以下协作角色：
 
 - **Codex（OpenAI AI 协作工程助手）**：参与架构设计、代码实现、测试、文档与发布质量检查。
-
-Codex 没有独立 GitHub 账号，因此该致谢不伪造为 GitHub 用户贡献。新增真人贡献者时，请使用其已关联 GitHub 账号的提交邮箱提交到默认分支，或在仓库的 Settings -> Collaborators / Manage access 中邀请其作为协作者。
 
 ### 第三方组件引用与著作权
 
