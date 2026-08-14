@@ -78,9 +78,12 @@ def fake_ui_server(tmp_path):
 
 
 def test_browser_workflow_uses_fake_executor_without_touching_a_real_run(browser_api, fake_ui_server, tmp_path):
-    try:
-        with browser_api.sync_playwright() as playwright:
+    with browser_api.sync_playwright() as playwright:
+        try:
             browser = playwright.chromium.launch(headless=True)
+        except browser_api.Error as exc:
+            _browser_unavailable(f"Playwright Chromium is unavailable: {exc}")
+        try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             # Gradio's timer keeps a polling request open, so network-idle is
             # not a meaningful readiness signal for this page.
@@ -90,6 +93,14 @@ def test_browser_workflow_uses_fake_executor_without_touching_a_real_run(browser
             run_panel = page.locator("#run-assistant")
             run_panel.get_by_text("公开错误").wait_for(timeout=10_000)
             run_panel.get_by_text("待确认的模拟调整").wait_for(timeout=10_000)
+
+            run_message = run_panel.locator("#run-message textarea")
+            run_message.fill("/")
+            slash_menu = page.locator("#run-slash-menu")
+            slash_menu.get_by_role("option", name="/resume 按原参数从安全步骤续跑").wait_for(timeout=10_000)
+            slash_menu.get_by_role("option", name="/resume 按原参数从安全步骤续跑").click()
+            assert run_message.input_value() == "/resume"
+            assert not slash_menu.is_visible()
 
             run_panel.locator("textarea").fill("确认")
             run_panel.get_by_role("button", name="发送").click()
@@ -110,6 +121,5 @@ def test_browser_workflow_uses_fake_executor_without_touching_a_real_run(browser
             screenshot = tmp_path / "browser-e2e.png"
             page.screenshot(path=str(screenshot), full_page=True)
             assert screenshot.stat().st_size > 0
+        finally:
             browser.close()
-    except browser_api.Error as exc:
-        _browser_unavailable(f"Playwright Chromium is unavailable: {exc}")

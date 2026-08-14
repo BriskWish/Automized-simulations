@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "batch_id": "live-llm-20260814T075400Z",
+  "created_at": "2026-08-14T07:54:00.417078+00:00",
+  "software": {
+    "project_version": "0.4.0",
+    "python": "3.12.3",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2",
+    "tools": {
+      "python": "3.12.3",
+      "willy": "0.3.1",
+      "pytest": "9.1.1"
+    }
+  },
+  "config": {
+    "evaluation_mode": "live_llm_mock_tools",
+    "model": "gpt-5.6-terra",
+    "endpoint_host": "api.forza0310.cn",
+    "contract_version": "wpc-v1",
+    "layer_contract_versions": {
+      "l1": "quantum-agent-v1",
+      "l2": "topology-agent-v1",
+      "l3": "simulation-agent-v2"
+    },
+    "matrix": {
+      "error_cases": 31,
+      "config_cases": 13,
+      "protocol_cases": 20,
+      "metric_contracts": 16
+    },
+    "actual_scenarios": 2,
+    "configuration_fingerprint": "da7d09c77816fe67d191765a78dcc317b1584dba3b21d69b027586e518b3d231"
+  },
+  "stages": [
+    {
+      "name": "q_scf_001",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 24237.03,
+        "duration_ms": 25862.35,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_grompp_017",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 22543.13,
+        "duration_ms": 24227.39,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    }
+  ],
+  "acceptance": {
+    "conclusion": "passed",
+    "threshold": {
+      "minimum_score": 60,
+      "required_pass_rate": 1.0
+    },
+    "completed": {
+      "scenarios": 2,
+      "passed": 2,
+      "failed": 0
+    },
+    "average_scores": {
+      "diagnosis": 30.0,
+      "tool_choice": 25.0,
+      "repair": 25.0,
+      "escalation": 20.0,
+      "total": 100.0
+    },
+    "score_gate": {
+      "status": "passed"
+    },
+    "tool_calling_gate": {
+      "status": "passed",
+      "expected_scenarios": 2,
+      "observed_scenarios": 2,
+      "observed_calls": 8,
+      "case_level_contract": {
+        "required_cases": 2,
+        "passed_cases": 2,
+        "failed_cases": 0
+      },
+      "accuracy": "case_level_contract"
+    },
+    "response_latency_ms": {
+      "p50": 5939.43,
+      "p95": 7595.02
+    },
+    "dimensions": {
+      "diagnosis": "0-30",
+      "tool_choice": "0-25",
+      "repair": "0-25",
+      "escalation": "0-20"
+    },
+    "scoring_scope": "tool choice is scored from actual tool name, schema, order, layer and recovery-policy contract",
+    "model": "gpt-5.6-terra"
+  }
+}

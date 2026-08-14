@@ -201,6 +201,51 @@ class RunRegistry:
         self._update_index(directory, manifest)
         return manifest
 
+    def record_control_action(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        outcome: str,
+        restart_step: int | None = None,
+        stopped_step: int | None = None,
+        parameter_paths: list[str] | tuple[str, ...] = (),
+        parent_run_id: str | None = None,
+    ) -> None:
+        """Record a bounded resume/fork audit in registry metadata and events.
+
+        Parameter values never enter public metadata.  Keeping only their
+        canonical paths lets a later reader explain the replay boundary while
+        preserving the frozen configuration as the authoritative value source.
+        """
+        if action not in {"resume", "fork"}:
+            raise ValueError("运行控制动作无效")
+        if outcome not in {"accepted", "rejected", "launched", "launch_failed", "created"}:
+            raise ValueError("运行控制结果无效")
+        directory = self.resolve_run_id(run_id)
+        clean_paths = [
+            value for value in parameter_paths
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,159}", value)
+        ][:16]
+        details: dict[str, Any] = {"action": action, "outcome": outcome}
+        for key, value in (("restart_step", restart_step), ("stopped_step", stopped_step)):
+            if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= STEP_REGISTRY.total_steps:
+                details[key] = value
+        if clean_paths:
+            details["parameter_paths"] = clean_paths
+        if isinstance(parent_run_id, str) and _RUN_ID_RE.fullmatch(parent_run_id):
+            details["parent_run_id"] = parent_run_id
+        with self._status_lock(directory):
+            manifest = self._read_registry_manifest(directory)
+            history = manifest.get("control_history", [])
+            history = list(history) if isinstance(history, list) else []
+            history.append({"recorded_at": _now(), **details})
+            manifest["control_history"] = history[-32:]
+            manifest["updated_at"] = _now()
+            self._write_registry_manifest(directory, manifest)
+        self.append_event(directory, f"{action}_{outcome}", details)
+        self._update_index(directory, manifest)
+
     @staticmethod
     def _load_unified_manifest(directory: Path) -> dict[str, Any] | None:
         """Return v2 metadata only when this run has opted into it.

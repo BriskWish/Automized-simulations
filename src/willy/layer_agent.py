@@ -389,7 +389,48 @@ class LayerAgent:
                 continue
             recovery.append(schema)
         # One repair action per attempt keeps the LLM decision surface narrow.
-        return recovery[:1], None
+        selected = recovery[:1]
+        if selected:
+            selected = [self._narrow_recovery_schema(selected[0], step_result)]
+        return selected, None
+
+    @staticmethod
+    def _narrow_recovery_schema(
+        schema: Mapping[str, object],
+        step_result: StepResult,
+    ) -> dict:
+        """Expose only the automatic SCF repair parameters to the model."""
+        function = schema.get("function") if isinstance(schema, Mapping) else None
+        error = step_result.error
+        tool_name = str(function.get("name") or "") if isinstance(function, Mapping) else ""
+        if (
+            tool_name not in {"tools_retry_struct_g16", "tools_retry_struct_g09"}
+            or error is None
+            or error.kind is not ErrorKind.SCF_NOT_CONVERGED
+        ):
+            return dict(schema)
+
+        narrowed = json.loads(json.dumps(schema, ensure_ascii=False))
+        narrowed_function = narrowed.get("function", {})
+        parameters = narrowed_function.get("parameters", {})
+        properties = parameters.get("properties", {})
+        molecule_name = properties.get("molecule_name")
+        scf_options = properties.get("scf_options")
+        if not isinstance(molecule_name, dict) or not isinstance(scf_options, dict):
+            return narrowed
+        scf_options["description"] = "SCF 未收敛时必须传入精确值 'scf=xqc'。"
+        scf_options["enum"] = ["scf=xqc"]
+        parameters["properties"] = {
+            "molecule_name": molecule_name,
+            "scf_options": scf_options,
+        }
+        parameters["required"] = ["molecule_name", "scf_options"]
+        parameters["additionalProperties"] = False
+        narrowed_function["description"] = (
+            "对指定分子执行自动 SCF 恢复；必须使用 scf_options='scf=xqc'，"
+            "不得修改基组或其他需确认参数。"
+        )
+        return narrowed
 
     def _request_tool_call(
         self,
@@ -412,6 +453,16 @@ class LayerAgent:
         try:
             if self.llm_budget is not None:
                 self.llm_budget.before_call()
+            # Recovery and diagnosis each expose exactly one server-selected
+            # function.  A named choice removes ambiguity for providers that
+            # honor ``required`` but still let the model return prose for a
+            # semantically complex recovery schema.
+            tool_choice = "required"
+            if len(allowed_names) == 1 and allowed_names[0]:
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": allowed_names[0]},
+                }
             call_kwargs = {
                 "model": self.model,
                 "messages": [
@@ -419,11 +470,10 @@ class LayerAgent:
                     {"role": "user", "content": prompt},
                 ],
                 "tools": tools,
-                # Each controlled phase exposes exactly one tool. ``required``
-                # is the provider-compatible enforcement mode; the server
-                # still validates that the returned call has this exact name
-                # and valid arguments before dispatch.
-                "tool_choice": "required",
+                # Each controlled phase exposes exactly one tool. A named
+                # choice is used when available; the server still validates
+                # its exact name and policy-relevant arguments before dispatch.
+                "tool_choice": tool_choice,
                 "temperature": 0.0,
             }
             if self.llm_budget is not None:
@@ -515,6 +565,12 @@ class LayerAgent:
                 "不得要求或暴露完整配置、路径、原始日志或产物清单",
             ],
         }
+        if phase == "RECOVER" and error and error.kind is ErrorKind.SCF_NOT_CONVERGED:
+            payload["automatic_recovery_contract"] = {
+                "molecule_name": "从已验证错误摘要提取的当前对象名",
+                "scf_options": "必须为 scf=xqc",
+                "forbidden": "basis、mem、nproc、opt_options 及其他未公开字段",
+            }
         return "受控恢复状态（服务端生成，必须遵守）：\n" + json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         )
@@ -742,6 +798,23 @@ class LayerAgent:
         step_result: StepResult,
     ) -> str | None:
         """Let a layer reject an otherwise valid tool proposal from evidence."""
+        error = step_result.error
+        if (
+            error is not None
+            and error.kind is ErrorKind.SCF_NOT_CONVERGED
+            and tool_name in {"tools_retry_struct_g16", "tools_retry_struct_g09"}
+            and (
+                set(args) != {"molecule_name", "scf_options"}
+                or not isinstance(args.get("molecule_name"), str)
+                or not args["molecule_name"].strip()
+                or args.get("scf_options") != "scf=xqc"
+            )
+        ):
+            # Let the recovery policy report confirmation requirements for
+            # explicit configuration overrides before applying this contract.
+            if any(field in args for field in ("basis", "mem", "nproc", "opt_options", "confirmation_granted")):
+                return None
+            return "SCF 自动恢复只允许 molecule_name 和 scf=xqc"
         return None
 
     def _build_action_proposal(

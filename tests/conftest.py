@@ -43,6 +43,7 @@ _TEST_LAYER_BY_FILE = {
     "test_pipeline_orchestrator.py": "integration",
     "test_postprocess.py": "integration",
     "test_run_assistant.py": "integration",
+    "test_run_control.py": "integration",
     "test_simulation_execution.py": "integration",
     "test_mdrun_knowledge.py": "contract",
     "test_gateway.py": "integration",

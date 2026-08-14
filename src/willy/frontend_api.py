@@ -41,6 +41,15 @@ from willy.managed_gateway import (
     request_managed_registration,
 )
 from willy.run_registry import RunRegistry, RunRegistryError, RunStateConflict
+from willy.run_control import (
+    RunControlCommand,
+    RunControlError,
+    apply_fork_changes,
+    parse_run_control_command,
+    safe_restart_step,
+    stopped_step,
+    validate_fork_changes,
+)
 from willy.step_registry import EQ_STEP, STEP_REGISTRY
 from willy.simulation.mdrun_eta import MDRUN_HEARTBEAT_INTERVAL_S
 from willy.pipeline_launch import (
@@ -50,6 +59,7 @@ from willy.pipeline_launch import (
     reserve_existing_run_launch,
     PipelineLaunchError,
     PipelineLockConflict,
+    reserve_pipeline_launch,
 )
 
 ROOT = get_project_root()
@@ -2331,6 +2341,307 @@ def run_assistant_pending_message(message: str) -> str:
     if classify_run_query(message).mode == "fast":
         return "正在读取当前运行事实..."
     return "正在读取运行事实并生成解释..."
+
+
+def run_assistant_control_command(run_id: str | None, message: str) -> str | None:
+    """Execute only explicit ``/resume`` or ``/fork`` chat commands."""
+    try:
+        command = parse_run_control_command(message)
+    except RunControlError as exc:
+        if isinstance(message, str) and message.lstrip().lower().startswith("/fork"):
+            return _reject_fork_command(run_id, str(exc))
+        return f"受控续跑命令无效：{exc}。"
+    if command is None:
+        return None
+    if command.kind == "resume":
+        return resume_aborted_run(run_id)
+    return fork_aborted_run(run_id, command)
+
+
+def resume_aborted_run(run_id: str | None) -> str:
+    """Relaunch an aborted run from its first unfinished safe step."""
+    try:
+        registry, directory, status, backend, restart_step, stopped_at = _control_context(run_id)
+        reservation = reserve_existing_run_launch(ROOT, directory.name)
+    except PipelineLockConflict:
+        return "当前已有运行中的工程，请等待其结束后再续跑。"
+    except (OSError, RunRegistryError, RunControlError, PipelineLaunchError):
+        return "只能对已由用户中止且未携带待确认方案的工程执行 /resume。"
+
+    try:
+        awaiting = _transition_to_control_awaiting(
+            registry, directory.name, status, event_type="resume_intent_accepted",
+        )
+        _transition_control_to_retrying(registry, directory.name, awaiting, restart_step=restart_step)
+        registry.record_control_action(
+            directory.name, action="resume", outcome="accepted",
+            restart_step=restart_step, stopped_step=stopped_at,
+        )
+        process = _spawn_controlled_run(reservation, backend=backend, restart_step=restart_step)
+        reservation.mark_runner_started(process.pid)
+        (ROOT / ".pipeline.pid").write_text(str(process.pid), encoding="utf-8")
+        reservation.detach_parent()
+        _cleanup_controlled_launch(process, directory.name, reservation.token)
+    except (OSError, ValueError, RunRegistryError, RunStateConflict, PipelineLaunchError):
+        try:
+            _restore_control_awaiting(registry, directory.name)
+            registry.record_control_action(
+                directory.name, action="resume", outcome="launch_failed",
+                restart_step=restart_step, stopped_step=stopped_at,
+            )
+        except (OSError, ValueError, RunRegistryError, RunStateConflict):
+            pass
+        reservation.release()
+        return "原参数续跑未启动；工程已回到等待状态，请检查后再次输入 /resume。"
+    try:
+        registry.record_control_action(
+            directory.name, action="resume", outcome="launched",
+            restart_step=restart_step, stopped_step=stopped_at,
+        )
+    except (OSError, ValueError, RunRegistryError):
+        # The child owns the reservation now; audit degradation cannot roll it back.
+        pass
+    return f"已接受 /resume；将读取原 config.json，并从第 {restart_step} 步的安全退出点续跑。"
+
+
+def fork_aborted_run(run_id: str | None, command: RunControlCommand) -> str:
+    """Create a child run after deterministic parameter/step validation."""
+    try:
+        registry, parent_dir, _status, backend, _safe_step, stopped_at = _control_context(run_id)
+        config = registry.get_run_config(parent_dir.name)
+        plan = validate_fork_changes(config, command.changes, stopped_at=stopped_at)
+        fork_config = apply_fork_changes(config, command.changes)
+        from willy.workflow_config import validate_config
+        if validate_config(fork_config):
+            raise RunControlError("修改后的配置未通过契约校验")
+    except RunControlError as exc:
+        return _reject_fork_command(run_id, str(exc))
+    except (OSError, ValueError, RunRegistryError):
+        return "只能对已由用户中止且未携带待确认方案的工程执行 /fork。"
+
+    try:
+        reservation = reserve_pipeline_launch(ROOT)
+    except PipelineLockConflict:
+        return "当前已有运行中的工程，请等待其结束后再创建 fork。"
+    except (OSError, PipelineLaunchError):
+        return "无法为 fork 预留新的运行目录。"
+
+    child_registry = RunRegistry(ROOT)
+    try:
+        _copy_fork_workspace(parent_dir, reservation.run_dir, fork_config)
+        child_registry.register_run(
+            reservation.run_dir, backend=backend,
+            total_steps=STEP_REGISTRY.total_steps, parent_run_id=parent_dir.name,
+        )
+        # A fork is a new run, so establish its full state-machine path before
+        # handing it to the resume-only orchestrator binding.
+        child_registry.record_status(reservation.run_dir, {
+            "state": "idle", "step": 0, "step_label": "", "layer": "",
+            "activity": {}, "done_steps": [],
+        }, "fork_child_initialized")
+        child_status = child_registry.get_run_status(
+            reservation.run_dir.name, reconcile=False,
+        )
+        child_awaiting = _transition_to_control_awaiting(
+            child_registry, reservation.run_dir.name, child_status,
+            event_type="fork_intent_accepted",
+        )
+        _transition_control_to_retrying(
+            child_registry, reservation.run_dir.name, child_awaiting,
+            restart_step=plan.restart_step,
+        )
+        child_registry.record_control_action(
+            reservation.run_dir.name, action="fork", outcome="created",
+            restart_step=plan.restart_step, stopped_step=plan.stopped_step,
+            parameter_paths=plan.parameter_paths, parent_run_id=parent_dir.name,
+        )
+        registry.record_control_action(
+            parent_dir.name, action="fork", outcome="accepted",
+            restart_step=plan.restart_step, stopped_step=plan.stopped_step,
+            parameter_paths=plan.parameter_paths,
+        )
+        process = _spawn_controlled_run(
+            reservation, backend=backend, restart_step=plan.restart_step,
+        )
+        reservation.mark_runner_started(process.pid)
+        (ROOT / ".pipeline.pid").write_text(str(process.pid), encoding="utf-8")
+        reservation.detach_parent()
+        _cleanup_controlled_launch(process, reservation.run_dir.name, reservation.token)
+    except (OSError, ValueError, RunRegistryError, PipelineLaunchError):
+        try:
+            child_registry.record_control_action(
+                reservation.run_dir.name, action="fork", outcome="launch_failed",
+                restart_step=plan.restart_step, stopped_step=plan.stopped_step,
+                parameter_paths=plan.parameter_paths, parent_run_id=parent_dir.name,
+            )
+            registry.record_control_action(
+                parent_dir.name, action="fork", outcome="launch_failed",
+                restart_step=plan.restart_step, stopped_step=plan.stopped_step,
+                parameter_paths=plan.parameter_paths,
+            )
+        except (OSError, ValueError, RunRegistryError):
+            pass
+        reservation.release()
+        return "fork 已创建但未能启动；父工程保持不变，请检查运行环境后重试。"
+    try:
+        child_registry.record_control_action(
+            reservation.run_dir.name, action="fork", outcome="launched",
+            restart_step=plan.restart_step, stopped_step=plan.stopped_step,
+            parameter_paths=plan.parameter_paths, parent_run_id=parent_dir.name,
+        )
+    except (OSError, ValueError, RunRegistryError):
+        # Once detached, the fork child owns the lock and remains runnable.
+        pass
+    return (
+        f"已创建 fork {reservation.run_dir.name}；父工程保持不变，"
+        f"将从第 {plan.restart_step} 步重新生成受影响阶段。"
+    )
+
+
+def _control_context(
+    run_id: str | None,
+) -> tuple[RunRegistry, Path, dict[str, object], str, int, int]:
+    if not isinstance(run_id, str) or not run_id:
+        raise RunControlError("请先选择一个运行")
+    registry = RunRegistry(ROOT)
+    directory = registry.resolve_run_id(run_id)
+    status = registry.get_run_status(run_id, reconcile=False)
+    pending = status.get("extra", {}).get("pending_action") if isinstance(status.get("extra"), Mapping) else None
+    if status.get("state") not in {"aborted", "awaiting_confirmation"} or isinstance(pending, Mapping):
+        raise RunControlError("运行不处于可控中止状态")
+    revision = status.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise RunControlError("运行状态版本无效")
+    backend = registry._read_registry_manifest(directory).get("backend")
+    if backend not in {"g16", "g09", "orca"}:
+        raise RunControlError("运行后端无效")
+    restart_step = safe_restart_step(status)
+    return registry, directory, status, backend, restart_step, stopped_step(status, restart_step=restart_step)
+
+
+def _reject_fork_command(run_id: str | None, reason: str) -> str:
+    """Persist a rejected fork as the required awaiting state."""
+    try:
+        registry, directory, status, _backend, restart_step, stopped_at = _control_context(run_id)
+        _transition_to_control_awaiting(
+            registry, directory.name, status, event_type="fork_rejected_awaiting",
+            error="fork 参数不适用于上次停止的步骤",
+        )
+        registry.record_control_action(
+            directory.name, action="fork", outcome="rejected",
+            restart_step=restart_step, stopped_step=stopped_at,
+        )
+    except (OSError, ValueError, RunRegistryError, RunStateConflict, RunControlError):
+        return f"/fork 被拒绝：{reason}。"
+    return f"/fork 被拒绝：{reason}。工程已回到等待状态。"
+
+
+def _transition_to_control_awaiting(
+    registry: RunRegistry,
+    run_id: str,
+    status: Mapping[str, object],
+    *,
+    event_type: str,
+    error: str = "",
+) -> dict[str, object]:
+    revision = status.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise RunStateConflict("运行状态版本无效")
+    updated = dict(status)
+    updated.update({
+        "state": "awaiting_confirmation", "error": error, "error_kind": "",
+        "repair": {}, "activity": {}, "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    directory = registry.resolve_run_id(run_id)
+    return registry.compare_and_swap_status(
+        directory, expected_revision=revision, status=updated, event_type=event_type,
+    )
+
+
+def _transition_control_to_retrying(
+    registry: RunRegistry,
+    run_id: str,
+    status: Mapping[str, object],
+    *,
+    restart_step: int,
+) -> dict[str, object]:
+    revision = status.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise RunStateConflict("运行状态版本无效")
+    done_steps = [
+        step for step in status.get("done_steps", [])
+        if isinstance(step, int) and not isinstance(step, bool) and step < restart_step
+    ]
+    updated = dict(status)
+    updated.update({
+        "state": "retrying", "step": restart_step,
+        "step_label": STEP_REGISTRY.label_for(restart_step),
+        "layer": STEP_REGISTRY.layer_for(restart_step), "done_steps": done_steps,
+        "error": "", "error_kind": "",
+        "repair": {"attempt": 1, "max_attempts": 1, "adjustments": []},
+        "activity": {}, "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    directory = registry.resolve_run_id(run_id)
+    return registry.compare_and_swap_status(
+        directory, expected_revision=revision, status=updated,
+        event_type="controlled_retry_started",
+    )
+
+
+def _restore_control_awaiting(registry: RunRegistry, run_id: str) -> None:
+    status = registry.get_run_status(run_id, reconcile=False)
+    if status.get("state") == "retrying":
+        _transition_to_control_awaiting(
+            registry, run_id, status, event_type="controlled_launch_failed",
+            error="受控续跑未能启动",
+        )
+
+
+def _copy_fork_workspace(parent_dir: Path, child_dir: Path, config: Mapping[str, object]) -> None:
+    """Copy scientific inputs/upstream outputs, never parent audit metadata."""
+    ignored = {
+        "config.json", "run_manifest.json", "manifest.json", "md_manifest.json",
+        "topology_manifest.json", "status.json", "events.jsonl", "decision_trace.jsonl",
+        "process_lifecycle.jsonl", "run_provenance.json", "environment_report.json",
+        "mdrun_eta.json", "pending_action.json", "logs", "visualization",
+    }
+
+    def ignore(_directory: str, names: list[str]) -> set[str]:
+        return {
+            name for name in names
+            if name in ignored or name.endswith(".lock") or name.startswith(".status")
+        }
+
+    shutil.copytree(parent_dir, child_dir, dirs_exist_ok=True, ignore=ignore)
+    from willy.config_store import write_json
+    write_json(child_dir / "config.json", config)
+
+
+def _spawn_controlled_run(reservation, *, backend: str, restart_step: int):
+    return subprocess.Popen(
+        [
+            "python3", "run_pipeline.py", backend,
+            "--run-dir", str(reservation.run_dir),
+            "--lock-fd", str(reservation.fd),
+            "--launch-token", reservation.token,
+            "--resume-from-step", str(restart_step),
+        ],
+        cwd=str(ROOT), start_new_session=True, pass_fds=(reservation.fd,),
+    )
+
+
+def _cleanup_controlled_launch(process, run_id: str, token: str) -> None:
+    def wait_then_cleanup() -> None:
+        process.wait()
+        pid_file = ROOT / ".pipeline.pid"
+        try:
+            if pid_file.read_text(encoding="utf-8").strip() == str(process.pid):
+                pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        cleanup_finished_launch(ROOT, run_id, token)
+
+    threading.Thread(target=wait_then_cleanup, daemon=True).start()
 
 
 def chat_run_assistant(run_id: str | None, message: str, history: list[dict] | None = None) -> str:

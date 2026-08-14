@@ -88,6 +88,7 @@ CATEGORIES = {
         "files": {
             "test_pipeline_launch.py", "test_process_lifecycle.py", "test_prune_runs.py",
             "test_run_assistant.py", "test_run_metadata.py", "test_run_provenance.py", "test_run_store.py",
+            "test_run_control.py",
             "test_remote_execution.py", "test_remote_registry.py",
         },
         "description": "运行预留、远程 profile/transport、互斥启动、进程生命周期、保留清理、审计、provenance、RunStore 与只读助理。",
@@ -96,7 +97,7 @@ CATEGORIES = {
         "title": "外部 Smoke 与发布证据",
         "files": {
             "test_external_smoke.py", "test_external_profile_evidence.py", "test_batch_report.py",
-            "test_release_baseline.py", "test_release_staging.py",
+            "test_release_baseline.py", "test_release_staging.py", "test_documentation_consistency.py",
         },
         "description": "外部工具预检、四条 profile 的只读终态证据、fixture 完整性、脱敏批次报告、证据归档和 required 发布门禁。",
     },
@@ -142,6 +143,7 @@ FILE_TARGETS = {
     "test_multi_factor_pending_action.py": "willy.simulation.pending_action multi-factor confirmation",
     "test_postprocess.py": "willy.simulation.postprocess",
     "test_run_assistant.py": "willy.run_registry / toolist_run / agent_run",
+    "test_run_control.py": "willy.run_control / frontend_api controlled resume and fork",
     "test_run_metadata.py": "willy.run_metadata schema-v2 / migration / section CAS",
     "test_run_provenance.py": "willy.run_provenance",
     "test_run_store.py": "willy.run_store",
@@ -167,6 +169,7 @@ FILE_TARGETS = {
     "test_external_smoke.py": "willy.external_smoke / self-hosted CI gate",
     "test_external_profile_evidence.py": "willy.external_profile_evidence / four-profile terminal evidence",
     "test_batch_report.py": "tests.reporting.batch_report",
+    "test_documentation_consistency.py": "documentation acceptance consistency gate",
     "test_release_baseline.py": "tests.tools.release_baseline isolated release gate",
     "test_release_staging.py": "scripts.build_release_staging / approved vendor staging",
     "test_e2e_gate.py": "tests.e2e browser gate policy",

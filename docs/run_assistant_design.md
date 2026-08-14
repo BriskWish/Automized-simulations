@@ -1,7 +1,7 @@
 # 运行助理开发方案
 
-> 状态：Phase A 与性能/可靠性升级核心实现完成；EQ 失败后的提案、替代方案、明确授权和受控重跑已实现；实际建盒审计查询已实现。当前版本的成熟方案只验收受支持 profile 十步完成且最终无错误；科学体系预测、后处理/分析和远程执行不在本版本范围内。Phase B-D 仍为后续增强，项目说明助理待设计。
-> 最后核验：2026-08-12
+> 状态：Phase A 与性能/可靠性升级核心实现完成；EQ 失败后的提案、替代方案、明确授权和受控重跑已实现；用户中止后的显式 `/resume` 与 `/fork` 已实现；实际建盒审计查询已实现。当前版本的成熟方案只验收受支持 profile 十步完成且最终无错误；科学体系预测、后处理/分析和远程执行不在本版本范围内。项目说明与架构问答已并入方案助理的只读子模式；Phase B-D 的其余增强仍为后续工作。
+> 最后核验：2026-08-14
 > 责任边界：0 号负责跨层契约和验收；3 号负责运行控制与模拟执行接口；4 号负责前端交互；各层工程师负责本层失败报告的准确性。
 
 ## 1. 决策与目标
@@ -43,7 +43,11 @@ Phase A 之前的基线与目标如下：
 | 用户操作 | 前端以启动/停止为主 | 先只读，后以 ActionProposal + 显式确认执行 |
 | 日志与产物 | 文件存在于运行目录但缺少统一查询 API | 原始日志仅保留给开发排障，不经 UI 或 LLM 工具读取 |
 
-初版已提供历史列表和只读运行观察。EQ 协议调整的受控重跑已落地：失败后只创建待确认动作，方案会列出允许复审的 EQ 参数；`awaiting_confirmation` 仅表示“LLM 已返回当前方案、尚未得到用户明确确认”，不能回退为未知、重试中或运行中。诊断证据同时支持多个可能原因时，动作可含最多 3 个相互独立的候选方案；每项公开可能原因、证据摘要、核心修改和重跑起点。用户回复“方案1/方案一/选择方案1”只选择该项并保持等待；回复“确认方案1/确认方案一”才同时选择并授权执行。未选择时的“确认”不启动任何进程。只有当前工程仍携带 `awaiting_confirmation` 动作时，用户提出明确的参数或阶段修正才能请求替代方案、无歧义批准语才能启动受控重跑；其他状态下的同类文本仍只读解释，不具备控制权限。替代方案会生成新的 `action_id`，原方案失效，配置在再次明确确认前保持不变；确认接口在成功保留启动锁后立即写入 `retrying`，随后由受控子进程流转到 `running`。启动失败时恢复原 `awaiting_confirmation` 快照。当前受限动作只允许从 Step 9 重跑 EQ；真空区和密度只作为诊断证据，不会强制回到 Step 7 重建盒子。不开放任意 run、任意路径或任意步骤的通用 resume。替代方案若未通过后端校验，运行助理将显示脱敏的具体原因而非统一失败文案，原动作保持可见、可继续修改或确认；拒绝原因来自服务器的字段/范围/快照校验，不是 LLM 对运行结果的解释。
+初版已提供历史列表和只读运行观察。EQ 协议调整的受控重跑已落地：失败后只创建待确认动作，方案会列出允许复审的 EQ 参数；带 `pending_action` 的 `awaiting_confirmation` 表示“LLM 已返回当前方案、尚未得到用户明确确认”，不能回退为未知、重试中或运行中。诊断证据同时支持多个可能原因时，动作可含最多 3 个相互独立的候选方案；每项公开可能原因、证据摘要、核心修改和重跑起点。用户回复“方案1/方案一/选择方案1”只选择该项并保持等待；回复“确认方案1/确认方案一”才同时选择并授权执行。未选择时的“确认”不启动任何进程。只有当前工程仍携带 `pending_action` 的 `awaiting_confirmation` 时，用户提出明确的参数或阶段修正才能请求替代方案、无歧义批准语才能启动受控重跑；其他状态下的同类文本仍只读解释，不具备控制权限。替代方案会生成新的 `action_id`，原方案失效，配置在再次明确确认前保持不变；确认接口在成功保留启动锁后立即写入 `retrying`，随后由受控子进程流转到 `running`。启动失败时恢复原 `awaiting_confirmation` 快照。当前受限动作只允许从 Step 9 重跑 EQ；真空区和密度只作为诊断证据，不会强制回到 Step 7 重建盒子。不开放任意 run、任意路径或任意步骤的通用 resume。替代方案若未通过后端校验，运行助理将显示脱敏的具体原因而非统一失败文案，原动作保持可见、可继续修改或确认；拒绝原因来自服务器的字段/范围/快照校验，不是 LLM 对运行结果的解释。
+
+G06 对中止 run 增加了严格受限的例外，而非任意 resume：只有完整 `/resume` 或 `/fork` 会在调用只读 Agent 前进入确定性控制分支。`/resume` 重新读取原 run 的冻结 `config.json`，在原目录从首个未完成步骤恢复；`/fork path=value` 或 `/fork {JSON}` 只能修改首次消费步骤不早于停止步骤的既有 `topology`、`box`、`md` 或 `execution` 字段，创建带 `parent_run_id` 的子 run，并从 Step 4 或 Step 6 的安全边界重放。普通文本和不完整命令仍只读。带 `pending_action` 的 `awaiting_confirmation` 仍专用于 EQ 方案；过早、未知或未变化的 fork 参数被拒绝后，父 run 通过 CAS 回到无 `pending_action` 的 `awaiting_confirmation`，只等待下一条显式命令。
+
+运行助理输入框仅在内容以 `/` 开头时显示本地 slash menu，提供 `/resume` 与 `/fork` 的补全、鼠标选择和方向键/Enter 选择；选择只回填命令文本，绝不提交或启动进程。菜单没有常驻布局空间，普通问答、其他面板及控制权限不受影响；提交后仍由服务端的命令解析、状态和启动锁校验裁决。
 
 ## 3. 运行数据契约
 
@@ -85,13 +89,13 @@ md_run/
 }
 ```
 
-`parent_run_id` 仅在从旧运行创建新运行（fork）时填写。恢复原运行与创建 fork 是两种不同动作：前者通常不修改配置快照，后者必须生成新的 `run_id` 和新的快照。已批准的 EQ 协议调整是受限例外：其私有动作记录保存审批前配置哈希，只有确认后才原子改写同一 run 的配置快照，并由下一个 MD 阶段将该版本归档到 simulation section 的配置修订记录。
+`parent_run_id` 仅在从旧运行创建新运行（fork）时填写。恢复原运行与创建 fork 是两种不同动作：前者不修改配置快照，后者必须生成新的 `run_id` 和新的快照。registry 还维护最近 32 条 `control_history`，每项只记录动作、结果、停止/续跑步骤、参数路径与父 run ID；参数值始终以对应 run 的冻结 `config.json` 为唯一来源。已批准的 EQ 协议调整是受限例外：其私有动作记录保存审批前配置哈希，只有确认后才原子改写同一 run 的配置快照，并由下一个 MD 阶段将该版本归档到 simulation section 的配置修订记录。
 
 ### 3.2 状态与事件
 
 `status.json` 继续使用 `PipelineStatus` 的稳定字段。Phase A 的 run 级快照增加顶层 `run_id`，步骤 ID 复用既有 `step` 字段；独立 `attempt_id` 和可定位的 `error_ref` 留给后续阶段。根目录旧 `status.json` 不作为运行事实来源；未绑定 run 的启动冲突或启动失败仅写入独立 `startup_audit.json`。
 
-每个 `events.jsonl` 记录 `timestamp`、`event_type`、`run_id`、`details`。公开 `details` 仅记录 activity、完成状态和摘要错误，不含 Agent 动作、原始日志、命令行、绝对路径或底层诊断；EQ 的等待、替代提案和确认均以受限状态事件记录，替代事件为 `pending_action_revised`。
+每个 `events.jsonl` 记录 `timestamp`、`event_type`、`run_id`、`details`。公开 `details` 仅记录 activity、完成状态和摘要错误，不含 Agent 动作、原始日志、命令行、绝对路径或底层诊断；EQ 的等待、替代提案和确认均以受限状态事件记录，替代事件为 `pending_action_revised`。受控恢复使用 `resume_*` 与 `fork_*` 事件族，details 仅含动作结果、停止/续跑步骤、参数路径和父 run ID。
 
 `logs/structured.jsonl` 是 run-local 的内部执行流，不替代公开 `events.jsonl`、`decision_trace.jsonl` 或 `process_lifecycle.jsonl`。每条记录含 `schema_version`、UTC `timestamp`、共享 `sequence`、`event_code`、`level`、`run_id`，并按需记录步骤/层、结果、错误类别、动作/策略/模型/Prompt 标识、受控参数字段、耗时和逻辑产物引用。编排器与 GROMACS 运行期间追加步骤、状态和进程事件；mdrun 心跳按现有低频周期追加。路径、命令、原始输出、完整提示词和密钥类字段统一脱敏，写入失败不改变步骤结果。
 
@@ -194,9 +198,9 @@ src/willy/toolist_run.py        # 只读 LLM tool schema 与 handler
 
 已完成：`PipelineOrchestrator` 在创建 run 时注册 manifest、写入脱敏外部工具能力报告，并在每个状态转换时同步 run 状态和事件；GROMACS `mdrun -v` 的 ETA 与阶段产物心跳会被归约为 `mdrun_eta.json`，并每 15 秒刷新 run 内状态快照而不扩张事件流。`RunRegistry` 以只读、安全字段和本地化展示时间供运行助理查询；`frontend_api.py` 只经 `RunRegistry` 读取运行信息。`app.py` 将欢迎语固定为对话框的第一个独立气泡，并关闭 Gradio 对连续助理消息的视觉合并。浏览器会话维护同一 run 的显示时间线：当前状态卡由 `status_event_id` 绑定 run、状态、步骤、待确认动作和公开错误事件；同一身份内 ETA、心跳或进度文字只原位刷新。身份改变时，旧状态卡封存为历史，随后新建当前状态卡；公开错误以 `run_id + state_revision`、待确认调整以 `run_id + action_id` 各自作为独立、去重且持久的事件气泡。状态卡、错误和方案在当前会话内不再合并或截断；切换 run 时一并清空并从欢迎语和新 run 状态重新开始。可用 ETA 在状态气泡中简写为“当前步骤预计结束：<本地时间>”。状态、公开错误与待确认动作必须从同一个当前 `run_id` 快照读取，绝不扫描历史等待项；状态和事件气泡属于显示历史，不传入 LLM。浏览器内的普通对话也绑定该 run，工程切换后先重置为欢迎消息再向 LLM 传递上下文。确认停止会公开 `stopping` 与最终 `aborted`，运行助理只解释该持久化事实，不执行停止操作。为保证高影响控制不经模型推断，文本“中止”“暂停”“稍后”等只保留工程当前状态；只有独立的“中止流水线”按钮经第二次点击才调用停止入口。`agent_run.py` 和其 tool list 仍严格只读。`agent_run.py` 是按请求创建的无状态 Agent；对话历史仅保留在浏览器会话，不作为运行事实或审计记录。
 
-`agent_run.py` 与其 tool list 保持严格只读。唯一的控制例外位于 `frontend_api.revise_pending_action`：它仅在同一 run 处于 `awaiting_confirmation` 时生成并校验替代 `pending_action`，不写 `config.json`、MDP、阶段许可或进程；替换后的动作必须由用户再次明确确认。浏览器会话历史可以保留给界面显示，但不会透传给运行助理模型；当前工程的服务端事实始终优先。
+`agent_run.py` 与其 tool list 保持严格只读。控制例外均位于 `frontend_api`：`revise_pending_action` 仅在同一 run 带 `pending_action` 的 `awaiting_confirmation` 时生成并校验替代方案；`run_assistant_control_command` 只接受完整 `/resume` 与 `/fork`，在调用只读 Agent 前处理。后者只针对用户中止的当前 run，重新校验状态 revision、启动锁、冻结配置、断点和参数归属；不匹配的普通文本仍进入只读问答。浏览器会话历史可以保留给界面显示，但不会透传给运行助理模型；当前工程的服务端事实始终优先。
 
-验收：可列出至少三个历史 run；选中旧 run 后能看到正确状态、步骤、失败原因和已登记产物；未确认或仅替换方案时不产生新进程、不改写配置；确认后先观察到 `retrying`，再观察到 `running` 和对应重跑阶段。
+验收：可列出至少三个历史 run；选中旧 run 后能看到正确状态、步骤、失败原因和已登记产物；未确认或仅替换方案时不产生新进程、不改写配置；确认后先观察到 `retrying`，再观察到 `running` 和对应重跑阶段；中止 run 的 `/resume` 必须在原目录从安全步骤恢复，`/fork` 必须创建独立子 run 和 `parent_run_id`，过早参数必须被拒绝并返回等待状态。
 
 ### Phase B：错误解释与 MD 指导
 
@@ -206,23 +210,23 @@ src/willy/toolist_run.py        # 只读 LLM tool schema 与 handler
 
 验收：运行助理工程状态和对话对同一错误给出相同的公开摘要；经验命中必须附带适用边界和待验证条件，未命中不得臆造案例；`step_id`、`ErrorKind` 和证据引用仅供内部 LayerAgent 处理，不能向用户暴露；Advisor 建议与实际 run 配置一致，并能说明建议的前提。
 
-### Phase B.1：项目说明与架构问答（规划）
+### Phase B.1：项目说明与架构问答（已实现）
 
-当前方案助理只接收配置生成所需的分子与协议事实，运行助理只接收单个 `run_id` 的公开运行事实；二者均没有仓库源码或项目文档读取能力。用户询问“本项目的架构、状态机、manifest、工具边界或已实现能力”时，模型可以给出一般性说明，但不能保证是当前项目的真实事实。
+不新增 Project Assistant。现有方案助理先对带有项目架构、状态机、manifest、工具/权限边界或已实现能力标记的提问进行一次无工具 LLM 意图判断；普通模拟配置、分子和协议参数请求仍进入原有生成路径。识别为项目设计问答后，方案助理只读取服务端固定白名单中的 `README.md`、`docs/Willy.md`、`docs/status_api.md`、`docs/run_assistant_design.md` 和 `docs/document_registry.md`，按 Markdown 标题截取有限片段后再由 LLM 回答。
 
-后续新增独立的 **项目说明助理（Project Assistant）**，不扩大方案助理、运行助理或 LayerAgent 的权限。它只读受控的项目知识索引，初始白名单为 `README.md`、`docs/Willy.md`、`docs/employees.md`、`docs/status_api.md`、`docs/run_assistant_design.md` 和 `docs/document_registry.md`；索引记录文档 ID、版本/哈希、章节标题和脱敏片段。模型只能通过白名单检索工具按文档和章节读取有限片段，不能读取任意路径、源码、运行目录、密钥、环境变量、原始日志或未登记文档，也不能执行、修改配置或修改源代码。
+该子模式不读取源码、运行目录、环境变量、密钥、原始日志或任意用户指定路径，不提供 tool schema，也不会生成 config JSON、修改待确认方案、写文件、启动/停止/重跑/分叉进程。回答必须区分“已实现事实”和“规划事项”，引用文档名称与章节；没有命中、文档不可读或需要源码级证据时，应明确说明无法确认。对话气泡可保留在浏览器会话中，但不得产生持久化写入或改变已有 `pending_plan`。
 
-回答必须区分“已实现事实”和“规划事项”，引用文档名称与章节；索引与源文档哈希不一致、没有命中或问题需要源码级证据时，应明确说明无法确认，而不是推测。验收应覆盖：架构问题命中正确章节、计划与已实现能力不混淆、越权路径/源码读取被拒绝、文档更新后索引失效提示，以及任意问题均不产生写入或进程副作用。
+验收覆盖：架构问题命中白名单片段并经两轮 LLM（意图、回答）处理；普通配置请求在分类为 `plan_request` 后完整沿用既有语义归一化、输入审计和严格 JSON 流程；设计问答没有工具调用、进程调用或待确认方案副作用。
 
 ### Phase C：确认式运行控制
 
 范围：`ActionProposal`、确认 UI、`RunController`、安全 abort/resume/fork。
 
-已落地的最小前置能力包括现有前端的确认式停止，以及 EQ 失败后的受限 `retry_step`：按钮首击或“中止流水线”文本只进入待确认态，第二次点击或精确“确认中止”才持久化停止意图、`stopping`/`aborted` 终态和 run 事件；GROMACS 在安全点写 checkpoint。EQ 修正采用“LLM 提案 -> 用户修正 -> LLM 替代提案 -> 用户确认”流程，未确认时不改写配置、不启动进程；确认恢复固定经过 `awaiting_confirmation -> retrying -> running`。它不是 Run Assistant tool，也不开放任意 resume 或 fork。
+已落地的能力包括现有前端的确认式停止、EQ 失败后的受限 `retry_step`，以及用户中止后的显式续跑。按钮首击或“中止流水线”文本只进入待确认态，第二次点击或精确“确认中止”才持久化停止意图、`stopping`/`aborted` 和 run 事件；GROMACS 在安全点写 checkpoint。EQ 修正采用“LLM 提案 -> 用户修正 -> LLM 替代提案 -> 用户确认”流程，未确认时不改写配置、不启动进程；确认恢复固定经过 `awaiting_confirmation -> retrying -> running`。G06 的 `/resume`、`/fork` 不是 Run Assistant tool：它们只在完整标识出现时走前端确定性入口，受状态 CAS、启动锁、停止步骤和配置字段归属共同约束。
 
-改造点：为编排器公开不依赖 UI 的 `abort`、`resume`、`fork` 入口；进程以 PID/PGID 与进程启动身份管理；操作完成后写事件及产物失效关系。
+实现：`run_control.py` 解析命令并校验参数；`frontend_api` 预占锁、转移状态、创建 fork 快照并启动锁绑定的 CLI；编排器在原 run 或子 run 中恢复并使续跑边界后的完成标记失效。操作写入 registry 的 `control_history` 和 `events.jsonl`，进程继续以 PID/PGID 与启动身份管理。
 
-验收：未确认 proposal 没有任何副作用；重复确认同一 `action_id` 幂等；停止操作不影响其他 run；配置变化只能创建 fork；失败的 resume 能给出结构化拒绝原因。
+验收：未确认 proposal 没有任何副作用；重复确认同一 `action_id` 幂等；停止操作不影响其他 run；`/resume` 的原配置和原 run 目录不变且按安全步骤恢复；配置变化只能创建 fork；过早 fork 参数回到等待状态；每个接受、拒绝和启动结果均有 manifest/event 审计。
 
 ### Phase D：历史检索与保留治理
 

@@ -1,0 +1,118 @@
+{
+  "artifacts": [
+    {
+      "name": "topol.top",
+      "sha256": "76d21697c9df3a61cbd6cbfecf80bf804ecc346f023b9457bb5f7721c9d4c1d0",
+      "size_bytes": 1146
+    },
+    {
+      "name": "model.pdb",
+      "sha256": "ce53a7504bde4f3c163156f6a4f6253082f993e02e1913b37c30f0d2e923c368",
+      "size_bytes": 459525
+    },
+    {
+      "name": "em.tpr",
+      "sha256": "aeb882a9d6c6eddd2c35ca9de22cd8aa46804bfed67fb614f000cf55ba89ccc6",
+      "size_bytes": 83428
+    },
+    {
+      "name": "em.gro",
+      "sha256": "b18e660e38ec9e63d22ce2df65f1db60d29ecdd8488f151d8fd05a58b1b70b0f",
+      "size_bytes": 255206
+    },
+    {
+      "name": "em.xtc",
+      "sha256": "05fcdd123bc5da7656294943eb9563d9dfdd41cef6598c359532b4d8402db469",
+      "size_bytes": 22236
+    },
+    {
+      "name": "em.edr",
+      "sha256": "f7039925ad79be93b42e0388c21ef3226b0344ddadf36d2506cc649c252a2402",
+      "size_bytes": 1612
+    },
+    {
+      "name": "eq.tpr",
+      "sha256": "d58a6df120ab5cd268bf46da9d99aedd5eabec33996cdd9648ad86c93c07e474",
+      "size_bytes": 151508
+    },
+    {
+      "name": "eq.gro",
+      "sha256": "80ad1e23bb95c4afb3580facc7d7d2cb8e1ae06917266da0d6c150b9b47018da",
+      "size_bytes": 391286
+    },
+    {
+      "name": "eq.xtc",
+      "sha256": "5bf419ed2faeb54d0c83115210e89e15286cccb5e07e2904507f9d76b63c8199",
+      "size_bytes": 157042460
+    },
+    {
+      "name": "eq.edr",
+      "sha256": "94f784ebf20932d1a30f9b9da5a28f9e3e2d46306a10440fb9fc1fd735caab43",
+      "size_bytes": 8737352
+    },
+    {
+      "name": "eq.cpt",
+      "sha256": "5e83eba74cdd5612a3cdf3605f15ac673e9b4492123120b9c5a07d20470eed37",
+      "size_bytes": 138064
+    },
+    {
+      "name": "prod.tpr",
+      "sha256": "b75962ec8fc4c102568d38ad2e7f3ec4fe7bce3f6a5335dd7140530dbe917b2b",
+      "size_bytes": 151452
+    },
+    {
+      "name": "prod.gro",
+      "sha256": "d025b5dc576db09d13058058d6adb224e3b1a7680b66b38d422ae95c6ef64a23",
+      "size_bytes": 391286
+    },
+    {
+      "name": "prod.xtc",
+      "sha256": "16b01f7fdc7b652b5b7e6eb55b3efadf00088499166318ca5eca34878d15ae25",
+      "size_bytes": 44772848
+    },
+    {
+      "name": "prod.edr",
+      "sha256": "bda53956e428645b2b28587d9aeee269ccfa129a8f9edff9531ae1729fc3bbf5",
+      "size_bytes": 2497352
+    },
+    {
+      "name": "prod.cpt",
+      "sha256": "48cea54b5a0dd4323957da8559b6026d454ddab05c65c11e01defbce1b4b518e",
+      "size_bytes": 138064
+    }
+  ],
+  "conclusion": "passed",
+  "profile": {
+    "profile_id": "orca_sobtop_electrolyte",
+    "quantum_backend": "orca",
+    "topology_backend": "Sobtop"
+  },
+  "run_id": "md__202608110005",
+  "schema_version": 1,
+  "software": {
+    "project_version": "source",
+    "source_commit": "2e0f9f235f4d9af61d8f81193f41ef55c8cf428c",
+    "worktree_clean": false
+  },
+  "workflow": {
+    "done_steps": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "stage_states": {
+      "em": "accepted",
+      "eq": "accepted",
+      "prod": "completed"
+    },
+    "state": "done",
+    "total_steps": 10
+  }
+}

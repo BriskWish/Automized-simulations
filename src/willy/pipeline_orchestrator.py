@@ -47,7 +47,8 @@ class PipelineOrchestrator:
 
     def __init__(self, backend: str = "g16", use_llm: bool = True,
                  resume_from: int = 0, resume_run_dir: str = "",
-                 confirmed_action_id: str = ""):
+                 confirmed_action_id: str = "", controlled_resume_step: int = 0,
+                 parent_run_id: str = "", control_action: dict[str, object] | None = None):
         self.backend = str(backend).strip().lower()
         if self.backend not in _SUPPORTED_QUANTUM_BACKENDS:
             raise ValueError("量子后端必须为 g16、g09 或 orca")
@@ -66,6 +67,11 @@ class PipelineOrchestrator:
         self._stop_after_step: int | None = None
         self._repair_rerun_attempts: dict[tuple[int, str], int] = {}
         self._confirmed_action_id = confirmed_action_id.strip()
+        self._controlled_resume_step = int(controlled_resume_step)
+        if self._controlled_resume_step and not 1 <= self._controlled_resume_step <= STEP_REGISTRY.total_steps:
+            raise ValueError("受控续跑步骤无效")
+        self._parent_run_id = parent_run_id.strip()
+        self._control_action = dict(control_action or {})
         self._tool_catalog = build_default_tool_catalog()
         self._recovery_policy = default_recovery_policy(self._tool_catalog)
         self._llm_budget = LLMBudget.from_env() if use_llm else None
@@ -85,7 +91,12 @@ class PipelineOrchestrator:
         # registered.  Deferring writes prevents failed duplicate launches
         # from overwriting another run's status.json at the project root.
         self._sm = PipelineStateMachine(total_steps=STEP_REGISTRY.total_steps, defer_writes=True)
-        for s in range(1, self._resume_from + 1):
+        initial_resume_from = (
+            self._controlled_resume_step - 1
+            if self._controlled_resume_step
+            else self._resume_from
+        )
+        for s in range(1, initial_resume_from + 1):
             self._sm.mark_done(s)
 
         if use_llm:
@@ -322,6 +333,7 @@ class PipelineOrchestrator:
             run_dir,
             backend=self.backend,
             total_steps=self._sm.total_steps,
+            parent_run_id=self._parent_run_id or None,
         )
         from willy.env_registry import public_capabilities
         capabilities = public_capabilities()
@@ -337,7 +349,29 @@ class PipelineOrchestrator:
             raise ValueError(
                 f"配置量子后端 {configured_backend!r} 与启动后端 {self.backend!r} 不一致"
             )
-        audit = audit_config_quantum_inputs(config, struct_dir=ROOT / "struct")
+        reusable_suffix = ".fchk" if self.backend in {"g16", "g09"} else ".molden"
+        raw_suffix = ".gjf" if self.backend in {"g16", "g09"} else ".inp"
+        missing_quantum_inputs: list[str] = []
+        for name in config.get("molecules", {}):
+            source_input = ROOT / "struct" / f"{name}{raw_suffix}"
+            source_intermediate = ROOT / "struct" / f"{name}{reusable_suffix}"
+            target_input = run_dir / source_input.name
+            target_intermediate = run_dir / source_intermediate.name
+            if not target_input.exists() and source_input.is_file():
+                shutil.copy2(source_input, target_input)
+            if not target_intermediate.exists() and source_intermediate.is_file():
+                shutil.copy2(source_intermediate, target_intermediate)
+            if not target_input.is_file():
+                missing_quantum_inputs.append(name)
+        if missing_quantum_inputs:
+            raise ValueError(
+                f"{', '.join(missing_quantum_inputs)} 缺少 {raw_suffix} 原始输入"
+            )
+
+        # Run-local raw sources are authoritative for a fork too.  A parent
+        # snapshot must not be revalidated against a subsequently edited root
+        # struct/ directory.
+        audit = audit_config_quantum_inputs(config, struct_dir=run_dir)
         if not audit.get("ok"):
             raise ValueError("量子输入审计未通过: " + "; ".join(audit.get("issues", [])))
         proposed_input_issues = quantum_input_contract_issues(config, audit)
@@ -371,28 +405,6 @@ class PipelineOrchestrator:
         # Registration precedes this final snapshot write; refresh the registry
         # hash after all audited fields and the run seed are persisted.
         self._run_registry.refresh_config_fingerprint(run_dir)
-        reusable_suffix = ".fchk" if self.backend in {"g16", "g09"} else ".molden"
-        raw_suffix = ".gjf" if self.backend in {"g16", "g09"} else ".inp"
-        missing_quantum_inputs: list[str] = []
-        for name in config.get("molecules", {}):
-            source_input = ROOT / "struct" / f"{name}{raw_suffix}"
-            source_intermediate = ROOT / "struct" / f"{name}{reusable_suffix}"
-            target_input = run_dir / source_input.name
-            target_intermediate = run_dir / source_intermediate.name
-
-            if not source_input.is_file():
-                missing_quantum_inputs.append(name)
-                continue
-            if not target_input.exists():
-                shutil.copy2(source_input, target_input)
-            if source_intermediate.is_file():
-                if not target_intermediate.exists():
-                    shutil.copy2(source_intermediate, target_intermediate)
-
-        if missing_quantum_inputs:
-            raise ValueError(
-                f"缺少 {raw_suffix} 原始量子输入: {', '.join(missing_quantum_inputs)}"
-            )
         # The RunRegistry was created before copying inputs so early status
         # writes have an owner.  Refresh only its frozen input fingerprints
         # now that this run's backend-specific sources are present.
@@ -418,6 +430,19 @@ class PipelineOrchestrator:
                 if agent is not None
             },
         )
+        if self._control_action:
+            try:
+                self._run_registry.record_control_action(
+                    run_dir.name,
+                    action=str(self._control_action.get("action", "fork")),
+                    outcome="created",
+                    restart_step=self._control_action.get("restart_step"),
+                    stopped_step=self._control_action.get("stopped_step"),
+                    parameter_paths=self._control_action.get("parameter_paths", ()),
+                    parent_run_id=self._parent_run_id or None,
+                )
+            except (OSError, ValueError, RunRegistryError):
+                pass
         return config_snapshot
 
     # ============================================================
@@ -440,7 +465,10 @@ class PipelineOrchestrator:
 
         run_dir = run_dir.resolve()
         try:
-            config_path = self._prepare_run_directory(run_dir)
+            if self._controlled_resume_step:
+                config_path = self._bind_controlled_resume_run(run_dir)
+            else:
+                config_path = self._prepare_run_directory(run_dir)
         except (OSError, ValueError, json.JSONDecodeError, RunRegistryError) as exc:
             self._sm.set_error(
                 public_error_summary("流水线", "运行初始化", "当前体系", ErrorKind.CONFIG_INVALID),
@@ -460,8 +488,9 @@ class PipelineOrchestrator:
         print(f"[orchestrator] 运行目录: {run_dir}")
         print(f"[orchestrator] 后端: {self.backend}")
         print(f"[orchestrator] LLM Agent: {'启用' if self.use_llm else '禁用'}")
-        if self._resume_from > 0:
-            print(f"[orchestrator] 断点续跑: 仅跳过 Step 1 结构优化，Step 2+ 全部重跑")
+        if self._resume_from > 0 or self._controlled_resume_step:
+            restart_step = self._controlled_resume_step or self._resume_from + 1
+            print(f"[orchestrator] 断点续跑: 从 Step {restart_step} 重新开始")
 
         steps = self._build_steps(run_dir)
         accumulated_artifacts: dict[str, list[str]] = {}
@@ -478,7 +507,8 @@ class PipelineOrchestrator:
             i = step_position
             label, func, dep_module, is_batch, layer_index = steps[i - 1]
             # ── 断点续跑：跳过已完成步骤 ──
-            if i <= self._resume_from:
+            resume_from = self._controlled_resume_step - 1 if self._controlled_resume_step else self._resume_from
+            if i <= resume_from:
                 append_structured_event(
                     run_dir,
                     "step_skipped",
@@ -612,6 +642,30 @@ class PipelineOrchestrator:
         self._sm.transition(State.DONE)
         print(f"\n{'='*60}\n  ✅ 全流程完成\n  产物: {run_dir}/\n{'='*60}")
         return True
+
+    def _bind_controlled_resume_run(self, run_dir: Path) -> Path:
+        """Bind an API-authorized same-run replay without recreating metadata."""
+        config_path = run_dir / "config.json"
+        registry = RunRegistry(ROOT)
+        self._run_dir = run_dir
+        self._run_config_path = config_path
+        self._run_registry = registry
+        self._sm.bind_status_path(run_dir / "status.json")
+        self._sm.bind_observer(self._record_run_status)
+        if not config_path.is_file():
+            raise ValueError("恢复运行缺少配置快照")
+        manifest = registry._read_registry_manifest(run_dir)
+        if manifest.get("backend") != self.backend:
+            raise ValueError("恢复运行的后端与冻结配置不一致")
+        status = registry.get_run_status(run_dir.name, reconcile=False)
+        if status.get("state") != State.RETRYING.value:
+            raise ValueError("恢复运行未进入受控重试状态")
+        self._sm.restore_for_controlled_resume(status)
+        self._sm.invalidate_for_controlled_restart(self._controlled_resume_step)
+        for agent in self._agents.values():
+            if agent is not None and hasattr(agent, "set_workspace"):
+                agent.set_workspace(str(run_dir), str(config_path))
+        return config_path
 
     def _bind_confirmed_action_run(self, run_dir: Path) -> Path:
         """Bind an existing waiting run without reinitializing its inputs."""

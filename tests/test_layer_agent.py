@@ -20,6 +20,7 @@ from willy.errors import StepResult, StepError, ErrorKind, RetryContext
 from willy.layer_agent import LayerAgent, Escalation
 from willy.action_contract import build_default_tool_catalog
 from willy.recovery_policy import default_recovery_policy
+from willy.toolist_quantum import QUANTUM_TOOLS
 
 
 # ============================================================
@@ -306,7 +307,10 @@ class TestHandleFailure:
         assert result.escalated is True
         assert result.extra["recovery_terminal_reason"] == "model_no_tool_call"
         assert mock_llm_client.chat.completions.create.call_count == 1
-        assert mock_llm_client.chat.completions.create.call_args.kwargs["tool_choice"] == "required"
+        assert mock_llm_client.chat.completions.create.call_args.kwargs["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "tools_diagnose"},
+        }
         assert [t["function"]["name"] for t in mock_llm_client.chat.completions.create.call_args.kwargs["tools"]] == ["tools_diagnose"]
         assert traces[-1]["result"] == "model_no_tool_call"
 
@@ -692,6 +696,55 @@ class TestLayerAgentEdgeCases:
 
 
 class TestRecoveryAuthorization:
+    def test_scf_recovery_schema_requires_only_safe_xqc_parameters(self, mock_llm_client, make_step_result):
+        catalog = build_default_tool_catalog()
+        agent = LayerAgent(
+            "quantum", "prompt", QUANTUM_TOOLS, lambda _name, _args: "{}", mock_llm_client,
+            recovery_policy=default_recovery_policy(catalog), tool_catalog=catalog,
+        )
+        failed = make_step_result(
+            success=False, step_index=1, error_kind=ErrorKind.SCF_NOT_CONVERGED,
+        )
+
+        tools, terminal = agent._recovery_tool_schemas(failed)
+
+        assert terminal is None
+        assert len(tools) == 1
+        parameters = tools[0]["function"]["parameters"]
+        assert parameters["required"] == ["molecule_name", "scf_options"]
+        assert set(parameters["properties"]) == {"molecule_name", "scf_options"}
+        assert parameters["additionalProperties"] is False
+        assert parameters["properties"]["scf_options"]["enum"] == ["scf=xqc"]
+
+    def test_scf_recovery_rejects_options_outside_the_automatic_contract(
+        self, tmp_path, mock_llm_client, make_step_result,
+    ):
+        calls = []
+        catalog = build_default_tool_catalog()
+        agent = LayerAgent(
+            "quantum", "prompt", QUANTUM_TOOLS,
+            lambda name, args: calls.append((name, args)) or "{}", mock_llm_client,
+            recovery_policy=default_recovery_policy(catalog), tool_catalog=catalog,
+        )
+        failed = make_step_result(
+            success=False, step_index=1, error_kind=ErrorKind.SCF_NOT_CONVERGED,
+        )
+        ctx = RetryContext("quantum", failed.step_name, ErrorKind.SCF_NOT_CONVERGED, max_attempts=5)
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+
+        payload = json.loads(agent._dispatch_tool(
+            "tools_retry_struct_g16",
+            {"molecule_name": "Li", "scf_options": "scf=maxcycle=256"},
+            step_result=failed,
+            ctx=ctx,
+            run_dir=str(tmp_path / "md__202608050001"),
+            config_path=str(config_path),
+        ))
+
+        assert calls == []
+        assert payload["extra"]["policy_denied"] is True
+
     def test_model_confirmation_flag_cannot_dispatch_a_method_change(self, tmp_path, mock_llm_client, make_step_result):
         calls = []
         traces = []

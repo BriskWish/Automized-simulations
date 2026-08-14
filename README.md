@@ -2,9 +2,9 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **版本 0.4.0**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版完善了外部依赖确认性、内置运行库说明、GROMACS 显式路径配置、vendor 完整性审计和发布测试门禁。
+> **版本 0.4.1**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版更新验收缺口、浏览器交互验证、受控恢复和目标机外部执行证据边界。
 
-> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。代码契约与模拟层测试已验证。2026-08-11 的四条 profile 是历史批次成功记录；当前受控验收机已复核 G16 + Sobtop 的一条完整十步运行，其余三条当前版本重放及标准化脱敏证据仍在验收中。
+> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。四条 G16/ORCA + Sobtop/LigParGen 历史完整 run 的脱敏核心证据已归档，并与后续版本的确定性回归共同构成验收并集；新目标机只需任选一条受支持 profile 完成十步，另行完成真实 LLM 错误处理验收即可。
 
 本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测和后处理/分析不属于本版本公开能力。
 
@@ -64,13 +64,13 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 | Multiwfn（内置） | 3.8(dev)，2025-02-14 | RESP 电荷拟合、Molden/FCHK 转换 | `vendor/` 最小 Linux x86_64 负载；随附许可证和引用要求 |
 | GROMACS | 开发/真实证据 2025.0；兼容目标 2023--2025 | MD 模拟引擎 | 用户通过系统包或官方构建安装；GROMACS 为 LGPL-2.1-or-later，不随 Willy 提供 |
 | Packmol（内置） | 21.2.3，glibc >= 2.29 | 初始盒子构建 | `vendor/` 的 Linux x86_64 通用构建；MIT，保留 `PACKMOL_LICENSE.txt` |
-| Sobtop | 当前仓内 Linux x86_64 负载，精确发行版本未核实 | GAFF/UFF 拓扑生成 | 上游页面为 [Sobtop](http://sobereva.com/soft/sobtop/)；本项目不声明其著作权或再分发授权，使用者须自行核实上游条款 |
+| Sobtop | 仓内 Linux x86_64 负载 | GAFF/UFF 拓扑生成 | 上游来源为 [Sobtop](http://sobereva.com/soft/sobtop/)；本项目不声明其著作权或代替上游条款，使用者须自行核实使用条件 |
 | LigParGen | 2.1 兼容适配 | OPLS-AA 参数化 | 用户自行安装命令行版本；上游 [LigParGen](https://zarbi.chem.yale.edu/ligpargen/index.html) 未在本项目记录中提供可审计再分发许可 |
 | BOSS | 5.1 | LigParGen 的 OPLS/CM1A 后端 | 用户按 [Jorgensen 组下载流程](https://zarbi.chem.yale.edu/software.html) 获取；官网说明仅向学术用户免费提供，不随 Willy 提供或再分发 |
 | Open Babel | 完整安装 3.1.1；上游当前 3.2.0 | LigParGen 的 SMILES/MOL2 转换 | 用户自行安装完整 Open Babel；上游采用 GPL-2.0，仓内精简运行时版本/构建来源未核实，不作为 OPLS 依赖替代品 |
 | C shell | 由操作系统提供 | BOSS 运行脚本 | 用户通过发行版包管理器安装；遵从相应发行版的许可 |
 
-> 完整源码检出当前含 Packmol、Sobtop、Multiwfn 与精简 Open Babel 运行负载。Multiwfn 与 Packmol 的版本、哈希和许可文本已登记；Sobtop、精简 Open Babel 与遗留 3Dmol 的精确来源、版本或再分发依据尚未完成审计。它们不属于 Willy 作者声明拥有权利的内容，也不构成向使用者授予的第三方授权。Multiwfn 不需要外部安装或 PATH 配置；OPLS-AA 的 LigParGen/BOSS 链路仍需要用户另行安装 LigParGen、BOSS、含格式插件和数据文件的完整 Open Babel，以及 C shell。
+> 完整源码检出当前含 Packmol、Sobtop、Multiwfn 与精简 Open Babel 运行负载；上游入口分别为 Packmol、[Sobtop](http://sobereva.com/soft/sobtop/)、Multiwfn、[Open Babel](https://openbabel.org/) 和 [3Dmol.js](https://3dmol.org/)。这些第三方内容不属于 Willy 作者声明拥有权利的内容，也不构成向使用者授予的第三方授权；受控 staging 仍按 `vendor/manifest.json` 排除未纳入发行工件的负载。Multiwfn 不需要外部安装或 PATH 配置；OPLS-AA 的 LigParGen/BOSS 链路仍需要用户另行安装 LigParGen、BOSS、含格式插件和数据文件的完整 Open Babel，以及 C shell。
 
 > OPLS-AA 仅能作为与 Sobtop/GAFF 隔离的显式参数化路径。中性有机小分子的 LigParGen/BOSS 参数化、ITP 命名空间、GRO 五列残基字段、Packmol 以及 GROMACS EM/EQ/PROD 已有真实证据；对于单一 Ewald 净电荷 warning，只有总电荷绝对值不超过 `0.15e` 时才按受控规则放行，其他 warning 或更大不平衡仍拒绝。Li+、NO3-、TFSI- 等离子或不含 H 组分不由当前 LigParGen 路径支持，必须提供可验证的外部 OPLS 参数，且不得与 Sobtop 产物混用。
 

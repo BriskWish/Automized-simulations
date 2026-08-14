@@ -1,0 +1,118 @@
+{
+  "artifacts": [
+    {
+      "name": "topol.top",
+      "sha256": "0bde48c537fb9b3c6cc87408333b3fc29186985a3c93fa14391c18b5b2c73d13",
+      "size_bytes": 2750
+    },
+    {
+      "name": "model.pdb",
+      "sha256": "71e5ff0de050e911c71b53292d596b96a42fe4b98989495fc94af142b24958d7",
+      "size_bytes": 567255
+    },
+    {
+      "name": "em.tpr",
+      "sha256": "debf57df487228e7a377133fb38262d3402ab5aaaeb66df73c5e1f6c5a530f77",
+      "size_bytes": 97824
+    },
+    {
+      "name": "em.gro",
+      "sha256": "510cb7e7d3cc3643fb5591cb4b45f54f694d38f969ae448dd039a4a5cc1415fd",
+      "size_bytes": 315048
+    },
+    {
+      "name": "em.xtc",
+      "sha256": "982fed6412c02b607e74f0b561c643ff10a243a8404b3830579362c58c50f8b8",
+      "size_bytes": 27568
+    },
+    {
+      "name": "em.edr",
+      "sha256": "4a5478edf9ad9f37f5841cf5aa971764d1bc243db5291fd10834fcd9845b673a",
+      "size_bytes": 1412
+    },
+    {
+      "name": "eq.tpr",
+      "sha256": "9a58892a963505d0766d4b56bc84a604d6b825efba18e7ad0427b8b5d106a6c9",
+      "size_bytes": 181856
+    },
+    {
+      "name": "eq.gro",
+      "sha256": "1ff059b86b1cbeaeeb8866f030c8e1d46b8916f5c3e8f77159d096ddb489fa44",
+      "size_bytes": 483048
+    },
+    {
+      "name": "eq.xtc",
+      "sha256": "bb5e4ebd14b1a186376e7bafbe643b3460f356d8372f1fb6da865313e2f05f34",
+      "size_bytes": 194833556
+    },
+    {
+      "name": "eq.edr",
+      "sha256": "39e03fae05214cbf80df626d5b49a808c4f9afad0d416ac98f777eed195b3dbc",
+      "size_bytes": 8737356
+    },
+    {
+      "name": "eq.cpt",
+      "sha256": "3580c9d6a310bee79bf2c6e786cd2d754bd8ecc25e6bb2db76d65019508af600",
+      "size_bytes": 169984
+    },
+    {
+      "name": "prod.tpr",
+      "sha256": "3e98b26e709277d4d65b18727ef57512417db9b5f05ef28d3ff3ba9b8b3ef838",
+      "size_bytes": 181800
+    },
+    {
+      "name": "prod.gro",
+      "sha256": "f90228224edf778975538ea429f56b9007d7535babbc0b279672bae3156b5ac9",
+      "size_bytes": 483048
+    },
+    {
+      "name": "prod.xtc",
+      "sha256": "1473b0f79e8144682f10012e44b1fc18134b9c45abb4327b0590dfcb62279287",
+      "size_bytes": 55689936
+    },
+    {
+      "name": "prod.edr",
+      "sha256": "f0415b1015cddce77e3b809e211ed1e7bb2ea1563e351b33c86bb231f0258608",
+      "size_bytes": 2497356
+    },
+    {
+      "name": "prod.cpt",
+      "sha256": "fe837c91061425e56c40c31ce4ccd27cef0072ee97a0d277b43a04cd70fac193",
+      "size_bytes": 169984
+    }
+  ],
+  "conclusion": "passed",
+  "profile": {
+    "profile_id": "g16_ligpargen_solvents",
+    "quantum_backend": "g16",
+    "topology_backend": "LigParGen"
+  },
+  "run_id": "md__202608110010",
+  "schema_version": 1,
+  "software": {
+    "project_version": "source",
+    "source_commit": "2e0f9f235f4d9af61d8f81193f41ef55c8cf428c",
+    "worktree_clean": false
+  },
+  "workflow": {
+    "done_steps": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "stage_states": {
+      "em": "accepted",
+      "eq": "accepted",
+      "prod": "completed"
+    },
+    "state": "done",
+    "total_steps": 10
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "evidence_scope": "historical_profile_acceptance_union",
+  "target_machine_requirement": "one_supported_profile_complete",
+  "profiles": [
+    {
+      "profile_id": "g16_sobtop_electrolyte",
+      "run_id": "md__202608110001",
+      "source_commit": "2e0f9f235f4d9af61d8f81193f41ef55c8cf428c",
+      "worktree_clean": false,
+      "evidence_json": "g16_sobtop_electrolyte.json",
+      "junit_xml": "g16_sobtop_electrolyte.xml"
+    },
+    {
+      "profile_id": "orca_sobtop_electrolyte",
+      "run_id": "md__202608110005",
+      "source_commit": "2e0f9f235f4d9af61d8f81193f41ef55c8cf428c",
+      "worktree_clean": false,
+      "evidence_json": "orca_sobtop_electrolyte.json",
+      "junit_xml": "orca_sobtop_electrolyte.xml"
+    },
+    {
+      "profile_id": "g16_ligpargen_solvents",
+      "run_id": "md__202608110010",
+      "source_commit": "2e0f9f235f4d9af61d8f81193f41ef55c8cf428c",
+      "worktree_clean": false,
+      "evidence_json": "g16_ligpargen_solvents.json",
+      "junit_xml": "g16_ligpargen_solvents.xml"
+    },
+    {
+      "profile_id": "orca_ligpargen_solvents",
+      "run_id": "md__202608110011",
+      "source_commit": "2e0f9f235f4d9af61d8f81193f41ef55c8cf428c",
+      "worktree_clean": false,
+      "evidence_json": "orca_ligpargen_solvents.json",
+      "junit_xml": "orca_ligpargen_solvents.xml"
+    }
+  ]
+}

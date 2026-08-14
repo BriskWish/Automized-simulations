@@ -64,7 +64,7 @@
 
 1. **Phase 0 基线收敛**: 已完成配置验证、依赖预检命名、`top_assembly` 目录、脆弱测试和 Gradio 默认暴露面的修复。
 2. **Phase 1 契约稳定**: `StepResult.to_dict()`、完整配置外层 schema、唯一步骤/执行模块注册、run 事务与 provenance 已落地；公共接口中仍禁止以裸异常替代 `StepResult`。
-3. **Phase 2 端到端闭环**: 10 步主流程及 EM/NPT EQ/PROD 已接入；2026-08-11 的四条真实量子/拓扑 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，中性 OPLS 的单一 Ewald 净电荷 warning 按 `0.15e` 受控容差放行并已回归。本版本以十步完成且最终无错误为验收标准，不进行目标体系科学预测。
+3. **Phase 2 端到端闭环**: 10 步主流程及 EM/NPT EQ/PROD 已接入；2026-08-11 的四条真实量子/拓扑 profile（G16/ORCA + Sobtop/LigParGen）均已完成 10/10，核心证据已归档，中性 OPLS 的单一 Ewald 净电荷 warning 按 `0.15e` 受控容差放行并已回归；目标机验收只需任选一条完整链路和一次真实 LLM 受控错误处理。本版本不进行目标体系科学预测。
 4. **Phase 3+ 治理增强**: 安全进程管理、tool 权限元数据、CI、运行产物和 vendor 治理持续推进。
 
 ## 1. Claude — 量子层接口专家

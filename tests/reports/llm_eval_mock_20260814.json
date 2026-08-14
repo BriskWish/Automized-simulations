@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "mode": "mock",
+  "total": 18,
+  "passed": 18,
+  "average_score": 98.11,
+  "layers": {
+    "quantum": {
+      "total": 6,
+      "passed": 6,
+      "average_score": 100.0
+    },
+    "topology": {
+      "total": 6,
+      "passed": 6,
+      "average_score": 98.33
+    },
+    "simulation": {
+      "total": 6,
+      "passed": 6,
+      "average_score": 96.0
+    }
+  },
+  "scenarios": [
+    {
+      "scenario_id": "q_scf_001",
+      "layer": "quantum",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "q_crash_002",
+      "layer": "quantum",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "q_formchk_003",
+      "layer": "quantum",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "q_orca_004",
+      "layer": "quantum",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "q_geom_005",
+      "layer": "quantum",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "q_resp_006",
+      "layer": "quantum",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "t_sobtop_007",
+      "layer": "topology",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "t_rc24_008",
+      "layer": "topology",
+      "passed": true,
+      "score": 98,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 23,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "t_ligpargen_009",
+      "layer": "topology",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "t_atomtype_010",
+      "layer": "topology",
+      "passed": true,
+      "score": 94,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 20,
+        "escalation": 19
+      }
+    },
+    {
+      "scenario_id": "t_mol2_corrupt_011",
+      "layer": "topology",
+      "passed": true,
+      "score": 98,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 23,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "t_assembly_012",
+      "layer": "topology",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "s_em_013",
+      "layer": "simulation",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "s_eq_014",
+      "layer": "simulation",
+      "passed": true,
+      "score": 94,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 20,
+        "escalation": 19
+      }
+    },
+    {
+      "scenario_id": "s_nan_015",
+      "layer": "simulation",
+      "passed": true,
+      "score": 94,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 20,
+        "escalation": 19
+      }
+    },
+    {
+      "scenario_id": "s_temp_016",
+      "layer": "simulation",
+      "passed": true,
+      "score": 94,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 20,
+        "escalation": 19
+      }
+    },
+    {
+      "scenario_id": "s_grompp_017",
+      "layer": "simulation",
+      "passed": true,
+      "score": 100,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 25,
+        "escalation": 20
+      }
+    },
+    {
+      "scenario_id": "s_eq_persist_018",
+      "layer": "simulation",
+      "passed": true,
+      "score": 94,
+      "breakdown": {
+        "diagnosis": 30,
+        "tool_choice": 25,
+        "repair": 20,
+        "escalation": 19
+      }
+    }
+  ]
+}

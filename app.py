@@ -20,6 +20,7 @@ from willy.frontend_api import (
     test_llm_connection,
     get_latest_run_control_state,
     run_assistant_pending_message,
+    run_assistant_control_command,
     chat_run_assistant,
 )
 
@@ -419,6 +420,52 @@ footer { display: none !important; }
     margin-top: auto;
 }
 
+#run-slash-menu {
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    box-shadow: 0 0.5rem 1.25rem rgba(27, 40, 33, 0.22);
+    box-sizing: border-box;
+    max-width: calc(100vw - 1.5rem);
+    padding: 0.25rem;
+    position: fixed;
+    z-index: 10000;
+}
+
+#run-slash-menu button {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    gap: 0.65rem;
+    justify-content: flex-start;
+    min-height: 2.5rem;
+    padding: 0.45rem 0.6rem;
+    text-align: left;
+    width: 100%;
+}
+
+#run-slash-menu button:hover,
+#run-slash-menu button[aria-selected="true"] {
+    background: var(--color-accent-soft);
+}
+
+.run-slash-menu-command {
+    color: var(--run-title);
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-weight: 700;
+    min-width: 5.2rem;
+}
+
+.run-slash-menu-description {
+    color: var(--muted-text);
+    font-size: 0.9rem;
+    line-height: 1.25;
+}
+
 #run-assistant {
     background: var(--run-bg);
     border-color: var(--run-border);
@@ -713,6 +760,149 @@ THEME_TOGGLE_JS = """
         ?? document.querySelector(".gradio-container");
     container?.classList.toggle("willy-dark", enabled);
     return [];
+}
+"""
+
+RUN_ASSISTANT_SLASH_MENU_JS = r"""
+() => {
+    const options = [
+        {command: "/resume", description: "按原参数从安全步骤续跑"},
+        {command: "/fork", description: "修改参数并创建独立子运行"},
+    ];
+    let activeIndex = 0;
+    let activeOptions = [];
+    let activeInput = null;
+
+    if (!document.body) return;
+    if (window.__willyRunAssistantSlashMenuInstalled) return [];
+    window.__willyRunAssistantSlashMenuInstalled = true;
+    let menu = document.getElementById("run-slash-menu");
+    if (!menu) {
+        menu = document.createElement("div");
+        menu.id = "run-slash-menu";
+        menu.setAttribute("role", "listbox");
+        menu.hidden = true;
+        document.body.appendChild(menu);
+    }
+
+    const inputFromEvent = (event) => {
+        const path = event.composedPath();
+        const input = path.find((node) =>
+            node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement
+        );
+        // Gradio renders the textarea inside a shadow root. ``closest`` on the
+        // native input cannot see the outer ``#run-message`` host, whereas the
+        // composed event path contains both nodes.
+        return input && path.some((node) => node?.id === "run-message") ? input : null;
+    };
+
+    const hideMenu = () => {
+        menu.hidden = true;
+        activeOptions = [];
+    };
+
+    const setInputValue = (input, value) => {
+        const prototype = input instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (setter) {
+            setter.call(input, value);
+        } else {
+            input.value = value;
+        }
+        input.dispatchEvent(new Event("input", {bubbles: true, composed: true}));
+        input.focus();
+    };
+
+    const positionMenu = () => {
+        if (!activeInput || menu.hidden) return;
+        const rect = activeInput.getBoundingClientRect();
+        const width = Math.min(Math.max(rect.width, 260), window.innerWidth - 24);
+        menu.style.width = `${width}px`;
+        menu.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`;
+        menu.style.top = `${Math.max(8, rect.top - menu.offsetHeight - 8)}px`;
+    };
+
+    const chooseActive = () => {
+        const choice = activeOptions[activeIndex];
+        if (!choice || !activeInput) return;
+        setInputValue(activeInput, choice.command === "/fork" ? "/fork " : choice.command);
+        hideMenu();
+    };
+
+    const renderMenu = (input) => {
+        const query = input.value.trimStart().toLowerCase();
+        if (!query.startsWith("/")) {
+            hideMenu();
+            return;
+        }
+        activeOptions = options.filter((option) => option.command.startsWith(query));
+        if (!activeOptions.length) {
+            hideMenu();
+            return;
+        }
+        activeInput = input;
+        activeIndex = Math.min(activeIndex, activeOptions.length - 1);
+        menu.innerHTML = activeOptions.map((option, index) => `
+            <button type="button" role="option" data-command="${option.command}"
+                aria-selected="${index === activeIndex}">
+                <span class="run-slash-menu-command">${option.command}</span>
+                <span class="run-slash-menu-description">${option.description}</span>
+            </button>
+        `).join("");
+        menu.hidden = false;
+        positionMenu();
+    };
+
+    document.addEventListener("input", (event) => {
+        const input = inputFromEvent(event);
+        if (input) {
+            activeIndex = 0;
+            renderMenu(input);
+        }
+    }, true);
+
+    document.addEventListener("focusout", (event) => {
+        if (inputFromEvent(event) !== activeInput) return;
+        window.setTimeout(() => {
+            if (!menu.matches(":hover")) hideMenu();
+        }, 120);
+    }, true);
+
+    document.addEventListener("keydown", (event) => {
+        if (menu.hidden || inputFromEvent(event) !== activeInput) return;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            const delta = event.key === "ArrowDown" ? 1 : -1;
+            activeIndex = (activeIndex + delta + activeOptions.length) % activeOptions.length;
+            renderMenu(activeInput);
+        } else if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            chooseActive();
+        } else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            hideMenu();
+        }
+    }, true);
+
+    menu.addEventListener("pointerdown", (event) => {
+        const button = event.target.closest("button[data-command]");
+        if (!button || !activeInput) return;
+        event.preventDefault();
+        const command = button.dataset.command;
+        const optionIndex = activeOptions.findIndex((option) => option.command === command);
+        if (optionIndex >= 0) {
+            activeIndex = optionIndex;
+            chooseActive();
+        }
+    });
+
+    window.addEventListener("resize", positionMenu);
+    window.addEventListener("scroll", positionMenu, true);
 }
 """
 
@@ -1577,6 +1767,25 @@ def _handle_run_assistant_message(
         history, bound_run_id, snapshot["run_id"]
     )
     current_history = _sync_run_assistant_history(current_history, snapshot)
+    control_reply = run_assistant_control_command(current_run_id, message)
+    if control_reply is not None:
+        updated = _run_assistant_reply(current_history, message, control_reply)
+        final_snapshot = _run_assistant_snapshot()
+        final_history, final_run_id = _run_assistant_history_for_current_run(
+            updated, current_run_id, final_snapshot["run_id"]
+        )
+        final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        yield (
+            gr.update(value="", interactive=True),
+            _render_run_assistant_chat(final_history),
+            final_history,
+            gr.update(interactive=True),
+            _refresh_stop_button(stop_requested, stop_confirmation_pending),
+            stop_confirmation_pending,
+            stop_requested,
+            final_run_id,
+        )
+        return
     normalized = _normalize_run_control_text(message)
     action = _awaiting_confirmation_action(snapshot["pending_action"])
     option_id = _pending_option_id(message, action)
@@ -1860,6 +2069,8 @@ def _proposal_welcome_history(context: Mapping[str, object]) -> list[dict[str, s
             "只需用自然语言描述你的体系，我会给出方案，"
             "自动完成体系准备、EM、NPT退火和生产模拟，并展示运行进度。"
             "需要全精度 TRR 轨迹时，请在对话中明确提出。您也可以上传自己的结构后再启动。\n\n"
+            "也可以询问本项目的架构、状态机或工具边界；这类回答只依据已登记文档，"
+            "不会修改方案、配置或运行状态。\n\n"
             f"{_proposal_execution_summary(context)}\n\n"
             "提示：G09 未经可靠全链路验证，使用时可能出现运行问题。\n\n"
             "（仅分子个数、分子名为必要，其他可选填）"
@@ -1942,7 +2153,8 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                         )
                         with gr.Row(elem_id="run-input-row"):
                             run_message = gr.Textbox(
-                                placeholder="询问当前运行的状态、工序进度或错误", label="", lines=3, scale=4)
+                                placeholder="询问当前运行的状态、工序进度或错误", label="", lines=3, scale=4,
+                                elem_id="run-message")
                             with gr.Column(scale=1, min_width=80):
                                 run_send_btn = gr.Button("发送", variant="primary")
                                 stop_btn = gr.Button(
@@ -2261,6 +2473,13 @@ with gr.Blocks(title="Willy : AI驱动的小分子Gromacs模拟工具") as app:
                         """
                     )
 
+    app.load(
+        fn=None,
+        inputs=None,
+        outputs=None,
+        js=RUN_ASSISTANT_SLASH_MENU_JS,
+        queue=False,
+    )
 app.queue()
 
 if __name__ == "__main__":

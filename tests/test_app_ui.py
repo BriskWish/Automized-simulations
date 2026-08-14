@@ -137,6 +137,7 @@ def test_proposal_welcome_bubble_includes_execution_mode():
     assert "你好！我是 **Willy-方案助理**" in welcome[0]["content"]
     assert "**当前方案执行方式**：本版本仅支持本机 GROMACS" in welcome[0]["content"]
     assert "G09 未经可靠全链路验证，使用时可能出现运行问题" in welcome[0]["content"]
+    assert "不会修改方案、配置或运行状态" in welcome[0]["content"]
     assert "proposal-execution-summary" not in str(app_module.app.get_config_file())
 
 
@@ -854,6 +855,65 @@ def test_run_assistant_text_stop_and_pause_never_call_stop_pipeline_or_llm(monke
         assert update[6] is False
 
     assert stop_calls == []
+
+
+def test_run_assistant_explicit_fork_resume_command_bypasses_read_only_llm(monkeypatch):
+    snapshot = {
+        "run_id": "md_current",
+        "summary": "### 工程状态\n\n状态：已中止",
+        "live_summary": "### 工程状态\n\n状态：已中止",
+        "status_event_id": "md_current:status:aborted:8:none:none",
+        "pending_action": None,
+    }
+    calls = []
+    monkeypatch.setattr(app_module.frontend_api, "get_run_panel_snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        app_module,
+        "run_assistant_control_command",
+        lambda run_id, message: calls.append((run_id, message)) or "已接受 /resume。",
+    )
+    monkeypatch.setattr(
+        app_module,
+        "chat_run_assistant",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("control command must not reach LLM")),
+    )
+
+    update = list(
+        app_module._handle_run_assistant_message("/resume", [], False, False)
+    )[-1]
+
+    assert calls == [("md_current", "/resume")]
+    assert update[1][-1]["content"] == "已接受 /resume。"
+
+
+def test_run_assistant_slash_menu_uses_document_events_across_gradio_shadow_dom():
+    config = app_module.app.get_config_file()
+    run_input = next(
+        component["props"] for component in config["components"]
+        if component["props"].get("elem_id") == "run-message"
+    )
+
+    assert run_input["placeholder"] == "询问当前运行的状态、工序进度或错误"
+    script = app_module.RUN_ASSISTANT_SLASH_MENU_JS
+    assert "query.startsWith(\"/\")" in script
+    assert "menu.hidden = true" in script
+    assert "menu.hidden = false" in script
+    assert 'command: "/resume"' in script
+    assert 'command: "/fork"' in script
+    assert "setInputValue" in script
+    assert "chooseActive" in script
+    assert "event.composedPath()" in script
+    assert 'path.some((node) => node?.id === "run-message")' in script
+    assert 'document.addEventListener("input"' in script
+    assert 'document.addEventListener("keydown"' in script
+    assert "document.body.appendChild(menu)" in script
+    assert "MutationObserver" not in script
+    assert "run-slash-menu" in app_module.APP_CSS
+    assert "position: fixed" in app_module.APP_CSS
+    assert sum(
+        dependency.get("js") == script
+        for dependency in config["dependencies"]
+    ) == 1
 
 
 def test_run_assistant_renders_status_and_adjustment_as_separate_safe_bubbles():

@@ -7,6 +7,7 @@ app.py 只保留 UI 布局，实际逻辑统一在此。
 import copy
 import hashlib
 import json
+import re
 import secrets
 import shutil
 import signal
@@ -170,6 +171,25 @@ QUANTUM_AUDIT_TOOLS = tuple(
 # Kept as a public compatibility alias for callers that previously imported the
 # planning-tool collection.  The generation loop uses the stage-specific sets.
 PLAN_TOOLS = SEMANTIC_TOOLS
+
+# Framework/design questions share the proposal assistant's conversation, but
+# are a separate read-only mode.  The classifier is only consulted for these
+# explicit project-level markers so ordinary molecule/protocol requests keep
+# the existing generation call budget and protocol unchanged.
+_FRAMEWORK_DESIGN_MARKERS = (
+    "本项目", "项目架构", "框架", "架构", "状态机", "manifest", "工具边界",
+    "权限边界", "模块关系", "已实现能力", "规划事项", "设计文档", "产品能力",
+    "数据契约", "源码结构",
+)
+_FRAMEWORK_SOURCE_WHITELIST = (
+    ("README.md", "README"),
+    ("docs/Willy.md", "Willy"),
+    ("docs/status_api.md", "status_api"),
+    ("docs/run_assistant_design.md", "run_assistant_design"),
+    ("docs/document_registry.md", "document_registry"),
+)
+_FRAMEWORK_SOURCE_MAX_SECTION_CHARS = 1_200
+_FRAMEWORK_SOURCE_MAX_SECTIONS = 6
 
 
 @dataclass(frozen=True)
@@ -952,6 +972,151 @@ def _answer_pending_config_question(message: str, context: Mapping[str, object])
     return "当前方案仍在等待确认；请回复“运行”确认，或直接说明需要修改的参数。"
 
 
+def _looks_like_framework_design_question(message: str) -> bool:
+    """Limit the extra intent call to explicit project-level questions."""
+    text = (message or "").casefold().strip()
+    return bool(text) and any(marker.casefold() in text for marker in _FRAMEWORK_DESIGN_MARKERS)
+
+
+def _framework_intent_context(message: str) -> str:
+    """Build the read-only envelope used to classify a possible design query."""
+    return build_structured_context(
+        task_type={"mode": "framework_design_intent", "user_request": message.strip()[:3_000]},
+        current_layer_and_step={"layer": "config", "step": "方案助理只读意图判断", "run_id": None},
+        immutable_facts={
+            "prompt_contract_version": PROMPT_CONTRACT_VERSION,
+            "assistant_boundary": "仍是现有 Willy 方案助理；本轮没有新增助理、工具或执行入口",
+            "evidence_boundary": "仅当分类为 framework_design_question 时读取服务端白名单项目文档",
+        },
+        verified_evidence={
+            "classification_rule": (
+                "framework_design_question 仅表示询问本项目的架构、状态机、manifest、"
+                "工具/权限边界、已实现能力或规划；分子、MD 参数和当前方案问题不是该类别"
+            ),
+        },
+        unverified_assumptions=["用户意图尚未由模型分类"],
+        allowed_actions=["只输出 intent 分类 JSON"],
+        prohibited_actions=[
+            "不得生成方案 JSON、调用工具、启动流水线或修改配置/历史/待确认方案",
+            "不得读取源码、运行目录、环境变量、密钥或任意路径",
+        ],
+        remaining_budget={"intent_calls": 1, "per_call_timeout_s": CONFIG_LLM_TIMEOUT_S},
+        expected_output_format={
+            "content": '{"intent":"framework_design_question"} 或 {"intent":"plan_request"}',
+            "allowed_intents": ["framework_design_question", "plan_request"],
+        },
+    )
+
+
+def _classify_framework_design_intent(message: str) -> bool:
+    """Ask the configured model whether a project-level design answer is needed."""
+    if not _DS or not _looks_like_framework_design_question(message):
+        return False
+    system = build_contract_system_prompt(
+        assistant_name="Willy 方案助理的只读意图分类器",
+        scope="判断用户是否在询问本项目的框架/设计事实",
+        domain_rules=(
+            "只能返回一个 JSON 对象，不得输出解释或 Markdown。"
+            "framework_design_question 仅用于本项目架构、模块、状态机、manifest、"
+            "工具/权限边界、已实现能力或规划事项；普通模拟配置、分子、协议参数、"
+            "当前待确认方案问题一律返回 plan_request。"
+        ),
+    )
+    try:
+        parsed = _j(_llm(system, _framework_intent_context(message)))
+    except Exception:
+        return False
+    return isinstance(parsed, Mapping) and parsed.get("intent") == "framework_design_question"
+
+
+def _framework_document_sections(text: str) -> list[tuple[str, str]]:
+    """Split approved Markdown into bounded heading sections for retrieval."""
+    headings = list(re.finditer(r"(?m)^#{1,4}\s+(.+?)\s*$", text))
+    if not headings:
+        return [("文档正文", text)]
+    sections: list[tuple[str, str]] = []
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        body = text[heading.end():end].strip()
+        if body:
+            sections.append((heading.group(1).strip(), body))
+    return sections
+
+
+def _framework_design_evidence(message: str) -> list[dict[str, str]]:
+    """Read only approved project documents and return relevant excerpts."""
+    root = Path(ROOT).resolve()
+    query = (message or "").casefold()
+    candidates: list[tuple[int, str, str, str]] = []
+    for relative, document_id in _FRAMEWORK_SOURCE_WHITELIST:
+        source = (root / relative).resolve()
+        try:
+            source.relative_to(root)
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, ValueError):
+            continue
+        for heading, body in _framework_document_sections(text):
+            haystack = f"{heading} {body}".casefold()
+            score = sum(1 for marker in _FRAMEWORK_DESIGN_MARKERS if marker.casefold() in query and marker.casefold() in haystack)
+            if score:
+                candidates.append((score, document_id, heading, body))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [
+        {
+            "document": document_id,
+            "section": heading,
+            "excerpt": body[:_FRAMEWORK_SOURCE_MAX_SECTION_CHARS],
+        }
+        for _score, document_id, heading, body in candidates[:_FRAMEWORK_SOURCE_MAX_SECTIONS]
+    ]
+
+
+def _answer_framework_design_question(message: str) -> str:
+    """Answer a project design question without changing any assistant state."""
+    evidence = _framework_design_evidence(message)
+    if not _DS:
+        return "项目设计问答需要先配置可用的 LLM；当前未生成或修改任何方案。"
+    if not evidence:
+        return "已登记项目文档中没有足够证据确认这个设计问题；当前未生成或修改任何方案。"
+    prompt = build_structured_context(
+        task_type={"mode": "framework_design_answer", "user_request": message.strip()[:3_000]},
+        current_layer_and_step={"layer": "config", "step": "方案助理只读设计问答", "run_id": None},
+        immutable_facts={
+            "prompt_contract_version": PROMPT_CONTRACT_VERSION,
+            "assistant_boundary": "现有 Willy 方案助理的只读子模式，不新增助理",
+            "evidence_boundary": "以下是服务端从固定白名单文档读取的片段",
+        },
+        verified_evidence={"approved_project_documents": evidence},
+        unverified_assumptions=["文档片段之外的源码级细节无法由本轮确认"],
+        allowed_actions=["根据文档片段用中文解释，并标注文档与章节"],
+        prohibited_actions=[
+            "不得生成 config JSON、修改 pending plan/history、写文件、启动/停止/重跑/分叉进程",
+            "不得调用工具、读取任意路径、源码、运行目录、环境变量、密钥或原始日志",
+            "不得把规划事项说成已实现，也不得编造文档未提供的事实",
+        ],
+        remaining_budget={"answer_calls": 1, "per_call_timeout_s": CONFIG_LLM_TIMEOUT_S},
+        expected_output_format={
+            "content": "简洁中文回答；区分已实现事实与规划事项；引用【文档｜章节】",
+        },
+    )
+    system = build_contract_system_prompt(
+        assistant_name="Willy 方案助理的只读设计问答",
+        scope="依据白名单项目文档解释框架、架构和设计事实",
+        domain_rules=(
+            "只能基于受控上下文中的文档片段回答。明确区分‘已实现’与‘规划/后续’，"
+            "引用对应的【文档｜章节】。不确定时直说无法从当前片段确认。"
+            "本轮绝不生成方案、修改状态、写文件或启动任何进程。"
+        ),
+    )
+    try:
+        answer = _llm(system, prompt)
+    except Exception:
+        return "项目设计问答暂时不可用；当前未生成或修改任何方案。"
+    if not isinstance(answer, str) or not answer.strip():
+        return "项目设计问答未返回有效内容；当前未生成或修改任何方案。"
+    return answer.strip()
+
+
 def _execution_md_from_config(config: Mapping[str, object]) -> dict[str, object]:
     """Return the frozen execution choice, retaining the legacy local default."""
     execution = config.get("execution")
@@ -1101,6 +1266,14 @@ def chat(
             launch_message = receipt.message
         h = user_h + [{"role": "assistant", "content": launch_message}]
         yield _emit(h, None if receipt.state == "started" else pending_plan)
+        return
+
+    # Project/framework questions stay inside the existing proposal assistant,
+    # but never enter config generation or the execution-selection path.
+    if _classify_framework_design_intent(message):
+        answer = _answer_framework_design_question(message)
+        h = user_h + [{"role": "assistant", "content": answer}]
+        yield _emit(h, pending_plan)
         return
 
     selected_execution, execution_facts, selection_error = _trusted_execution_selection(
@@ -1312,10 +1485,9 @@ def chat(
                 }]
                 yield _emit(h, pending_plan)
                 return
-            icon, line = _tool_summary(QUANTUM_AUDIT_TOOL_NAME, json.dumps(audit_result, ensure_ascii=False))
-            progress_lines.append(f"{icon} {line}")
-            progress_h = list(user_h) + [{"role": "assistant", "content": "\n".join(progress_lines)}]
-            yield "", progress_h, progress_h, pending_plan, "", _HIDE_BTN
+            # The model-facing audit is a safety prerequisite, not a user-facing
+            # conclusion.  The independently re-read server audit below is the
+            # only audit result rendered in the proposal conversation.
 
             strict_response = _DS.chat.completions.create(
                 model=_LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL,
@@ -1379,6 +1551,10 @@ def chat(
                 yield _emit(h, pending_plan)
                 return
             candidate_config = audited_config
+            component_count = len(candidate_config.get("residues", {}))
+            progress_lines.append(
+                f"✅ 服务端原始输入复核通过: {component_count} 个组分"
+            )
             break
         except Exception as error:
             notice, retryable = _llm_failure_notice(error)

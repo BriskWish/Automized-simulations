@@ -25,10 +25,10 @@ from willy.step_registry import STEP_REGISTRY
 def test_cli_accepts_g09_backend():
     from run_pipeline import _parse_args
 
-    no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id = _parse_args(["g09"])
+    no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id, resume_from_step = _parse_args(["g09"])
 
-    assert (no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id) == (
-        False, "g09", None, None, None, None,
+    assert (no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id, resume_from_step) == (
+        False, "g09", None, None, None, None, None,
     )
 
 

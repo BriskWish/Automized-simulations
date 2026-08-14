@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "acceptance": "passed",
+  "scope": "local WSL bounded G-07/T-07 error matrix",
+  "environment": {
+    "system": "Linux",
+    "release": "6.18.33.2-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "distribution": {
+      "ID": "ubuntu",
+      "VERSION_ID": "24.04"
+    },
+    "real_packmol": {
+      "status": "available",
+      "classification": "started",
+      "started": true,
+      "returncode": 174
+    },
+    "abi_injection": {
+      "status": "runtime_unavailable",
+      "classification": "loader_failure",
+      "runtime_unavailable": true,
+      "public_reason": "Packmol 与当前系统运行库不兼容"
+    },
+    "dependency_injection": {
+      "status": "missing",
+      "missing": true
+    }
+  },
+  "scenarios": [
+    {
+      "name": "input",
+      "step": 7,
+      "error_kind": "input_contract",
+      "handled": false,
+      "state": "escalated",
+      "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+      "public_error_event": {
+        "event_id": "md_g07_input:error:7",
+        "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+      },
+      "decision_facts": [
+        {
+          "run_id": "md_g07_input",
+          "step": 7,
+          "error_kind": "input_contract"
+        }
+      ],
+      "event_count": 10,
+      "structured_event_count": 10,
+      "public_projection_redacted": true,
+      "private_records_redacted": true,
+      "private_decision_contract": true
+    },
+    {
+      "name": "dependency",
+      "step": 7,
+      "error_kind": "dependency_missing",
+      "handled": false,
+      "state": "escalated",
+      "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+      "public_error_event": {
+        "event_id": "md_g07_dependency:error:7",
+        "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+      },
+      "decision_facts": [
+        {
+          "run_id": "md_g07_dependency",
+          "step": 7,
+          "error_kind": "dependency_missing"
+        }
+      ],
+      "event_count": 9,
+      "structured_event_count": 10,
+      "public_projection_redacted": true,
+      "private_records_redacted": true,
+      "private_decision_contract": true
+    },
+    {
+      "name": "abi",
+      "step": 7,
+      "error_kind": "runtime_unavailable",
+      "handled": false,
+      "state": "escalated",
+      "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+      "public_error_event": {
+        "event_id": "md_g07_abi:error:7",
+        "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+      },
+      "decision_facts": [
+        {
+          "run_id": "md_g07_abi",
+          "step": 7,
+          "error_kind": "runtime_unavailable"
+        }
+      ],
+      "event_count": 9,
+      "structured_event_count": 10,
+      "public_projection_redacted": true,
+      "private_records_redacted": true,
+      "private_decision_contract": true
+    },
+    {
+      "name": "grompp",
+      "step": 8,
+      "error_kind": "grompp_failed",
+      "handled": false,
+      "state": "escalated",
+      "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+      "public_error_event": {
+        "event_id": "md_g07_grompp:error:7",
+        "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+      },
+      "decision_facts": [
+        {
+          "run_id": "md_g07_grompp",
+          "step": 8,
+          "error_kind": "grompp_failed"
+        }
+      ],
+      "event_count": 10,
+      "structured_event_count": 10,
+      "public_projection_redacted": true,
+      "private_records_redacted": true,
+      "private_decision_contract": true
+    },
+    {
+      "name": "eq",
+      "step": 9,
+      "error_kind": "equilibration_failed",
+      "handled": false,
+      "state": "awaiting_confirmation",
+      "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+      "public_error_event": {
+        "event_id": "md_g07_eq:error:5",
+        "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n已生成新的待确认调整方案；当前未修改配置，未启动重跑。"
+      },
+      "decision_facts": [
+        {
+          "run_id": "md_g07_eq",
+          "step": 9,
+          "error_kind": "equilibration_failed"
+        }
+      ],
+      "event_count": 7,
+      "structured_event_count": 7,
+      "public_projection_redacted": true,
+      "private_records_redacted": true,
+      "private_decision_contract": true
+    },
+    {
+      "name": "prod",
+      "step": 10,
+      "error_kind": "mdrun_failed",
+      "handled": false,
+      "state": "escalated",
+      "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+      "public_error_event": {
+        "event_id": "md_g07_prod:error:8",
+        "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+      },
+      "decision_facts": [
+        {
+          "run_id": "md_g07_prod",
+          "step": 10,
+          "error_kind": "mdrun_failed"
+        }
+      ],
+      "event_count": 11,
+      "structured_event_count": 11,
+      "public_projection_redacted": true,
+      "private_records_redacted": true,
+      "private_decision_contract": true
+    }
+  ],
+  "llm_configuration_error": {
+    "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+    "safe": true,
+    "run_artifacts_created": false
+  }
+}

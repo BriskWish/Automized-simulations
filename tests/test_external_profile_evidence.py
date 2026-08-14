@@ -180,6 +180,12 @@ def test_written_evidence_can_be_verified_without_reading_run_workspace(tmp_path
     assert verify_profile_evidence(evidence_dir, (get_external_profile("g16_sobtop_electrolyte"),)) == ()
 
 
+def test_archived_historical_profile_evidence_is_complete():
+    evidence_dir = Path(__file__).resolve().parents[1] / "tests/reports/baselines/external_profiles_20260814"
+
+    assert verify_profile_evidence(evidence_dir, EXTERNAL_PROFILES) == ()
+
+
 def test_evidence_verifier_rejects_path_or_raw_content_fields(tmp_path):
     run_dir = _finished_run(tmp_path)
     result = validate_finished_profile("g16_sobtop_electrolyte", run_dir)
@@ -208,17 +214,27 @@ def test_evidence_verifier_rejects_nested_configuration_or_path_fields(tmp_path)
     )
 
 
-def test_evidence_requires_clean_commit_provenance(tmp_path):
+def test_evidence_requires_commit_but_preserves_historical_dirty_provenance(tmp_path):
     run_dir = _finished_run(tmp_path)
     update_run_manifest_sections(run_dir, {
-        "provenance": {"source_revision": {"commit": "unavailable", "dirty": True}, "runtime": {"willy": "0.4.0"}},
+        "provenance": {"source_revision": {"commit": "b" * 40, "dirty": True}, "runtime": {"willy": "0.4.0"}},
     })
 
     result = validate_finished_profile("g16_sobtop_electrolyte", run_dir)
 
+    assert result.accepted
+    assert result.evidence["software"] == {
+        "source_commit": "b" * 40,
+        "worktree_clean": False,
+        "project_version": "0.4.0",
+    }
+
+    update_run_manifest_sections(run_dir, {
+        "provenance": {"source_revision": {"commit": "unavailable", "dirty": True}, "runtime": {"willy": "0.4.0"}},
+    })
+    result = validate_finished_profile("g16_sobtop_electrolyte", run_dir)
     assert not result.accepted
     assert "provenance_commit_missing" in result.issues
-    assert "provenance_dirty_worktree" in result.issues
 
 
 def test_cli_writes_then_verifies_finished_profile_evidence(tmp_path, capsys):

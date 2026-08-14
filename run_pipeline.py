@@ -20,13 +20,14 @@ from willy.pipeline_launch import (
 ROOT = get_project_root()
 
 
-def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, str | None, str | None]:
+def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, str | None, str | None, int | None]:
     no_llm = False
     backend = "g16"
     run_dir: Path | None = None
     lock_fd: int | None = None
     launch_token: str | None = None
     pending_action_id: str | None = None
+    resume_from_step: int | None = None
     index = 0
     while index < len(argv):
         arg = argv[index]
@@ -34,7 +35,7 @@ def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, st
             no_llm = True
         elif arg in ("g16", "g09", "orca"):
             backend = arg
-        elif arg in {"--run-dir", "--lock-fd", "--launch-token", "--resume-pending-action"}:
+        elif arg in {"--run-dir", "--lock-fd", "--launch-token", "--resume-pending-action", "--resume-from-step"}:
             if index + 1 >= len(argv):
                 raise ValueError(f"{arg} 缺少参数")
             value = argv[index + 1]
@@ -44,6 +45,8 @@ def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, st
                 lock_fd = int(value)
             elif arg == "--resume-pending-action":
                 pending_action_id = value
+            elif arg == "--resume-from-step":
+                resume_from_step = int(value)
             else:
                 launch_token = value
             index += 1
@@ -58,12 +61,18 @@ def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, st
         run_dir is None or lock_fd is None or launch_token is None
     ):
         raise ValueError("确认重跑必须使用受管启动锁")
-    return no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id
+    if resume_from_step is not None and (
+        run_dir is None or lock_fd is None or launch_token is None or not 1 <= resume_from_step <= 10
+    ):
+        raise ValueError("受控续跑必须使用受管启动锁和有效步骤")
+    if pending_action_id is not None and resume_from_step is not None:
+        raise ValueError("确认重跑与通用续跑不能同时指定")
+    return no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id, resume_from_step
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id = _parse_args(argv or sys.argv[1:])
+        no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id, resume_from_step = _parse_args(argv or sys.argv[1:])
     except (TypeError, ValueError) as exc:
         print(f"启动失败: {exc}")
         return 1
@@ -102,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=backend,
             use_llm=not no_llm,
             confirmed_action_id=pending_action_id or "",
+            controlled_resume_step=resume_from_step or 0,
         )
         success = orchestrator.run(run_dir=run_dir)
         return 0 if success else 1

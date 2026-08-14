@@ -40,6 +40,7 @@ def main() -> None:
         prevent_thread_lock=True,
         quiet=True,
         show_error=True,
+        css=ui.APP_CSS,
     )
     stopped = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_args: stopped.set())

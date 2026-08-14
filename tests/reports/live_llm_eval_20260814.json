@@ -1,0 +1,797 @@
+{
+  "schema_version": 1,
+  "batch_id": "live-llm-20260814T074504Z",
+  "created_at": "2026-08-14T07:45:04.219893+00:00",
+  "software": {
+    "project_version": "0.4.0",
+    "python": "3.12.3",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2",
+    "tools": {
+      "python": "3.12.3",
+      "willy": "0.3.1",
+      "pytest": "9.1.1"
+    }
+  },
+  "config": {
+    "evaluation_mode": "live_llm_mock_tools",
+    "model": "gpt-5.6-terra",
+    "endpoint_host": "api.forza0310.cn",
+    "contract_version": "wpc-v1",
+    "layer_contract_versions": {
+      "l1": "quantum-agent-v1",
+      "l2": "topology-agent-v1",
+      "l3": "simulation-agent-v2"
+    },
+    "matrix": {
+      "error_cases": 31,
+      "config_cases": 13,
+      "protocol_cases": 20,
+      "metric_contracts": 16
+    },
+    "actual_scenarios": 18,
+    "configuration_fingerprint": "2e4d57b8725b6afdc54314755ee83e0ae099abf84da0aa526fe5abcaa6728713"
+  },
+  "stages": [
+    {
+      "name": "q_crash_002",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 10,
+        "tool_calls": 10,
+        "response_latency_ms": 67895.51,
+        "duration_ms": 71803.83,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 10,
+          "schema_valid_calls": 10,
+          "policy_allowed_calls": 10,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "q_formchk_003",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 29196.84,
+        "duration_ms": 30928.06,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "q_geom_005",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 33158.34,
+        "duration_ms": 34800.54,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "q_orca_004",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 37574.35,
+        "duration_ms": 39243.94,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "q_resp_006",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 6,
+        "tool_calls": 6,
+        "response_latency_ms": 46797.34,
+        "duration_ms": 50067.21,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 6,
+          "schema_valid_calls": 6,
+          "policy_allowed_calls": 6,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "q_scf_001",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 25586.7,
+        "duration_ms": 25589.47,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_em_013",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 34272.22,
+        "duration_ms": 35914.62,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_eq_014",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 94,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 20,
+        "score_escalation": 19,
+        "llm_calls": 0,
+        "tool_calls": 0,
+        "response_latency_ms": 0,
+        "duration_ms": 0.02,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": false,
+          "status": "not_required",
+          "expected_first_role": null,
+          "observed_first_role": null,
+          "required_roles": [],
+          "observed_roles": [],
+          "missing_roles": [],
+          "order_valid": false,
+          "tool_calls": 0,
+          "schema_valid_calls": 0,
+          "policy_allowed_calls": 0,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_eq_persist_018",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 94,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 20,
+        "score_escalation": 19,
+        "llm_calls": 0,
+        "tool_calls": 0,
+        "response_latency_ms": 0,
+        "duration_ms": 0.04,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": false,
+          "status": "not_required",
+          "expected_first_role": null,
+          "observed_first_role": null,
+          "required_roles": [],
+          "observed_roles": [],
+          "missing_roles": [],
+          "order_valid": false,
+          "tool_calls": 0,
+          "schema_valid_calls": 0,
+          "policy_allowed_calls": 0,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_grompp_017",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 33858.38,
+        "duration_ms": 35527.3,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_nan_015",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 94,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 20,
+        "score_escalation": 19,
+        "llm_calls": 0,
+        "tool_calls": 0,
+        "response_latency_ms": 0,
+        "duration_ms": 0.02,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": false,
+          "status": "not_required",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": null,
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [],
+          "missing_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "order_valid": false,
+          "tool_calls": 0,
+          "schema_valid_calls": 0,
+          "policy_allowed_calls": 0,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "s_temp_016",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 94,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 20,
+        "score_escalation": 19,
+        "llm_calls": 0,
+        "tool_calls": 0,
+        "response_latency_ms": 0,
+        "duration_ms": 0.02,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": false,
+          "status": "not_required",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": null,
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [],
+          "missing_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "order_valid": false,
+          "tool_calls": 0,
+          "schema_valid_calls": 0,
+          "policy_allowed_calls": 0,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "t_assembly_012",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 6,
+        "tool_calls": 6,
+        "response_latency_ms": 46117.79,
+        "duration_ms": 47742.75,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 6,
+          "schema_valid_calls": 6,
+          "policy_allowed_calls": 6,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "t_atomtype_010",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 94,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 20,
+        "score_escalation": 19,
+        "llm_calls": 0,
+        "tool_calls": 0,
+        "response_latency_ms": 0,
+        "duration_ms": 0.01,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": false,
+          "status": "not_required",
+          "expected_first_role": null,
+          "observed_first_role": null,
+          "required_roles": [],
+          "observed_roles": [],
+          "missing_roles": [],
+          "order_valid": false,
+          "tool_calls": 0,
+          "schema_valid_calls": 0,
+          "policy_allowed_calls": 0,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "t_ligpargen_009",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 4,
+        "tool_calls": 4,
+        "response_latency_ms": 39868.64,
+        "duration_ms": 41498.58,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 4,
+          "schema_valid_calls": 4,
+          "policy_allowed_calls": 4,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "t_mol2_corrupt_011",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 95,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 20,
+        "score_escalation": 20,
+        "llm_calls": 6,
+        "tool_calls": 6,
+        "response_latency_ms": 57975.31,
+        "duration_ms": 62262.58,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 6,
+          "schema_valid_calls": 6,
+          "policy_allowed_calls": 6,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "t_rc24_008",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 98,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 23,
+        "score_escalation": 20,
+        "llm_calls": 2,
+        "tool_calls": 2,
+        "response_latency_ms": 12331.3,
+        "duration_ms": 12332.13,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 2,
+          "schema_valid_calls": 2,
+          "policy_allowed_calls": 2,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    },
+    {
+      "name": "t_sobtop_007",
+      "phase": "live_llm_mock_tools",
+      "status": "passed",
+      "metrics": {
+        "score_total": 100,
+        "score_diagnosis": 30,
+        "score_tool_choice": 25,
+        "score_repair": 25,
+        "score_escalation": 20,
+        "llm_calls": 6,
+        "tool_calls": 6,
+        "response_latency_ms": 37568.23,
+        "duration_ms": 39186.18,
+        "terminal_reason": ""
+      },
+      "checks": {
+        "tool_contract": {
+          "required": true,
+          "status": "passed",
+          "expected_first_role": "diagnostic",
+          "observed_first_role": "diagnostic",
+          "required_roles": [
+            "diagnostic",
+            "layer_scoped_recovery"
+          ],
+          "observed_roles": [
+            "diagnostic",
+            "layer_scoped_recovery",
+            "retry"
+          ],
+          "missing_roles": [],
+          "order_valid": true,
+          "tool_calls": 6,
+          "schema_valid_calls": 6,
+          "policy_allowed_calls": 6,
+          "forbidden_calls": 0
+        }
+      },
+      "artifacts": []
+    }
+  ],
+  "acceptance": {
+    "conclusion": "passed",
+    "threshold": {
+      "minimum_score": 60,
+      "required_pass_rate": 1.0
+    },
+    "completed": {
+      "scenarios": 18,
+      "passed": 18,
+      "failed": 0
+    },
+    "average_scores": {
+      "diagnosis": 30.0,
+      "tool_choice": 25.0,
+      "repair": 23.22,
+      "escalation": 19.72,
+      "total": 97.94
+    },
+    "score_gate": {
+      "status": "passed"
+    },
+    "tool_calling_gate": {
+      "status": "passed",
+      "expected_scenarios": 13,
+      "observed_scenarios": 13,
+      "observed_calls": 64,
+      "case_level_contract": {
+        "required_cases": 13,
+        "passed_cases": 13,
+        "failed_cases": 0
+      },
+      "accuracy": "case_level_contract"
+    },
+    "response_latency_ms": {
+      "p50": 7623.25,
+      "p95": 12938.8
+    },
+    "dimensions": {
+      "diagnosis": "0-30",
+      "tool_choice": "0-25",
+      "repair": "0-25",
+      "escalation": "0-20"
+    },
+    "scoring_scope": "tool choice is scored from actual tool name, schema, order, layer and recovery-policy contract",
+    "model": "gpt-5.6-terra"
+  }
+}

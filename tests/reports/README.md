@@ -22,4 +22,4 @@ reason code rather than treating that environment limitation as a test failure.
 该 staging 目录执行 `scripts/verify_vendor_manifest.py --artifact-root <empty-dir> --require-release-ready`。
 构建器只复制清单许可的 vendor 文件且不执行二进制；不要直接发布包含整个 `vendor/` 的工作树归档。
 
-目录约定：根目录的 `test_case_catalog.md` 是当前自动生成的测试目录；`audits/` 只保存带日期的一次性环境、网关或安全检查快照；`baselines/` 保存脱敏的发布批次摘要。设计、规范、计划和缺口台账必须回到 `docs/` 维护，不在此处创建第二份事实来源。
+目录约定：根目录的 `test_case_catalog.md` 是当前自动生成的测试目录；`audits/` 只保存带日期的一次性环境、网关或安全检查快照；`baselines/` 保存脱敏的发布批次摘要。`baselines/external_profiles_20260814/` 保存四条已完成 profile 的核心 JSON/JUnit，只记录终态、阶段许可、source commit、clean 标记和固定产物的大小/哈希，不复制 `.xtc`、`.trr`、原始日志或运行目录。设计、规范、计划和缺口台账必须回到 `docs/` 维护，不在此处创建第二份事实来源。

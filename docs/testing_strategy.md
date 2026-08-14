@@ -1,10 +1,10 @@
 # Willy 测试策略与质量门禁
 
 > 维护角色：6 号测试工程师
-> 最后更新：2026-08-13
-> 当前基线：2026-08-13 完整 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 925 条记录）。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；本轮其余回归覆盖 schema-v2 `run_manifest.json`、环境能力和 MDP metadata、可视化解析、温度/势能验收、Packmol ABI/终态、OPLS 字段恢复和结构化日志。外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in，默认跳过不代表相应的真实十步 profile 已被默认测试替代。Python 3.10 的测试 extras 会安装 `tomli`，作为发布门禁读取 TOML 的兼容解析器；Python 3.11 及以上继续使用标准库 `tomllib`。
+> 最后更新：2026-08-14
+> 当前基线：2026-08-14 完整 `pytest -q` 为 **916 passed、10 skipped**（收集 926 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 944 条记录）。四条历史完整 profile 的核心证据已归档；新目标机只需执行一条受支持十步链路，并通过真实 LLM 的 EQ 参数调整提案与允许重试判断。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in。Python 3.10 的测试 extras 会安装 `tomli`，作为发布门禁读取 TOML 的兼容解析器；Python 3.11 及以上继续使用标准库 `tomllib`。
 
-> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **898 passed、9 skipped**（收集 907 条 pytest），测试台账为 **907 pytest + 18 LLM = 925 条记录**。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要、前端建议、四条 profile 的只读终态证据契约、发布工件审计和客户端部署包运行态隔离均已有本地回归；目标机兼容 Packmol 的完整十步重放与浏览器实际运行仍需开发者验证。当前 staging 的 vendor 审计通过不等于它能运行 Sobtop 主链，wheel 也不属于支持的运行形态；这两项由 G-00/T-00 先行裁决。
+> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **916 passed、10 skipped**（收集 926 条 pytest），测试台账为 **926 pytest + 18 LLM = 944 条记录**。离线 LLM mock 评测当前为 **18/18**，`q_scf_001` 已通过具名诊断后本层恢复工具契约；当天真实模型 + fake executor 报告也为 18/18，二者均保留独立脱敏证据。仓内文档链接、目录计数和责任归属由 `tests/test_documentation_consistency.py` 门禁。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要、前端建议、四条 profile 的只读终态证据契约、发布工件审计、客户端部署包运行态隔离，以及中止后的受控 resume/fork 均已有本地回归；四条历史 profile 的 JSON/JUnit 已归档，目标机仍需任选一条完成真实十步流程。
 
 > 网关冻结边界：当前发行版的前端、LLM provider、网关/管理端启动器和托管客户端包命令均拒绝托管路径；归档的 ASGI、账本和 fake-upstream 测试仅用于后续维护，不构成产品入口或部署验收。
 
@@ -90,13 +90,14 @@ python3 -m tests.llm_eval.run_eval
 | 当前工程可视化 | `tests/test_frontend_api.py` + `tests/test_app_ui.py`；覆盖运行目录/结构文件双选择器、目录切换后的文件隔离、启动锁优先/最新数字目录回退、PDB/MOL2 白名单、完整文件名和查看器渲染 |
 | GROMACS 实时 ETA | `tests/test_mdrun_eta.py` + `tests/test_run_assistant.py` + 模拟执行回归；目标环境补 `mdrun -v` 真实 smoke |
 | 确认停止与失活对账 | `tests/test_frontend_api.py` + `tests/test_app_ui.py` + `tests/test_pipeline_state.py` + `tests/test_pipeline_launch.py` + `tests/test_pipeline_orchestrator.py`；覆盖仅按钮的服务端两次确认、失败回执可重试、文本中止/暂停词不停止、前端轮询只读、GROMACS ETA/阶段产物存活证据、进程组仍存活时不误中止、revision 竞争放弃写入和失活事件审计；目标环境补 GROMACS checkpoint-first stop smoke |
+| 中止后的 `/resume` 与 `/fork` | `tests/test_run_control.py` + `tests/test_pipeline_state.py` + `tests/test_pipeline_orchestrator.py` + `tests/test_app_ui.py`；覆盖只有完整标识进入控制分支、原 run 的 config/安全步骤续跑、CAS 的 `aborted -> awaiting_confirmation -> retrying`、child 快照与 `parent_run_id`、参数归属和过早修改拒绝、`control_history`/`events.jsonl` 审计，以及控制命令不进入 LLM |
 | 量子或拓扑外部命令 | `tests/test_process_lifecycle.py` + 受影响后端契约回归；覆盖进程组 `SIGINT -> SIGTERM -> SIGKILL`、停止/超时的脱敏审计与既有 `StepResult` 错误分类；目标环境补对应真实 smoke |
 | 协议调整待确认 | `tests/test_pending_action.py` + `tests/test_app_ui.py` + `tests/test_frontend_api.py` + `tests/test_pipeline_orchestrator.py`；覆盖脱敏待确认方案展示、等待状态不降级为未知、无歧义批准语、替代方案的 action ID 替换与配置不变、无回复/暂停/否决保持等待、非 `awaiting_confirmation` 状态的控制拒绝并回退只读问答，以及跨 run 或过期 action 拒绝 |
 | 运行助理性能、降级与状态时间线 | `tests/test_run_assistant.py` + `tests/test_frontend_api.py` + `tests/test_app_ui.py` + LLM mock eval；覆盖独立气泡、关闭连续消息合并、同一状态原位刷新、状态转换封存、错误/方案去重、确认后新状态卡与 LLM 上下文隔离；目标环境补真实模型耗时 smoke |
 | 外部环境解析、配置页依赖预检、预检或部署变量 | `tests/test_env_registry.py` + `tests/test_env_checker.py` + `tests/test_dependency_preflight.py` + 受影响模块回归 |
 | 发布 | 全量 pytest、相关 LLM eval、质量契约（编译与测试用例台账漂移检查）、相关 external preflight/真实执行证据、验收记录 |
 
-本地编排回归必须覆盖：新 run 不继承旧 `done_steps`；Step 2 Agent 只补上游产物时会重跑 Step 2；Step 3 对配置中任一缺失的 `*_opt.fchk` 失败，而不是以部分结果继续进入拓扑层；修复工具必须保留实际步骤身份；EQ 失败必须生成脱敏待确认方案，未授权不得修改配置、重跑或启动 PROD；替代方案必须生成新 action ID、使旧动作失效、保留 `awaiting_confirmation` 且不改写配置；批准当前动作后必须按 `awaiting_confirmation -> retrying -> running` 流转，并只能从其受限的 Step 9 或 Step 7 重跑，且成功的 EQ 许可与 checkpoint 仍是 PROD 的前置条件；历史公开状态越过仍在运行的 EQ 时只能修正状态，不得改写模拟文件。
+本地编排回归必须覆盖：新 run 不继承旧 `done_steps`；Step 2 Agent 只补上游产物时会重跑 Step 2；Step 3 对配置中任一缺失的 `*_opt.fchk` 失败，而不是以部分结果继续进入拓扑层；修复工具必须保留实际步骤身份；EQ 失败必须生成脱敏待确认方案，未授权不得修改配置、重跑或启动 PROD；替代方案必须生成新 action ID、使旧动作失效、保留 `awaiting_confirmation` 且不改写配置；批准当前动作后必须按 `awaiting_confirmation -> retrying -> running` 流转，并只能从其受限的 Step 9 或 Step 7 重跑，且成功的 EQ 许可与 checkpoint 仍是 PROD 的前置条件；用户中止后只有完整 `/resume` 或 `/fork` 可进入控制分支，前者在原 run 从首个未完成步骤恢复，后者只接受停止步骤及之后的字段、创建独立子 run，并对接受、拒绝和启动结果写入 manifest/event 审计；历史公开状态越过仍在运行的 EQ 时只能修正状态，不得改写模拟文件。
 
 ## 4. Smoke 实现规范
 
@@ -120,7 +121,7 @@ Smoke 只确认最小真实链路可启动并生成可消费产物，不替代�
 |------|------|------|
 | M0 | pytest 配置、分层 marker、外部 opt-in、依赖 extra、CI、脆弱 skip 清理 | 已完成：默认回归不调用外部工具，fresh install 可运行测试 |
 | M1 | 共享 fixture 工厂、步骤注册表、契约矩阵、测试数据和覆盖率基线 | 已完成 StepRegistry、注册表契约测试、fixture bundle 哈希契约、external preflight/证据框架，以及 CI 的默认回归/编译/用例台账漂移门禁；覆盖率阈值待补 |
-| M2 | 将四条十步真实 profile 固化为 external 用例和发布证据 | 四条 profile 的只读终态、阶段许可、固定产物哈希和 JUnit 证据契约已完成；当前版本授权机串行重放仍待开发者提供，CI self-hosted 固化属于后续治理增强 |
+| M2 | 将四条十步真实 profile 固化为 external 用例和发布证据 | 四条 profile 的只读终态、阶段许可、固定产物哈希和 JUnit 已归档为历史验收并集；目标机只需任选一条受支持 profile 的完整十步 evidence，CI self-hosted 固化属于后续治理增强 |
 | M3 | LLM 升级决策场景、夜间门禁、发布证据归档 | 发布能追溯到测试、模型行为、完整的 external 执行证据和目标体系结果；在此之前先关闭 G-00，禁止把来源受控 staging 或 wheel 误作完整运行包 |
 
 M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
@@ -136,8 +137,8 @@ M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
 | A. 发布快照与可重复安装 | 干净提交、无运行锁/缓存/密钥进入版本库；测试环境可从空环境安装 | `git diff --check`、`python3 -m compileall -q app.py src/willy`、`pip install -e '.[test]'`、`pytest --collect-only -q`、测试台账生成检查 | 记录 commit SHA、Python/OS 版本与测试收集数；任何未忽略的运行锁、密钥、产物或格式错误均阻断候选发布 |
 | B. 配置与输入审计 | schema v2、默认值、量子后端特异原始输入、电荷/自旋和电荷平衡；新任务不继承旧 run | 单元/契约测试覆盖有效输入、缺 `.gjf`/`.inp`、错误后端回退、缺失 `.fchk` 可从 Step 1 重建、配平阻断和 config 原子快照 | 每个外部 profile 使用其真实原始输入；G16 只读取 `.gjf`、ORCA 只读取 `.inp`，错误输入必须在启动前给出公开摘要且不创建计算进程 |
 | C. 十步编排与持久化 | StepRegistry 顺序、产物许可、`run_manifest.json` section/CAS、状态事件、provenance、停止进程组 | 编排/manifest/状态机集成测试；覆盖上游修复不越级标记 EQ/PROD、过期 action/CAS 冲突、重启后读取和历史兼容 | 每个真实执行 run 保存脱敏配置哈希、软件版本、阶段产物相对路径和 SHA-256；EM/EQ/PROD 三阶段均结束且许可链完整才算全链路成功 |
-| D. 后端组合 | 所有已承诺组合都能成功或在前置条件缺失时明确拒绝，不存在静默回退 | 对 G16/ORCA、Sobtop/OPLS-AA、GAFF/UFF 与 OPLS-AA 混用拒绝、LigParGen/BOSS 不可用分别设契约回归 | 在授权机运行四个最小 profile：G16+Sobtop、ORCA+Sobtop、G16+LigParGen/BOSS、ORCA+LigParGen/BOSS；OPLS-AA profile 仅选中性分子，离子或力场混用必须验证为受控拒绝 |
-| E. GROMACS 十步协议 | Packmol/PBC 审计、残留输出隔离、EM -> EQ -> PROD、checkpoint 连续性、最终无错误和阶段产物完整 | MDP/建盒/阶段许可/产物契约测试；密度和真空区仅保留非阻塞诊断 | 每个已承诺 profile 均须真实完成 Step 1--10，进程正常退出，状态 `done`，manifest/status 和 `.tpr/.gro/.xtc/.edr` 通过校验；不推断科学收敛或目标体系性质 |
+| D. 后端组合 | 所有已承诺组合都能成功或在前置条件缺失时明确拒绝，不存在静默回退 | 对 G16/ORCA、Sobtop/OPLS-AA、GAFF/UFF 与 OPLS-AA 混用拒绝、LigParGen/BOSS 不可用分别设契约回归 | 四条历史 profile 归档为验收并集；目标机执行一条可用 profile，OPLS-AA profile 仅选中性分子，离子或力场混用必须验证为受控拒绝 |
+| E. GROMACS 十步协议 | Packmol/PBC 审计、残留输出隔离、EM -> EQ -> PROD、checkpoint 连续性、最终无错误和阶段产物完整 | MDP/建盒/阶段许可/产物契约测试；密度和真空区仅保留非阻塞诊断 | 目标机任选一条受支持 profile 真实完成 Step 1--10，进程正常退出、状态 `done`，manifest/status 和 `.tpr/.gro/.xtc/.edr` 通过校验；不推断科学收敛或目标体系性质 |
 | F. 错误恢复与控制 | 错误公开摘要、知识检索来源标记、多方案选择、`awaiting_confirmation -> retrying -> running`、停止实际终止受管进程 | mock LayerAgent/LLM、pending-action、状态机和进程生命周期测试；覆盖未确认/暂停文本无副作用、选择方案但未确认仍等待、确认后只从许可步骤重跑、失败回退等待状态 | 人工触发一个可控 EQ 失败和一个子进程停止场景；前端必须显示最新错误/方案气泡，PROD 不得在 EQ 未验收时启动，停止后目标 PGID 不再存活 |
 | G. 真实 LLM 兼容 | 已配置 OpenAI-compatible 服务能完成连接测试、工具调用、超时/格式错误降级，且不泄露凭据 | LLM 配置、错误提示、tool schema 和 mock eval；mock eval 覆盖无效工具参数、越层调用、重复确认与模型超时 | 以 `--run-llm-connection` 单次验证用户配置的端点；再对真实模型运行最小配置生成和受控错误解释。请求、响应、Key、Authorization 和原始 prompt 均不写入证据 |
 | H. 前端端到端 | 方案生成、文本确认、状态卡、错误/方案独立气泡、停止二次确认和运行目录/结构文件选择 | 现有 Gradio 配置与 API 集成回归；新增浏览器级 smoke 覆盖首屏、方案确认、等待确认、停止和工程切换 | 浏览器 smoke 使用临时本地服务和 fake 外部执行器，不调用真实科学软件；验证可见文案、控件状态和气泡顺序，不检查模型自然语言措辞 |
@@ -154,10 +155,10 @@ M0 已完成。M1-M3 按目标环境、许可证和算力条件推进。
 ### 6.2 执行顺序与发布判定
 
 1. **R0，本地候选**：完成 A-C、F 的确定性测试，运行全量 `pytest -q`、`compileall`、mock eval、格式/台账检查；冻结待发布 commit。
-2. **R1，外部后端**：在授权验收机依次执行 D 的四个最小 profile，并对每个 profile 保存 preflight 与 execution 证据。某一已承诺 profile 缺软件、许可证、fixture 或成功记录时，候选版本不得宣称支持该 profile。
-3. **R2，模拟协议**：执行 E 的每个已承诺 profile 十步完整链路；失败时保留脱敏证据并回归至 F 的受控恢复用例。
-4. **R3，产品增强（非本版本主流程门禁）**：真实 LLM、浏览器 E2E、通用运行助理功能可独立验收，但不改变十步成熟方案结论。
-5. **R4，发布复核**：0、5、6 号确认 A-F、四条 profile 证据、文档台账和发布 commit 一致；不得把 G09、科学预测、后处理或实验性组件写入本版本可用能力。
+2. **R1，外部后端**：核验四条已归档 profile evidence；在授权目标机选择一条可用 profile 执行十步，并保存新的 execution 证据。
+3. **R2，模拟协议与 LLM**：目标 run 必须完成 EM/EQ/PROD，真实模型必须通过 `s_eq_014` 的参数调整提案和 `q_formchk_003` 的允许重试判断；失败时保留脱敏证据并回归至 F 的受控恢复用例。
+4. **R3，产品增强（非本版本主流程门禁）**：浏览器 E2E 和通用运行助理功能可独立验收，但不改变十步成熟方案结论。
+5. **R4，发布复核**：0、5、6 号确认 A-F、四条归档 profile evidence、目标机单链路证据、LLM 错误处理证据、文档台账和发布 commit 一致；不得把 G09、科学预测、后处理或实验性组件写入本版本可用能力。
 
 新增或修改测试时，6 号必须在 `tests/reports/test_case_catalog.md` 中保留 A-F 对应的可追溯 case；G/H 属于后续产品增强时再单独登记。未覆盖的公开能力应在本节或 `project_gap_analysis.md` 标为缺口，不得以默认 pytest 全绿替代已承诺 profile 的真实十步证据。
 
@@ -318,12 +319,12 @@ GROMACS 策略，`gmx` 只接受 `WILLY_GMX_BIN` 的显式进程环境或 `.env`
 
 6.10--6.11 暴露的是 provider 的强制 `tool_choice` 兼容差异，而不是模型文本质量问题。现已实现：
 
-- 连接页使用 `tool_choice="auto"` 来验证模型的正常工具选择能力；恢复的 DIAGNOSE/RECOVER 阶段只公开一个唯一工具并使用 `tool_choice="required"` 强制调用，量子输入审计则使用具名 `tool_choice`。服务端仍核对工具名、参数、层级和归一化审计范围。纯文本、空调用、多调用、跨层调用、未登记工具和非对象 JSON 参数均安全终态化，不执行工具。
+- 连接页使用 `tool_choice="auto"` 来验证模型的正常工具选择能力；恢复的 DIAGNOSE/RECOVER 阶段只公开一个唯一工具并使用具名 `tool_choice` 固定调用，量子输入审计同样使用具名选择。服务端仍核对工具名、参数、层级和归一化审计范围。纯文本、空调用、多调用、跨层调用、未登记工具和非对象 JSON 参数均安全终态化，不执行工具。
 - `LayerAgent` 固定按 `DIAGNOSE -> RECOVER` 执行。诊断阶段只公开只读诊断工具；恢复阶段只公开当前 `RecoveryPolicy` 的 `retry_safe` 白名单。输入契约、运行环境缺失、确认、派生 run 和锁冲突由服务端直接终态化；LLM 传输/协议错误不会消耗科学重试次数。
 - Config Agent 固定按“语义提取 -> 服务端规范化 -> 强制量子输入审计 -> 无工具严格 JSON -> 服务端校验”执行。审计阶段只公开 `tools_inspect_quantum_inputs`；未实际调用、参数不匹配或审计范围不匹配均以 `invalid_quantum_input` 拒绝。
-- 评分器只以实际工具名、JSON Schema、调用顺序、层级和策略白名单评分，禁止以 LLM 调用数或重试次数代理工具选择得分。18 个本地 mock 场景回归均通过；每个工具驱动恢复均为“先诊断、后本层允许修复”，EQ/PROD 的科学协议修改保持等待用户确认。
+- 评分器只以实际工具名、JSON Schema、调用顺序、层级和策略白名单评分，禁止以 LLM 调用数或重试次数代理工具选择得分。当前离线 mock 评测为 18/18，`q_scf_001` 已按“先诊断、后本层允许修复”通过；EQ/PROD 的科学协议修改保持等待用户确认。
 
-新增 `python -m tests.llm_eval.live_protocol_runner` 只发送三个脱敏 fake-tool 探针：文本与自动工具调用为硬门禁；`tool_choice="required"` 的结果只作为兼容诊断。2026-08-12 当前 BYOK 协议探针 3/3 通过，配置 Agent 分段审计 5/5 通过（3 个需要审计的场景均实际调用审计工具）。恢复 Agent 的真实模型 + fake executor 矩阵为 16/18：`q_scf_001` 已完成诊断但恢复阶段未返回允许的修复工具，服务端记录 `model_no_tool_call` 并安全升级；`s_grompp_017` 的 4 次调用中有 1 次为策略禁止调用，只有 3 次同时通过参数 schema 和策略白名单。两项失败均保留为当前 G-09 的真实模型稳定性缺口，不能用 mock 结果覆盖。
+新增 `python -m tests.llm_eval.live_protocol_runner` 只发送三个脱敏 fake-tool 探针：文本与自动工具调用为硬门禁；`tool_choice="required"` 的结果只作为兼容诊断。2026-08-12 的 BYOK 协议探针 3/3、配置 Agent 分段审计 5/5 和恢复矩阵 16/18 均保留为历史记录；2026-08-14 当前 BYOK 协议探针 3/3 和完整恢复矩阵 18/18 均已通过，`q_scf_001` 与 `s_grompp_017` 的工具契约均为 100/100。证据只保留脱敏报告，不含请求、响应、工具参数或凭据。
 
 ### 6.15 四条真实十步 profile 的只读证据契约
 
@@ -332,7 +333,7 @@ GROMACS 策略，`gmx` 只接受 `WILLY_GMX_BIN` 的显式进程环境或 `.env`
 `orca_ligpargen_solvents`。它不是运行器：不会启动、续跑、停止或扫描 `md_run/`，仅在开发者明确提供一个**已经终态**的 run 目录时读取 `status.json` 和 `run_manifest.json`。
 若 `status.json` 不是 `done`，它在读取该公开状态后立即拒绝，绝不再读取 private manifest 或计算任何产物哈希。
 
-通过条件是 `state=done`、十个步骤均完成且无最终错误，量子后端、拓扑后端和力场族与指定 profile 一致，全部 topology 组件已验证，EM/EQ/PROD 的私有阶段许可分别为 `accepted/accepted/completed`，并且 `topol.top`、`model.pdb` 与每阶段固定 `.tpr/.gro/.xtc/.edr`（EQ/PROD 另含 `.cpt`）非空、重新计算的 SHA-256 与阶段私有记录一致。证据还要求 provenance 含干净工作树的 40 位提交和项目版本，防止把本地未提交改动误计为发布版本验收。
+通过条件是 `state=done`、十个步骤均完成且无最终错误，量子后端、拓扑后端和力场族与指定 profile 一致，全部 topology 组件已验证，EM/EQ/PROD 的私有阶段许可分别为 `accepted/accepted/completed`，并且 `topol.top`、`model.pdb` 与每阶段固定 `.tpr/.gro/.xtc/.edr`（EQ/PROD 另含 `.cpt`）非空、重新计算的 SHA-256 与阶段私有记录一致。证据要求 provenance 含 40 位提交、工作树状态和项目版本；历史 dirty run 保留该状态并可进入验收并集，不能伪装为 clean release run。
 
 成功后才允许写入脱敏 JSON；其中只保留 profile/run ID、提交摘要、项目版本、终态/阶段状态，以及固定产物名、大小和 SHA-256。不得保存绝对路径、配置内容或其哈希、命令、日志、环境变量、API Key、原始响应或错误细节。验收机可按如下方式事后操作：
 
@@ -348,7 +349,7 @@ python3 -m willy.external_profile_evidence \
   --profiles all
 ```
 
-第一条命令对失败 run 返回非零且不写“通过”JSON；若指定 `--junit-output`，则仍写入只含固定 issue code 的失败 JUnit，便于审计。第二条命令只验证已归档的 JSON，不会再读取原运行目录。此契约和其 `tmp_path` 回归已实现；四条在目标机的真实串行重放和开发者签署记录仍属于 G-03/T-03，不能由历史批次或本模块的单元测试替代。
+第一条命令对失败 run 返回非零且不写“通过”JSON；若指定 `--junit-output`，则仍写入只含固定 issue code 的失败 JUnit，便于审计。第二条命令只验证已归档的 JSON，不会再读取原运行目录。此契约和其 `tmp_path` 回归已实现；四条历史记录已归档为验收并集，目标机只需任选一条真实十步运行和开发者签署记录，不能由本模块的单元测试替代。
 
 ### 6.12 2026-08-11 第二台受控验收机：Packmol 运行时 ABI 不兼容
 
@@ -381,6 +382,21 @@ Packmol 输入：返回码为 0，输出含 `Success!`、4 个 `ATOM/HETATM` 记
 **结果：通过（Packmol 二进制兼容与最小建盒）。** 这不替代更新验收机检出后的 Step 1--10 端到端重跑；
 后者仍是 G-01/G-03 的人工验收项。
 
+### 6.17 2026-08-14 当前 Ubuntu 24.04 WSL2 G-07/T-07 错误矩阵
+
+通过 `PYTHONPATH=src python3 -m tests.tools.g07_local_wsl_acceptance --project-root .`
+执行一次性脱敏验收。矩阵在临时 run workspace 中注入输入契约、外部依赖缺失、Packmol ABI
+加载器失败、grompp、EQ、PROD 和 LLM 配置错误；真实步骤只执行仓内 Packmol 的 `-h` 启动探针。
+真实 Packmol 的帮助用法退出码为 `174`，仍分类为 `available/started`；临时 ABI 错误分类为
+`runtime_unavailable`，缺失二进制分类为 `missing`。
+
+六类 run 均生成受限的 `status.json`、前端错误 event、结构化事件和决策记录。EQ 停在
+`awaiting_confirmation`；grompp/PROD 停在升级边界；环境错误零次参数修复且不调用 LLM。
+私有记录均保留 `run_id/step/error_kind`，公开 panel 不含路径、完整命令、密钥或原始日志；无效
+LLM 配置在 run 创建前安全拒绝。脱敏报告归档为
+`tests/reports/audits/g07_local_wsl_20260814.json`，该结果只对当前 Ubuntu 24.04 WSL2 ABI
+成立，Ubuntu 20/22 目标需独立重跑。
+
 ### 6.16 2026-08-12 第二台受控验收机：G16 + Sobtop 真实全流程
 
 对已结束的 `md__202608120002` 进行只读核验：远程检出的提交为
@@ -389,8 +405,7 @@ Packmol 输入：返回码为 0，输出含 `Success!`、4 个 `ATOM/HETATM` 记
 GAFF/UFF；EM 和 EQ 阶段许可为 `accepted`，PROD 为 `completed`。`topol.top`、`model.pdb`，
 以及 EM/EQ/PROD 的固定 `.tpr/.gro/.xtc/.edr` 产物均存在，EQ/PROD 的 `.cpt` 亦存在。
 
-**结果：通过（当前受控验收机上的 G16 + Sobtop 真实十步流程）。** 该结果同时证明兼容 Packmol
+**结果：通过（受控验收机上的 G16 + Sobtop 真实十步流程）。** 该结果同时证明兼容 Packmol
 构建未再触发此前的 glibc 阻塞，且本次流程没有观察到公开错误。核验只读取终态状态和固定产物存在性，
-未启动、续跑、停止或修改任何模拟。它是四个具名 external profile 中的第 1 条运行证据；仍需使用
-`external_profile_evidence` 归档其标准化脱敏 JSON/JUnit，并完成 ORCA + Sobtop、G16 + LigParGen、
-ORCA + LigParGen 三条当前授权机重放，故 G-01 的干净安装门禁和 G-03 均不关闭。
+未启动、续跑、停止或修改任何模拟。四条历史 profile 的标准化脱敏 JSON/JUnit 已在 2026-08-14 归档；
+G-01 仍等待干净 WSL 报告，G-03 只等待目标机任选一条完整链路。

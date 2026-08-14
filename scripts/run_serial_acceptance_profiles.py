@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run the four documented local scientific acceptance profiles serially.
+"""Run documented local scientific acceptance profiles serially.
 
 The runner is deliberately conservative: it creates a fresh pipeline run for
 each profile, leaves every run directory intact, and restores the caller's
 root ``config.json`` even when one profile fails.  Automatic LLM repair is
 disabled because this acceptance batch must record a failure and advance to
 the next independent profile rather than wait for a human confirmation.
+``--profile`` selects exactly one route for target-machine acceptance.
 """
 
 from __future__ import annotations
@@ -73,6 +74,7 @@ PROFILES = (
     AcceptanceProfile("g16_ligpargen_solvents", "g16", "oplsaa", SOLVENT_RESIDUES),
     AcceptanceProfile("orca_ligpargen_solvents", "orca", "oplsaa", SOLVENT_RESIDUES),
 )
+_PROFILES_BY_ID = {profile.profile_id: profile for profile in PROFILES}
 
 
 def _now() -> str:
@@ -266,6 +268,11 @@ def _run_profile(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Validate profile configs without starting software.")
+    parser.add_argument(
+        "--profile",
+        choices=tuple(profile.profile_id for profile in PROFILES),
+        help="Run one profile instead of the default four-profile batch.",
+    )
     args = parser.parse_args(argv)
 
     if active_pipeline_run_id(ROOT):
@@ -288,8 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     backup_path.write_bytes(original)
     _write_report(report_path, report)
 
+    profiles = (_PROFILES_BY_ID[args.profile],) if args.profile else PROFILES
     try:
-        for profile in PROFILES:
+        for profile in profiles:
             config = _profile_config(source, profile)
             if args.dry_run:
                 report["profiles"].append({

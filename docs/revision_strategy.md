@@ -15,7 +15,7 @@
 
 当前最大的结构性问题不是单点 bug，而是三类边界不够稳定：
 
-1. **产品承诺边界**：主编排器与四条已承诺 profile 均有历史 EM/NPT EQ/PROD 十步成功记录；当前版本绑定的外部验收仅复核 G16+Sobtop 1/4，剩余重放由 G-03/T-03 跟踪。文档只承诺已验证路线的最终无错误和产物契约，不延伸为科学体系预测。
+1. **产品承诺边界**：主编排器与四条已承诺 profile 均有历史 EM/NPT EQ/PROD 十步成功记录，核心 JSON/JUnit 已归档为验收并集；G-03 只跟踪目标机任选一条可用路线的完整运行。文档只承诺已验证路线的最终无错误和产物契约，不延伸为科学体系预测。
 2. **模块职责边界**：部分执行层、toolist、orchestrator、运行注册与环境注册之间的命名和契约仍需以唯一事实来源收敛。
 3. **运行安全边界**：前端、参数化子进程、进程控制、API key、运行产物管理还没有形成完整发布约束。
 
@@ -149,7 +149,7 @@ python3 -m tests.llm_eval.run_eval
 - 所有 simulation retry tools 对应的主流程步骤真实存在。
 - 前端进度不再显示和实际步骤不一致的标签。
 
-### Phase 3：Agent 修复能力增强（核心契约已完成，真实端点验收待执行）
+### Phase 3：Agent 修复能力增强（核心契约和真实端点验收已完成）
 
 目标：让 Agent 的修复行为可控、可测、可升级。
 
@@ -164,14 +164,14 @@ python3 -m tests.llm_eval.run_eval
 
 - `action_contract.py` 从五个 toolist 的 JSON Schema 与 `TOOL_META` 构建唯一的 50 项工具目录，声明 `read_only`、`retry_safe`、`requires_confirmation`、`requires_fork`、`destructive` 等效果等级；Config Agent 的 `tools_inspect_quantum_inputs` 与模拟层的 `tools_lookup_mdrun_knowledge` 均为只读、低风险工具。
 - `recovery_policy.py` 按 layer、错误类型、步骤和工具效果裁决重试上限、确认要求与 fork 限制；模型不能通过参数提升权限。
-- `LayerAgent` 以服务端状态机固定 `DIAGNOSE -> RECOVER`：诊断阶段只公开一个只读工具，恢复阶段只公开一个本层、当前错误和步骤允许的 `retry_safe` 工具，并以 `tool_choice="required"` 强制该唯一动作。服务端仍将其校验为该唯一工具名，并校验参数、层级和策略；文本、空调用、多工具、跨层工具和非法参数均终态升级。
+- `LayerAgent` 以服务端状态机固定 `DIAGNOSE -> RECOVER`：诊断阶段只公开一个只读工具，恢复阶段只公开一个本层、当前错误和步骤允许的 `retry_safe` 工具；唯一工具以具名 `tool_choice` 固定，服务端仍校验工具名、参数、层级和策略。SCF 自动恢复只向模型公开 `molecule_name` 和 `scf=xqc`，不公开基组等需确认字段；文本、空调用、多工具、跨层工具和非法参数均终态升级。
 - 确认、派生 run、输入契约、运行依赖和锁冲突在模型调用前由策略终态化；EQ/PROD 的协议变更维持 `awaiting_confirmation`，不消耗修复次数。LLM 传输/协议失败写入受限决策且不调用 `start_retry`。`llm_budget.py` 继续限制单 run 调用次数、累计时长、单次超时和连续失败熔断。
 - Config Agent 已分为语义提取、服务端规范化、只暴露量子审计工具并以具名 `tool_choice` 固定执行的审计、无工具严格 JSON 与服务端校验五段；审计缺失不再以追加文本提醒后继续。
 - 评分器只接受真实观察到的工具名、参数 schema、顺序、层级和策略白名单，取消以 LLM 调用次数或重试次数代理工具得分。静态矩阵覆盖全部 `ErrorKind`、13 类配置和 20 类协议条件；18 个离线 mock 场景覆盖跨层工具隔离、恢复身份、升级和确认边界。
+- 2026-08-14 以当前 BYOK 配置完成脱敏协议探针 `3/3` 与真实模型 + fake executor 恢复矩阵 `18/18`；原缺口 `q_scf_001` 和 `s_grompp_017` 均为 `100/100`，所有观察到的工具调用均通过 schema 与策略白名单。SCF 约束收紧后，两项再测仍为 `100/100`。证据保存在 `tests/reports/live_llm_protocol_probe_20260814.json`、`tests/reports/live_llm_eval_20260814.json` 与 `tests/reports/live_llm_eval_g09_regression_20260814.json`。
 
-仍需完成：
+持续治理：
 
-- 使用当前 BYOK 配置先运行脱敏文本/自动工具协议探针，再运行 fake executor 的真实模型评测；2026-08-12 协议探针 3/3、配置 Agent 5/5 通过，恢复矩阵 16/18：`q_scf_001` 因模型在恢复阶段未调用允许的修复工具而由服务端安全升级，`s_grompp_017` 的 4 次调用中有 1 次为策略禁止调用，只有 3 次同时通过参数 schema 和策略白名单。该验证属于产品增强，必须显式 opt-in，不能由默认回归代替；G-09 在稳定性修复或端点兼容性明确前保持开放。
 - 随实际修复策略扩展，持续将高影响动作收敛到可审计的确认或派生 run 流程。
 
 验收标准：

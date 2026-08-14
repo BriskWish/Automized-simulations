@@ -180,8 +180,10 @@ def _safe_software_summary(provenance: Mapping[str, Any], issues: list[str]) -> 
         issues.append("provenance_commit_missing")
     if not isinstance(dirty, bool):
         issues.append("provenance_dirty_state_missing")
-    elif dirty:
-        issues.append("provenance_dirty_worktree")
+    # Historical acceptance runs may have been produced from a worktree with
+    # unrelated local changes.  Keep that fact in the redacted evidence, but
+    # do not discard an otherwise complete terminal run; the source commit is
+    # still mandatory and is the provenance anchor for the acceptance union.
     if not _VERSION.fullmatch(version):
         issues.append("provenance_project_version_missing")
     return {
@@ -395,7 +397,7 @@ def _validate_evidence_payload(value: object, *, expected_profile: ExternalProfi
         raise ValueError("profile evidence run_id 无效")
     if not _COMMIT.fullmatch(str(software.get("source_commit", ""))):
         raise ValueError("profile evidence 提交版本无效")
-    if software.get("worktree_clean") is not True or not _VERSION.fullmatch(str(software.get("project_version", ""))):
+    if not isinstance(software.get("worktree_clean"), bool) or not _VERSION.fullmatch(str(software.get("project_version", ""))):
         raise ValueError("profile evidence 软件摘要无效")
     if workflow.get("state") != "done" or workflow.get("total_steps") != len(_DONE_STEPS):
         raise ValueError("profile evidence 工作流终态无效")

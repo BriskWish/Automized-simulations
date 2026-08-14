@@ -150,6 +150,16 @@ class TestPipelineStateMachine:
         with pytest.raises(StateTransitionError, match="done -> running"):
             sm.transition(State.RUNNING)
 
+    def test_aborted_run_must_reenter_awaiting_before_controlled_retry(self, sm):
+        sm.transition(State.RUNNING)
+        sm.transition(State.ABORTED)
+
+        with pytest.raises(StateTransitionError, match="aborted -> retrying"):
+            sm.transition(State.RETRYING)
+        sm.transition(State.AWAITING_CONFIRMATION)
+        sm.transition(State.RETRYING)
+        assert sm._status.state == "retrying"
+
     def test_scoped_done_preserves_the_last_completed_step(self, sm):
         sm.transition(State.RUNNING)
         sm.set_extra(completion_scope={

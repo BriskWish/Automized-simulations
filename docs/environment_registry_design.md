@@ -2,7 +2,7 @@
 
 > 维护范围：`src/willy/env_registry.py`、`src/willy/env_checker.py` 及外部软件调用适配器。
 > 状态：核心实现完成；启动级全局缓存、版本兼容性判定和自动后端重规划待后续评估。
-> 最后更新：2026-08-13。
+> 最后更新：2026-08-14。
 
 ## 1. 目标与边界
 
@@ -139,20 +139,18 @@ python3 scripts/verify_vendor_manifest.py --require-release-ready
 python3 scripts/verify_vendor_manifest.py --artifact-root <unpacked-release-root> --require-release-ready
 ```
 
-前者必须始终通过，防止受管二进制和参数文件在未知条件下漂移。后者会将未补齐来源、版本或
-许可证的组件视为发布阻塞。当前 Multiwfn 和 Packmol 已达到 `release_ready`；Sobtop、
-精简 Open Babel 和遗留 `3Dmol-min.js` 均登记为 `exclude_from_release_artifact`，其清单内
-显式列出待排除路径、仓内无法证明的原因和人工核验步骤。排除不是授权结论，也不等于发行
-就绪：在实际打包器能证明这些路径没有进入工件之前，`--require-release-ready` 必须保持失败。
-Sobtop 的整个目录（含示例）均在排除范围内；若后续希望随包发行，必须先单独登记其来源、
-许可证与示例数据保留理由。
+前者必须始终通过，防止受管二进制和参数文件在未知条件下漂移。后者只约束受控 staging 的
+文件边界：当前 Multiwfn 和 Packmol 为 `release_ready`，Sobtop、精简 Open Babel 和遗留
+`3Dmol-min.js` 为 `exclude_from_release_artifact`。上游入口和使用边界已在根 README 登记；
+排除不是对运行能力或当前验收的否定，而是避免把 staging 误表述为含第三方负载的产品发行物。
+Sobtop 的整个目录（含示例）仍在 staging 排除范围内。
 
 发布构建完成后，还必须将解压后的 staging 根目录传给
 `--artifact-root --require-release-ready`。该纯文件检查验证 `release_ready` 组件所登记文件
 的大小与 SHA-256、清单自身以及其余未登记文件；同时检查 `exclude_from_release_artifact`
 组件的全部登记路径均不在工件中。它不解压归档、不启动程序、不替代许可证人工复核。工件
-通过这一步后，待证据组件的排除才可视为已实际落实；若要把它们重新随包发行，仍需补齐其
-上游来源、精确版本、许可文本与再分发依据。
+通过这一步后，排除组件未进入 staging 的边界即可视为已实际落实；若未来改变该工件边界，
+必须重新记录适用的上游条款和随包文件。
 
 受控 staging 只用于审计，不是当前项目的交付包。若需要复核 staging 文件边界，可使用：
 
@@ -170,16 +168,15 @@ python3 scripts/verify_vendor_manifest.py \
 **当前发行形态（2026-08-13）**：开发者已确定只支持从 GitHub 完整源码检出后运行 `pip install -e .`；
 不发布 wheel、PyPI 包、独立安装包或可运行 staging。普通 wheel 不含根目录资源或 `vendor/` 负载，且
 现有 `get_project_root()` 只识别源码布局，因此不属于支持形态。项目原创代码的免费使用与再分发需事先授权
-边界写在根 README；这不是对第三方组件的授权。仓内 Sobtop、精简 Open Babel 和 3Dmol 的来源/再分发
-依据仍未完成审计，即使它们随当前源码检出可见，也不得据此推断项目拥有或授予其分发权。
+边界写在根 README；这不是对第三方组件的授权。仓内 Sobtop、精简 Open Babel 和 3Dmol 的上游入口
+及使用边界已登记，即使它们随当前源码检出可见，也不得据此推断项目拥有或授予其分发权。
 
 外部科学软件不随 Willy 提供。许可证以 2026-08-13 的官方页面核验为准：GROMACS 是
 LGPL-2.1-or-later；Packmol 21.2.3 是 MIT；Multiwfn 3.8(dev)-2025-02-14 随附许可允许免费
 再分发并要求引用。Gaussian 是需签署许可的软件；ORCA 的 EULA 规定其授权不可转让和不可再许可；
 BOSS 5.1 官网只说明向学术用户免费提供并要求登记下载。Open Babel 上游为 GPL-2.0，完整安装由用户提供。
-LigParGen 的上游服务和 Sobtop 页面未在本项目可审计材料中给出可用于本项目再分发的许可证文本，因此保持
-“外部安装/待核实”，不得以“免费”推导再分发权。相关官网链接集中在根 README；各 profile 的真实执行证据
-仍由 external smoke 负责。
+LigParGen 的上游服务和 Sobtop 页面不由 Willy 解释或替代其使用条款；相关官网链接集中在根 README，
+不得以“免费”推导再分发权。各 profile 的真实执行证据仍由 external smoke 负责。
 
 核验来源仅用于记录事实，不构成法律意见或对第三方条款的替代解释：
 
@@ -192,8 +189,8 @@ LigParGen 的上游服务和 Sobtop 页面未在本项目可审计材料中给�
 | ORCA 6.x | [ORCA EULA](https://orcaforum.kofo.mpg.de/app.php/privacypolicy) | 授权不可转让或再许可；用户自行下载和安装。 |
 | BOSS 5.1 | [Jorgensen 组软件页](https://zarbi.chem.yale.edu/software.html) | 官网说明面向学术用户免费提供且需登记下载；不随附。 |
 | LigParGen | [LigParGen 上游服务](https://zarbi.chem.yale.edu/ligpargen/index.html) | 本项目未获得可审计的再分发许可记录；仅支持用户外置安装。 |
-| Open Babel | [官方许可 FAQ](https://openbabel.org/docs/Introduction/faq.html) | GPL-2.0；完整 OPLS 依赖由用户安装，仓内精简负载仍待溯源。 |
-| Sobtop | [上游页面](http://sobereva.com/soft/sobtop/) | 仓内精确版本、许可和再分发依据尚未核实。 |
+| Open Babel | [官方许可 FAQ](https://openbabel.org/docs/Introduction/faq.html) | GPL-2.0；完整 OPLS 依赖由用户安装，仓内精简负载不进入 staging。 |
+| Sobtop | [上游页面](http://sobereva.com/soft/sobtop/) | 上游网站来源已登记；仓内负载不进入 staging，Willy 不代替上游解释使用或分发条款。 |
 
 ### 2.4 当前开发机审计快照
 
@@ -338,6 +335,23 @@ Packmol 已登记为受管工具，`resolve_tool("packmol")` 与 `env_checker` �
 `vendor/manifest.json`。本机与同一 Ubuntu 20.04 主机均完成 4 原子、20 A 周期盒 smoke（退出码 0、
 `Success!`、4 个原子、一个 `CRYST1`）。验收机上的 Willy 检出尚未替换为该版本，因此完整端到端仍须在
 更新检出后重新执行。
+
+#### 4.2.1 2026-08-14 当前 WSL2 G-07/T-07 复测
+
+当前复测机为 Ubuntu 24.04 WSL2。真实仓内 Packmol 的最小启动探针返回帮助用法退出码 `174`，
+状态为 `available/started`；该非零码证明加载器和进程已启动，不被误判为 ABI 故障。临时无二进制
+和注入 `GLIBC_2.34 not found` 的受控文件分别得到 `missing` 与 `runtime_unavailable`，公共原因
+均不包含具体符号、路径或原始 stderr。
+
+随后在临时 run 中注入输入契约、依赖缺失、Packmol ABI、grompp、EQ、PROD 和 LLM 配置错误：
+六个 run 的 `status.json`、前端 panel/error event、`events.jsonl`、`logs/structured.jsonl`
+及 `decision_trace.jsonl` 均通过脱敏检查；私有决策保留 `run_id`、`step`、`error_kind`，公共面板
+只显示工具/操作级原因、未执行参数调整或用户确认建议。LLM 配置错误在 run 创建前返回受限文案，
+不写入 `.env`，也不创建状态、事件或决策记录。脱敏快照为
+`tests/reports/audits/g07_local_wsl_20260814.json`。
+
+该证据只对 Ubuntu 24.04 WSL2 目标有条件成立；若发布目标仍是 Ubuntu 20/22 或其他 libc/ABI，
+必须在对应发行版重复最小 Packmol 探针和错误矩阵，不能以本机结果替代。
 
 ## 5. 模块职责与迁移
 

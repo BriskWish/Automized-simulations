@@ -157,6 +157,10 @@ class MockLLMClient:
             if step not in {"em", "eq", "prod"}:
                 step = "em"
             return {"step": step, "work_dir": "run"}
+        if tool_name in {"tools_retry_struct_g16", "tools_retry_struct_g09"} and (
+            scenario.injected_error_kind is ErrorKind.SCF_NOT_CONVERGED
+        ):
+            return {"molecule_name": "LiTFSI", "scf_options": "scf=xqc"}
         if "retry_struct" in tool_name or "retry_topo" in tool_name:
             return {"molecule_name": "LiTFSI"}
         if "retry_mol2" in tool_name or "retry_chg" in tool_name:

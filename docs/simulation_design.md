@@ -4,7 +4,7 @@
 
 模拟层在单个 run workspace 中执行 GROMACS `EM -> NPT EQ -> PROD`。它消费拓扑层交接的 `topol.top`、`.itp` 和坐标文件，不改写量子产物或拓扑参数。GROMACS 仅由 `WILLY_GMX_BIN` 显式指定（进程环境优先，其次项目 `.env`）；本版本不从 `PATH`、系统扫描或 GROMACS 原生环境变量发现。编排器会经 `env_checker.ensure()` 预检，实际子进程复用相同解析结果。
 
-本版本的模拟层验收标准是：受支持 profile 严格完成 Step 1--10，所有阶段正常退出，最终状态为 `done`，且 manifest/status 与阶段产物契约通过。后处理/分析实现仅作内部实验保留，不属于本版本公开可用范围；不依据短链路推断科学体系性质。
+本版本的模拟层验收标准是：四条已归档历史 profile 与后续确定性回归组成验收并集，目标机任选一条受支持 profile 严格完成 Step 1--10、所有阶段正常退出、最终状态为 `done`，且 manifest/status 与阶段产物契约通过。后处理/分析实现仅作内部实验保留，不属于本版本公开可用范围；不依据短链路推断科学体系性质。
 
 ## 协议与配置
 
@@ -112,4 +112,4 @@ pytest -q tests/test_simulation_protocol.py tests/test_simulation_execution.py \
   tests/test_frontend_api.py
 ```
 
-单元和模拟执行测试覆盖协议边界、配置迁移、阶段越权、checkpoint 连续性、配置变更禁止 append、质量密度公式、显式 PBC/`CRYST1` 审计、真实密度回滚参数、残留 Packmol 输出隔离、前置/进程/PBC 结构化执行证据和空产物拒绝，以及进程组停止、运行 provenance、RunStore 并发序列化/中断重放、StepRegistry、配置外层 schema、执行模块依赖归属和 `0.15e` 净电荷容差边界。2026-08-01 已在 GROMACS 2025.0 和 Packmol 21.2.3 上完成工作区内 32 原子中性 LJ 参考体系的十步冒烟。2026-08-11 批次 `acceptance_batch_20260811174708.json` 又以 `EC 200 / FEC 200 / EMC 200`、7 ns EQ、2 ns PROD 串行完成 G16+LigParGen/BOSS 与 ORCA+LigParGen/BOSS；四条主 profile 均有 10/10 真实证据。本版本不据此声明科学体系预测、后处理/分析或离子 OPLS 能力。
+单元和模拟执行测试覆盖协议边界、配置迁移、阶段越权、checkpoint 连续性、配置变更禁止 append、质量密度公式、显式 PBC/`CRYST1` 审计、真实密度回滚参数、残留 Packmol 输出隔离、前置/进程/PBC 结构化执行证据和空产物拒绝，以及进程组停止、运行 provenance、RunStore 并发序列化/中断重放、StepRegistry、配置外层 schema、执行模块依赖归属和 `0.15e` 净电荷容差边界。2026-08-01 已在 GROMACS 2025.0 和 Packmol 21.2.3 上完成工作区内 32 原子中性 LJ 参考体系的十步冒烟。2026-08-11 批次 `acceptance_batch_20260811174708.json` 又以 `EC 200 / FEC 200 / EMC 200`、7 ns EQ、2 ns PROD 串行完成 G16+LigParGen/BOSS 与 ORCA+LigParGen/BOSS；四条主 profile 的核心 JSON 已归档为验收并集。本版本不据此声明科学体系预测、后处理/分析或离子 OPLS 能力。

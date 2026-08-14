@@ -80,7 +80,10 @@ _ALLOWED_TRANSITIONS: dict[State, frozenset[State]] = {
     State.STOPPING: frozenset({State.ABORTED}),
     State.ESCALATED: frozenset({State.ABORTED}),
     State.DONE: frozenset(),
-    State.ABORTED: frozenset(),
+    # A user may explicitly re-open an interrupted run through the bounded
+    # Run Assistant control path.  It must first become awaiting_confirmation;
+    # no direct aborted -> running/retrying transition is permitted.
+    State.ABORTED: frozenset({State.AWAITING_CONFIRMATION}),
 }
 
 

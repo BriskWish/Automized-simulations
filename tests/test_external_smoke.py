@@ -186,3 +186,25 @@ def test_external_smoke_preflight_gate(case):
             pytest.fail(message)
         pytest.skip(message)
     assert result.ready
+
+
+@pytest.mark.external
+def test_g07_local_wsl_error_matrix_is_redacted():
+    """复测真实 Packmol 启动与受控错误注入的公开/私有边界。"""
+    from tests.tools.g07_local_wsl_acceptance import run_acceptance
+
+    payload = run_acceptance(Path.cwd())
+
+    assert payload["acceptance"] in {"passed", "conditional"}
+    assert payload["environment"]["real_packmol"]["started"] is True
+    assert payload["environment"]["abi_injection"]["runtime_unavailable"] is True
+    assert payload["environment"]["dependency_injection"]["missing"] is True
+    assert len(payload["scenarios"]) == 6
+    assert all(
+        item["public_projection_redacted"]
+        and item["private_records_redacted"]
+        and item["private_decision_contract"]
+        for item in payload["scenarios"]
+    )
+    assert payload["llm_configuration_error"]["safe"] is True
+    assert payload["llm_configuration_error"]["run_artifacts_created"] is False
