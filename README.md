@@ -1,4 +1,4 @@
-# Willy — AI 驱动的分子动力学模拟自动化
+# Willy — AI 驱动的小分子/电解液分子动力学模拟自动化
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
