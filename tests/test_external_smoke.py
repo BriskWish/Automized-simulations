@@ -43,6 +43,18 @@ def test_smoke_registry_has_unique_case_ids_and_declared_timeout():
     assert all(case.timeout_s > 0 for case in SMOKE_CASES)
 
 
+def test_g01_minimal_fixture_initializer_matches_the_declared_bundle(tmp_path):
+    from tests.tools.g01_gromacs_minimal_acceptance import initialize_fixture_bundle
+
+    case = get_smoke_case("gromacs_minimal")
+    bundle = initialize_fixture_bundle(tmp_path / "g01-fixture")
+    manifest = json.loads((bundle / "fixture-manifest.json").read_text(encoding="utf-8"))
+
+    assert set(manifest["cases"]["gromacs_minimal"]["files"]) == set(case.fixture_files)
+    assert all((bundle / relative).is_file() for relative in case.fixture_files)
+    assert initialize_fixture_bundle(bundle) == bundle
+
+
 def test_smoke_preflight_is_read_only_and_reports_missing_fixture(tmp_path):
     case = ExternalSmokeCase("fixture_only", "fixture", (), ("input.dat",))
     result = preflight(case, root=tmp_path)

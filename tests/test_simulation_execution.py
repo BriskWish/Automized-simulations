@@ -135,6 +135,25 @@ def test_grompp_and_mdrun_uses_run_config_cpu_default(tmp_path, monkeypatch):
     assert mdrun_args[mdrun_args.index("-nt") + 1] == "3"
 
 
+def test_grompp_and_mdrun_forwards_an_explicit_mdrun_timeout(tmp_path, monkeypatch):
+    import willy.simulation._gmx_utils as gmx_utils
+
+    _write_stage_inputs(tmp_path)
+    timeouts = []
+
+    def fake_gmx(args, cwd, timeout=None, input_text=None, **kwargs):
+        if args[0] == "mdrun":
+            timeouts.append(timeout)
+        return _fake_gmx_with_outputs(args, cwd, timeout, input_text)
+
+    monkeypatch.setattr(gmx_utils, "run_gmx", fake_gmx)
+
+    result = grompp_and_mdrun("em", tmp_path, mdrun_timeout_s=42)
+
+    assert result.success is True
+    assert timeouts == [42]
+
+
 def test_gromacs_reports_preprocess_and_run_as_public_activities(tmp_path, monkeypatch):
     import willy.simulation._gmx_utils as gmx_utils
 

@@ -298,8 +298,8 @@ python3 -m tests.llm_eval.run_eval
 
 - 读取 `docs/knowledge.md`。
 - 扫描 `struct/*.gjf` 与 `struct/*.inp` 作为可用分子列表；方案生成时必须按所选后端以受限解析器审计原始输入，而不是以 registry 默认电荷代替文件头。
-- 写入 `config.json`，但必须通过 `workflow_config.apply_config()` 或统一配置 API。
-- 在 `awaiting_confirmation` 期间接收方案问题和增量修改：将经过指纹校验的冻结配置、摘要及最近对话绑定到 LLM 请求；问题只读回答，修改只生成新的待确认方案，且服务端重新执行量子输入审计。只有明确声明新项目/新体系/重新提交时才使旧方案失效。
+- 用户确认启动后由服务端通过 `workflow_config.apply_config()` 或统一配置 API 写入 `config.json`；确认前仅维护会话级待确认候选。
+- 在 `awaiting_confirmation` 期间接收方案问题和增量修改：将经过指纹校验的待确认候选、摘要及最近对话绑定到 LLM 请求；问题只读回答，修改重新执行量子输入审计和 workflow schema 校验，通过后覆写新的待确认方案。只有明确声明新项目/新体系/重新提交时才使旧方案失效；根目录运行配置仅在用户确认后由 `start_pipeline()` 冻结写入。
 
 禁止：
 

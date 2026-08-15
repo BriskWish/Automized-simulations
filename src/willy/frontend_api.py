@@ -15,7 +15,7 @@ app.py 只通过此模块访问后端，不再直接触碰路径/shell/文件系
 from __future__ import annotations
 from collections.abc import Mapping
 import importlib
-import json, math, os, re, shutil, subprocess, signal, tempfile, threading, time
+import json, math, os, re, secrets, shutil, subprocess, signal, tempfile, threading, time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
@@ -64,6 +64,10 @@ from willy.pipeline_launch import (
 
 ROOT = get_project_root()
 _TRANSIENT_RUN_STATES = {"running", "retrying", "stopping"}
+_RUN_ASSISTANT_HISTORY_FILENAME = "run_assistant_history.json"
+_RUN_ASSISTANT_HISTORY_SCHEMA_VERSION = 1
+_RUN_ASSISTANT_HISTORY_LIMIT = 240
+_RUN_ASSISTANT_MESSAGE_LIMIT = 6_000
 _REMOTE_REGISTRY_MODULE = "willy.remote_registry"
 _REMOTE_REGISTRY_SNAPSHOT_FUNCTION = "get_public_execution_snapshot"
 _EXECUTION_MODES = ("local", "ssh", "slurm")
@@ -2315,6 +2319,7 @@ def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
         except RunRegistryError:
             status = None
     pending_action = get_pending_action(selected_run_id)
+    pending_fork = get_pending_fork(selected_run_id)
     error_event = (
         _public_run_error_event(selected_run_id, status)
         if isinstance(selected_run_id, str) and isinstance(status, Mapping)
@@ -2325,6 +2330,7 @@ def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
         "summary": summary,
         "live_summary": live_summary,
         "pending_action": pending_action,
+        "pending_fork": pending_fork,
         "error_event": error_event,
         "status_event_id": _run_status_event_id(
             selected_run_id, status, pending_action, error_event
@@ -2344,22 +2350,336 @@ def run_assistant_pending_message(message: str) -> str:
 
 
 def run_assistant_control_command(run_id: str | None, message: str) -> str | None:
-    """Execute only explicit ``/resume`` or ``/fork`` chat commands."""
+    """Execute explicit controls; natural-language ``/fork`` becomes a proposal."""
     try:
         command = parse_run_control_command(message)
     except RunControlError as exc:
         if isinstance(message, str) and message.lstrip().lower().startswith("/fork"):
+            proposal = _propose_natural_language_fork(run_id, message)
+            if proposal is not None:
+                return proposal
             return _reject_fork_command(run_id, str(exc))
         return f"受控续跑命令无效：{exc}。"
     if command is None:
         return None
+    if command.kind == "switch":
+        try:
+            target_run_id = switch_run_assistant(run_id, command.target_run_id)
+        except (OSError, RunRegistryError, RunControlError):
+            return "工程切换失败：指定运行不存在或已不可读取。"
+        return f"已切换至工程 {target_run_id}。"
     if command.kind == "resume":
         return resume_aborted_run(run_id)
+    if any(path[0] not in {"topology", "box", "md", "execution"} for path in command.changes):
+        proposal = _propose_natural_language_fork(run_id, str(message))
+        if proposal is not None:
+            return proposal
     return fork_aborted_run(run_id, command)
+
+
+def get_run_assistant_switch_target(message: object) -> str | None:
+    """Return one existing target selected by a strictly valid ``/switch``."""
+    try:
+        command = parse_run_control_command(message)
+        if command is None or command.kind != "switch" or not command.target_run_id:
+            return None
+        return RunRegistry(ROOT).resolve_run_id(command.target_run_id).name
+    except (RunControlError, OSError, RunRegistryError):
+        return None
+
+
+def switch_run_assistant(run_id: str | None, target_run_id: str | None) -> str:
+    """Audit a browser conversation switch and return its canonical run ID."""
+    if not isinstance(target_run_id, str) or not target_run_id:
+        raise RunControlError("/switch 运行编号无效")
+    registry = RunRegistry(ROOT)
+    target = registry.resolve_run_id(target_run_id)
+    source: Path | None = None
+    if isinstance(run_id, str) and run_id:
+        source = registry.resolve_run_id(run_id)
+    if source is not None and source.name != target.name:
+        registry.append_event(source, "run_assistant_switch_out", {"target_run_id": target.name})
+        registry.append_event(target, "run_assistant_switch_in", {"source_run_id": source.name})
+    return target.name
+
+
+def _sanitize_run_assistant_history(history: object) -> list[dict[str, str]]:
+    """Bound persisted browser dialogue to safe, renderable message fields."""
+    if not isinstance(history, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for raw in history[-_RUN_ASSISTANT_HISTORY_LIMIT:]:
+        if not isinstance(raw, Mapping):
+            continue
+        role = raw.get("role")
+        content = raw.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        message = {"role": role, "content": content[:_RUN_ASSISTANT_MESSAGE_LIMIT]}
+        for key in ("_run_assistant_event_kind", "_run_assistant_event_id"):
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                message[key] = value[:256]
+        cleaned.append(message)
+    return cleaned
+
+
+def get_run_assistant_history(run_id: str | None) -> list[dict[str, str]]:
+    """Read one run-local browser history without falling back across runs."""
+    if not isinstance(run_id, str) or not run_id:
+        return []
+    try:
+        directory = RunRegistry(ROOT).resolve_run_id(run_id)
+        payload = json.loads((directory / _RUN_ASSISTANT_HISTORY_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError, RunRegistryError):
+        return []
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema_version") != _RUN_ASSISTANT_HISTORY_SCHEMA_VERSION
+        or payload.get("run_id") != directory.name
+    ):
+        return []
+    return _sanitize_run_assistant_history(payload.get("messages"))
+
+
+def save_run_assistant_history(run_id: str | None, history: object) -> bool:
+    """Persist one bounded dialogue beside the run, never in a global session."""
+    if not isinstance(run_id, str) or not run_id:
+        return False
+    try:
+        directory = RunRegistry(ROOT).resolve_run_id(run_id)
+        from willy.config_store import write_json
+
+        write_json(directory / _RUN_ASSISTANT_HISTORY_FILENAME, {
+            "schema_version": _RUN_ASSISTANT_HISTORY_SCHEMA_VERSION,
+            "run_id": directory.name,
+            "messages": _sanitize_run_assistant_history(history),
+        })
+    except (OSError, ValueError, RunRegistryError):
+        return False
+    return True
+
+
+def _propose_natural_language_fork(run_id: str | None, message: str) -> str | None:
+    """Turn an explicit natural-language ``/fork`` into a server-validated proposal.
+
+    The model may only suggest existing configuration paths and scalar values.
+    It never receives execution tools and never starts a child run; all step
+    ownership, range, schema, and CAS checks remain deterministic below.
+    """
+    if not isinstance(message, str):
+        return None
+    body = message.strip()[len("/fork"):].strip()
+    if not body:
+        return None
+    try:
+        registry, directory, status, _backend, _safe_step, stopped_at = _control_context(run_id)
+        config = registry.get_run_config(directory.name)
+    except RunControlError as exc:
+        return (
+            f"当前工程不能创建 fork：{exc}。"
+            "请选择已由用户中止的父工程后重新输入 /fork。"
+        )
+    except (OSError, ValueError, RunRegistryError):
+        return "当前工程的冻结配置不可用，无法创建 fork。"
+    try:
+        from willy.agent_config import _DS, _LLM_SETTINGS
+        if _DS is None:
+            raise RunControlError("LLM 当前不可用")
+        model = _LLM_SETTINGS.model if _LLM_SETTINGS else DEFAULT_LLM_MODEL
+        outline = {
+            key: config.get(key)
+            for key in ("md", "box")
+            if key in config
+        }
+        topology = config.get("topology")
+        if isinstance(topology, Mapping):
+            outline["topology"] = {
+                key: topology[key]
+                for key in ("backend", "force_field")
+                if key in topology
+            }
+        prompt = (
+            "你是运行控制的只读参数解析器。用户已经明确输入 /fork，"
+            "请把自然语言修改要求转换成待确认的 JSON 候选，不要执行任何动作。"
+            "只返回 JSON：{\"changes\":[{\"path\":\"md.eq.tau_p\",\"value\":1}],"
+            "\"summary\":\"简短中文说明\"}。"
+            "path 必须是当前配置中已存在的字段，优先使用完整路径。"
+            "用户说 tau_p 时必须映射为 md.eq.tau_p；用户说 EQ 段只表示 md.eq。"
+            "不要输出 restart_step、命令、路径、解释性 Markdown 或新增字段。"
+            "如果无法确定唯一字段，返回 {\"changes\":[]}。\n"
+            f"上次安全停止步骤：{stopped_at}\n"
+            f"当前配置摘要：{json.dumps(outline, ensure_ascii=False)[:12000]}\n"
+            f"用户要求：{body[:600]}"
+        )
+        response = _DS.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "只生成受限 JSON，不调用工具。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=600,
+        )
+        content = response.choices[0].message.content or ""
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
+        payload = json.loads(content)
+        raw_changes = payload.get("changes") if isinstance(payload, Mapping) else None
+        if not isinstance(raw_changes, list) or not raw_changes:
+            raise RunControlError("LLM 未识别出明确的参数修改")
+        changes: dict[tuple[str, ...], object] = {}
+        for item in raw_changes[:16]:
+            if not isinstance(item, Mapping):
+                raise RunControlError("LLM 返回的参数修改格式无效")
+            raw_path = str(item.get("path", "")).strip()
+            if raw_path in {"tau_p", "eq_tau_p", "eq.tau_p", "md.eq.tau_p"}:
+                raw_path = "md.eq.tau_p"
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_-]*)*", raw_path):
+                raise RunControlError("LLM 返回了无效参数路径")
+            value = item.get("value")
+            if isinstance(value, (Mapping, list)) or isinstance(value, bool) or value is None:
+                raise RunControlError("fork 参数必须是标量值")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise RunControlError("fork 数值必须是有限数")
+            if isinstance(value, str) and (len(value) > 160 or "/" in value or "\\" in value):
+                raise RunControlError("fork 字符串参数无效")
+            path = tuple(raw_path.split("."))
+            if path in changes:
+                raise RunControlError("LLM 重复指定了同一参数")
+            changes[path] = value
+        plan = validate_fork_changes(config, changes, stopped_at=stopped_at)
+        candidate = apply_fork_changes(config, changes)
+        from willy.workflow_config import validate_config
+        issues = validate_config(candidate)
+        if issues:
+            raise RunControlError("修改后的配置未通过契约校验")
+        manifest = registry._read_registry_manifest(directory)
+        fingerprint = manifest.get("config_sha256")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise RunControlError("原运行配置指纹不可用")
+        pending = {
+            "proposal_id": secrets.token_urlsafe(16),
+            "run_id": directory.name,
+            "status": "awaiting_confirmation",
+            "config_fingerprint": fingerprint,
+            "stopped_step": plan.stopped_step,
+            "restart_step": plan.restart_step,
+            "parameter_paths": list(plan.parameter_paths),
+            "changes": [
+                {"path": ".".join(path), "value": changes[path]}
+                for path in sorted(changes)
+            ],
+        }
+        _transition_to_control_awaiting(
+            registry,
+            directory.name,
+            status,
+            event_type="fork_proposal_created",
+            extra_update={"pending_fork": pending},
+        )
+        try:
+            registry.record_control_action(
+                directory.name,
+                action="fork",
+                outcome="proposed",
+                restart_step=plan.restart_step,
+                stopped_step=plan.stopped_step,
+                parameter_paths=plan.parameter_paths,
+            )
+        except (OSError, ValueError, RunRegistryError):
+            pass
+        changed = "；".join(
+            f"{item['path']}={item['value']}" for item in pending["changes"]
+        )
+        return (
+            f"已生成待确认 fork 方案：{changed}。将从第 {plan.restart_step} 步重新生成受影响阶段；"
+            "当前未修改配置、未创建子运行。请回复‘确认 fork’或‘同意 fork’后执行。"
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, RunRegistryError, RunControlError) as exc:
+        _reject_fork_command(run_id, str(exc))
+        return f"/fork 参数未形成可执行方案：{str(exc)}。工程已回到等待状态。"
+
+
+def get_pending_fork(run_id: str | None = None) -> dict[str, object] | None:
+    """Return one public, session-bound natural-language fork proposal."""
+    selected = run_id or latest_run_id()
+    if not isinstance(selected, str):
+        return None
+    try:
+        registry = RunRegistry(ROOT)
+        status = registry.get_run_status(selected, reconcile=False)
+    except (OSError, RunRegistryError):
+        return None
+    if status.get("state") != "awaiting_confirmation":
+        return None
+    extra = status.get("extra")
+    pending = extra.get("pending_fork") if isinstance(extra, Mapping) else None
+    if not isinstance(pending, Mapping) or pending.get("run_id") != selected:
+        return None
+    if not isinstance(pending.get("proposal_id"), str) or not isinstance(pending.get("changes"), list):
+        return None
+    public = dict(pending)
+    public["state_revision"] = status.get("state_revision")
+    return public
+
+
+def confirm_pending_fork(
+    proposal_id: str,
+    run_id: str | None = None,
+    *,
+    state_revision: int | None = None,
+) -> str:
+    """Revalidate and execute one user-approved natural-language fork proposal."""
+    proposal = get_pending_fork(run_id)
+    if proposal is None or proposal.get("proposal_id") != proposal_id:
+        return "待确认 fork 方案已失效，请重新输入 /fork。"
+    current_revision = proposal.get("state_revision")
+    if (
+        isinstance(current_revision, bool)
+        or not isinstance(current_revision, int)
+        or (state_revision is not None and state_revision != current_revision)
+    ):
+        return "待确认 fork 方案已更新，请刷新后重新确认。"
+    changes: dict[tuple[str, ...], object] = {}
+    for item in proposal.get("changes", []):
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+            return "待确认 fork 方案格式无效，请重新输入 /fork。"
+        changes[tuple(item["path"].split("."))] = item.get("value")
+    command = RunControlCommand(kind="fork", changes=changes)
+    reply = fork_aborted_run(run_id, command, expected_proposal=proposal)
+    if not reply.startswith("已创建 fork"):
+        return reply
+    try:
+        registry = RunRegistry(ROOT)
+        directory = registry.resolve_run_id(str(proposal["run_id"]))
+        status = registry.get_run_status(directory.name, reconcile=False)
+        extra = dict(status.get("extra")) if isinstance(status.get("extra"), Mapping) else {}
+        extra.pop("pending_fork", None)
+        updated = dict(status)
+        updated.update({
+            "state": "aborted",
+            "error": "",
+            "error_kind": "",
+            "repair": {},
+            "activity": {},
+            "extra": extra,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        registry.compare_and_swap_status(
+            directory,
+            expected_revision=status.get("state_revision"),
+            status=updated,
+            event_type="fork_proposal_confirmed",
+        )
+    except (OSError, ValueError, RunRegistryError, RunStateConflict):
+        pass
+    return reply
 
 
 def resume_aborted_run(run_id: str | None) -> str:
     """Relaunch an aborted run from its first unfinished safe step."""
+    if get_pending_fork(run_id) is not None:
+        return "当前已有待确认 fork 方案，请先确认或重新提交 /fork。"
     try:
         registry, directory, status, backend, restart_step, stopped_at = _control_context(run_id)
         reservation = reserve_existing_run_launch(ROOT, directory.name)
@@ -2404,13 +2724,30 @@ def resume_aborted_run(run_id: str | None) -> str:
     return f"已接受 /resume；将读取原 config.json，并从第 {restart_step} 步的安全退出点续跑。"
 
 
-def fork_aborted_run(run_id: str | None, command: RunControlCommand) -> str:
+def fork_aborted_run(
+    run_id: str | None,
+    command: RunControlCommand,
+    *,
+    expected_proposal: Mapping[str, object] | None = None,
+) -> str:
     """Create a child run after deterministic parameter/step validation."""
+    existing_proposal = get_pending_fork(run_id)
+    if existing_proposal is not None and expected_proposal is None:
+        return "当前已有待确认 fork 方案，请先确认或重新提交 /fork。"
     try:
         registry, parent_dir, _status, backend, _safe_step, stopped_at = _control_context(run_id)
         config = registry.get_run_config(parent_dir.name)
+        if isinstance(expected_proposal, Mapping):
+            if expected_proposal.get("run_id") != parent_dir.name:
+                raise RunControlError("待确认 fork 方案所属工程已变化")
+            manifest = registry._read_registry_manifest(parent_dir)
+            if expected_proposal.get("config_fingerprint") != manifest.get("config_sha256"):
+                raise RunControlError("运行配置已变化，待确认 fork 方案已失效")
         plan = validate_fork_changes(config, command.changes, stopped_at=stopped_at)
         fork_config = apply_fork_changes(config, command.changes)
+        from willy.execution_resources import normalize_config_nproc
+        resource_plan = normalize_config_nproc(fork_config)
+        fork_config = resource_plan.config
         from willy.workflow_config import validate_config
         if validate_config(fork_config):
             raise RunControlError("修改后的配置未通过契约校验")
@@ -2432,6 +2769,17 @@ def fork_aborted_run(run_id: str | None, command: RunControlCommand) -> str:
         child_registry.register_run(
             reservation.run_dir, backend=backend,
             total_steps=STEP_REGISTRY.total_steps, parent_run_id=parent_dir.name,
+        )
+        # ``register_run`` owns the public registry section only.  A controlled
+        # child bypasses the ordinary workspace setup, so initialize its private
+        # MD manifest here before the MDP writer tries to record protocol data.
+        from willy.simulation.manifest import initialize_manifest
+        raw_md = fork_config.get("md")
+        raw_seed = raw_md.get("run_seed", 1) if isinstance(raw_md, Mapping) else 1
+        initialize_manifest(
+            reservation.run_dir,
+            reservation.run_dir / "config.json",
+            random_seed=int(raw_seed),
         )
         # A fork is a new run, so establish its full state-machine path before
         # handing it to the resume-only orchestrator binding.
@@ -2455,6 +2803,15 @@ def fork_aborted_run(run_id: str | None, command: RunControlCommand) -> str:
             restart_step=plan.restart_step, stopped_step=plan.stopped_step,
             parameter_paths=plan.parameter_paths, parent_run_id=parent_dir.name,
         )
+        if resource_plan.warnings:
+            child_registry.append_event(
+                reservation.run_dir,
+                "resource_nproc_adjusted",
+                {
+                    "cpu_count": resource_plan.cpu_count,
+                    "adjustment_count": len(resource_plan.warnings),
+                },
+            )
         registry.record_control_action(
             parent_dir.name, action="fork", outcome="accepted",
             restart_step=plan.restart_step, stopped_step=plan.stopped_step,
@@ -2492,9 +2849,13 @@ def fork_aborted_run(run_id: str | None, command: RunControlCommand) -> str:
     except (OSError, ValueError, RunRegistryError):
         # Once detached, the fork child owns the lock and remains runnable.
         pass
+    resource_notice = (
+        f" 当前系统检测到 {resource_plan.cpu_count} 核，已将超出容量的核数写回子运行配置。"
+        if resource_plan.warnings else ""
+    )
     return (
         f"已创建 fork {reservation.run_dir.name}；父工程保持不变，"
-        f"将从第 {plan.restart_step} 步重新生成受影响阶段。"
+        f"将从第 {plan.restart_step} 步重新生成受影响阶段。{resource_notice}"
     )
 
 
@@ -2543,6 +2904,7 @@ def _transition_to_control_awaiting(
     *,
     event_type: str,
     error: str = "",
+    extra_update: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     revision = status.get("state_revision")
     if isinstance(revision, bool) or not isinstance(revision, int):
@@ -2552,6 +2914,10 @@ def _transition_to_control_awaiting(
         "state": "awaiting_confirmation", "error": error, "error_kind": "",
         "repair": {}, "activity": {}, "updated_at": datetime.now(timezone.utc).isoformat(),
     })
+    if isinstance(extra_update, Mapping):
+        extra = dict(updated.get("extra")) if isinstance(updated.get("extra"), Mapping) else {}
+        extra.update(extra_update)
+        updated["extra"] = extra
     directory = registry.resolve_run_id(run_id)
     return registry.compare_and_swap_status(
         directory, expected_revision=revision, status=updated, event_type=event_type,
@@ -2598,18 +2964,30 @@ def _restore_control_awaiting(registry: RunRegistry, run_id: str) -> None:
 
 
 def _copy_fork_workspace(parent_dir: Path, child_dir: Path, config: Mapping[str, object]) -> None:
-    """Copy scientific inputs/upstream outputs, never parent audit metadata."""
+    """Copy upstream scientific inputs, never parent metadata or restart outputs."""
     ignored = {
         "config.json", "run_manifest.json", "manifest.json", "md_manifest.json",
         "topology_manifest.json", "status.json", "events.jsonl", "decision_trace.jsonl",
         "process_lifecycle.jsonl", "run_provenance.json", "environment_report.json",
-        "mdrun_eta.json", "pending_action.json", "logs", "visualization",
+        "mdrun_eta.json", "pending_action.json", "run_assistant_history.json",
+        "logs", "visualization",
+        "config_revisions", "mdp_metadata.json", "stop.request",
+        "model.inp", "model.pdb", "density.xvg", "temp.xvg",
     }
+    generated_stage_files = {
+        f"{stage}.{suffix}"
+        for stage in ("em", "eq", "prod")
+        for suffix in ("mdp", "tpr", "gro", "xtc", "edr", "log", "cpt", "trr")
+    }
+    generated_stage_files.update({"em_out.mdp", "eq_out.mdp", "prod_out.mdp"})
 
     def ignore(_directory: str, names: list[str]) -> set[str]:
         return {
             name for name in names
-            if name in ignored or name.endswith(".lock") or name.startswith(".status")
+            if name in ignored
+            or name in generated_stage_files
+            or name.endswith(".lock")
+            or name.startswith(".status")
         }
 
     shutil.copytree(parent_dir, child_dir, dirs_exist_ok=True, ignore=ignore)

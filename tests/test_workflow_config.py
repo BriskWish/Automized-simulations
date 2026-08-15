@@ -46,6 +46,56 @@ def test_molecule_nproc_can_override_global_default():
     assert validate_config(config) == []
 
 
+def test_default_nproc_is_bounded_by_detected_cpu_count(monkeypatch):
+    import willy.execution_resources as resources
+
+    monkeypatch.setattr(resources, "local_cpu_count", lambda: 4)
+    result = _apply_defaults({"residues": {"A": 1}, "molecules": {"A": {}}})
+
+    assert result["defaults"]["nproc"] == 4
+
+
+def test_local_cpu_count_prefers_process_affinity(monkeypatch):
+    import willy.execution_resources as resources
+
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _pid: {1, 3, 5})
+    monkeypatch.setattr(resources.os, "cpu_count", lambda: 32)
+
+    assert resources.local_cpu_count() == 3
+
+
+def test_explicit_nproc_is_clamped_with_a_nonblocking_warning(monkeypatch):
+    from willy.execution_resources import normalize_config_nproc
+
+    result = normalize_config_nproc({
+        "defaults": {"nproc": 8},
+        "molecules": {"A": {"nproc": 12}},
+    }, cpu_count=4)
+
+    assert result.config["defaults"]["nproc"] == 4
+    assert result.config["molecules"]["A"]["nproc"] == 4
+    assert len(result.warnings) == 2
+    assert all("当前系统检测到 4 核" in warning for warning in result.warnings)
+
+
+def test_explicit_nproc_above_eight_is_allowed_when_the_host_supports_it():
+    from willy.execution_resources import normalize_config_nproc
+
+    result = normalize_config_nproc({"defaults": {"nproc": 12}}, cpu_count=16)
+
+    assert result.config["defaults"]["nproc"] == 12
+    assert result.warnings == ()
+
+
+def test_runtime_nproc_resolution_also_bounds_legacy_snapshots(monkeypatch):
+    import willy.execution_resources as resources
+
+    monkeypatch.setattr(resources, "local_cpu_count", lambda: 3)
+
+    assert resources.resolve_nproc(8) == 3
+    assert resources.resolve_nproc(None) == 3
+
+
 def test_execution_defaults_to_explicit_local_profileless_mode():
     result = _apply_defaults({"residues": {"A": 1}, "molecules": {"A": {"charge": 0, "spin": 1}}})
 

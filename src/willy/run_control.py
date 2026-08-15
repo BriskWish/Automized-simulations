@@ -1,8 +1,9 @@
 """Deterministic command and parameter validation for Run Assistant controls.
 
 The chat layer must never infer a destructive control action from prose.  This
-module recognizes only explicit ``/resume`` and ``/fork`` commands, then maps
-each supported configuration field to its owning workflow step.
+module recognizes only explicit ``/resume``, ``/fork`` and ``/switch``
+commands, then maps each supported configuration field to its owning workflow
+step or validates the single allowed run identifier.
 """
 
 from __future__ import annotations
@@ -17,8 +18,9 @@ from typing import Any
 from willy.step_registry import MDP_STEP, PACKMOL_STEP, STEP_REGISTRY
 
 
-_COMMAND_RE = re.compile(r"^/(?P<kind>resume|fork)(?:\s+(?P<body>.*))?$", re.IGNORECASE | re.DOTALL)
+_COMMAND_RE = re.compile(r"^/(?P<kind>resume|fork|switch)(?:\s+(?P<body>.*))?$", re.IGNORECASE | re.DOTALL)
 _PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_-]*)*$")
+_SWITCH_RUN_ID_RE = re.compile(r"^(?:md__)?(?P<suffix>\d{12})$")
 _MAX_CHANGES = 16
 
 
@@ -30,6 +32,7 @@ class RunControlError(ValueError):
 class RunControlCommand:
     kind: str
     changes: dict[tuple[str, ...], Any]
+    target_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,9 +57,30 @@ def parse_run_control_command(message: object) -> RunControlCommand | None:
         if body:
             raise RunControlError("/resume 不接受参数；请使用 /fork 修改参数后创建子运行")
         return RunControlCommand(kind="resume", changes={})
+    if kind == "switch":
+        target_run_id = _parse_switch_run_id(body)
+        return RunControlCommand(kind="switch", changes={}, target_run_id=target_run_id)
     if not body:
         raise RunControlError("/fork 必须给出至少一个参数，例如 /fork md.eq.tau_p=2")
     return RunControlCommand(kind="fork", changes=_parse_changes(body))
+
+
+def _parse_switch_run_id(body: str) -> str:
+    """Normalize the sole positional argument accepted by ``/switch``."""
+    try:
+        tokens = shlex.split(body)
+    except ValueError as exc:
+        raise RunControlError("/switch 参数引号不完整") from exc
+    if len(tokens) != 1:
+        raise RunControlError(
+            "/switch 仅接受一个运行编号，例如 /switch md__202608150002"
+        )
+    match = _SWITCH_RUN_ID_RE.fullmatch(tokens[0])
+    if match is None:
+        raise RunControlError(
+            "/switch 运行编号无效；仅接受 md__YYYYMMDDHHMM 或 YYYYMMDDHHMM"
+        )
+    return f"md__{match.group('suffix')}"
 
 
 def safe_restart_step(status: Mapping[str, object]) -> int:

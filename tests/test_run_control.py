@@ -1,8 +1,9 @@
-"""Regression coverage for explicit Run Assistant /resume and /fork controls."""
+"""Regression coverage for explicit Run Assistant /resume, /fork and /switch controls."""
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,8 @@ from willy.run_control import (
     validate_fork_changes,
 )
 from willy.run_registry import RunRegistry
+from willy.simulation.manifest import load_manifest
+from willy.simulation.mdp import build_all
 from willy.simulation.protocol import default_md_config
 
 
@@ -26,7 +29,13 @@ def _config() -> dict:
     }
 
 
-def _aborted_run(tmp_path, *, run_id: str = "md__202608140001", step: int = 8):
+def _aborted_run(
+    tmp_path,
+    *,
+    run_id: str = "md__202608140001",
+    step: int = 8,
+    state: str = "aborted",
+):
     directory = tmp_path / "md_run" / run_id
     directory.mkdir(parents=True)
     (directory / "config.json").write_text(json.dumps(_config()), encoding="utf-8")
@@ -35,7 +44,7 @@ def _aborted_run(tmp_path, *, run_id: str = "md__202608140001", step: int = 8):
     registry = RunRegistry(tmp_path)
     registry.register_run(directory, backend="g16", total_steps=10)
     registry.record_status(directory, {
-        "state": "aborted", "step": step,
+        "state": state, "step": step,
         "step_label": "GROMACS 能量最小化", "layer": "simulation",
         "activity": {}, "done_steps": list(range(1, step)),
     }, "run_aborted")
@@ -84,6 +93,44 @@ def test_only_explicit_slash_commands_are_recognized():
     assert fork is not None
     assert fork.kind == "fork"
     assert fork.changes[("md", "eq", "tau_p")] == 3
+    switch = parse_run_control_command("/switch 202608150002")
+    assert switch is not None
+    assert switch.kind == "switch"
+    assert switch.target_run_id == "md__202608150002"
+    assert parse_run_control_command("/switch md__202608150002").target_run_id == "md__202608150002"
+
+
+@pytest.mark.parametrize("message", [
+    "/switch", "/switch md__202608150002 extra", "/switch run-1",
+    "/switch md__20260815002", "/switch md__202608150002/other",
+])
+def test_switch_rejects_every_shape_except_one_supported_run_id(message):
+    with pytest.raises(RunControlError, match="/switch"):
+        parse_run_control_command(message)
+
+
+def test_switch_resolves_existing_run_and_audits_both_histories(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    _registry, source = _aborted_run(tmp_path, run_id="md__202608150001")
+    _registry, target = _aborted_run(tmp_path, run_id="md__202608150002")
+
+    reply = frontend_api.run_assistant_control_command(source.name, "/switch 202608150002")
+
+    assert reply == "已切换至工程 md__202608150002。"
+    assert frontend_api.get_run_assistant_switch_target(
+        "/switch md__202608150002"
+    ) == target.name
+    assert "run_assistant_switch_out" in (source / "events.jsonl").read_text(encoding="utf-8")
+    assert "run_assistant_switch_in" in (target / "events.jsonl").read_text(encoding="utf-8")
+
+
+def test_switch_rejects_an_unknown_but_well_formed_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    _registry, source = _aborted_run(tmp_path, run_id="md__202608150001")
+
+    reply = frontend_api.run_assistant_control_command(source.name, "/switch 202608159999")
+
+    assert reply == "工程切换失败：指定运行不存在或已不可读取。"
 
 
 def test_fork_parameter_must_belong_to_stopped_or_later_step():
@@ -161,11 +208,25 @@ def test_orchestrator_binds_controlled_resume_without_reinitializing_workspace(t
     assert orchestrator._run_dir == directory
     assert orchestrator._sm._status.state == "retrying"
     assert orchestrator._sm._status.done_steps == list(range(1, 8))
+    assert load_manifest(directory)["schema_version"] == 1
 
 
 def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp_path, monkeypatch):
+    import willy.simulation.manifest as simulation_manifest
+
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        simulation_manifest,
+        "tool_versions",
+        lambda: {"gromacs": "test", "packmol": "test"},
+    )
     _registry, parent = _aborted_run(tmp_path)
+    (parent / "run_assistant_history.json").write_text(
+        json.dumps({"schema_version": 1, "run_id": parent.name, "messages": []}),
+        encoding="utf-8",
+    )
+    for name in ("em.mdp", "em.tpr", "em.gro", "eq.mdp", "eq.cpt", "prod.mdp", "model.pdb"):
+        (parent / name).write_text(f"parent {name}\n", encoding="utf-8")
     child = tmp_path / "md_run" / "md__202608140002"
     child.mkdir(parents=True)
     reservation = _Reservation(child)
@@ -183,6 +244,13 @@ def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp
     assert json.loads((parent / "config.json").read_text())["md"]["eq"]["tau_p"] == 2.0
     assert json.loads((child / "config.json").read_text())["md"]["eq"]["tau_p"] == 3
     assert (child / "topol.top").read_text() == "; parent upstream output\n"
+    assert not (child / "em.tpr").exists()
+    assert not (child / "eq.cpt").exists()
+    assert not (child / "model.pdb").exists()
+    assert not (child / "run_assistant_history.json").exists()
+    assert load_manifest(child)["schema_version"] == 1
+    assert build_all(str(child / "config.json"), str(child)).success
+    assert load_manifest(child)["protocol"]["mdp"]["stages"]["prod"]["nsteps"] > 0
     child_manifest = RunRegistry(tmp_path)._read_registry_manifest(child)
     assert child_manifest["parent_run_id"] == parent.name
     assert child_manifest["control_history"][-1]["outcome"] == "launched"
@@ -197,6 +265,105 @@ def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp
     parent_manifest = RunRegistry(tmp_path)._read_registry_manifest(parent)
     assert parent_manifest["control_history"][-1]["action"] == "fork"
     assert "fork_accepted" in (parent / "events.jsonl").read_text()
+
+
+def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypatch):
+    import willy.agent_config as agent_config
+
+    class Replies:
+        def create(self, **_kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content='{"changes":[{"path":"md.eq.tau_p","value":1}],"summary":"重跑 EQ"}',
+            ))])
+
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    _registry, parent = _aborted_run(tmp_path, step=9)
+    monkeypatch.setattr(
+        agent_config,
+        "_DS",
+        SimpleNamespace(chat=SimpleNamespace(completions=Replies())),
+    )
+    monkeypatch.setattr(agent_config, "_LLM_SETTINGS", None)
+
+    reply = frontend_api.run_assistant_control_command(
+        parent.name, "/fork 重跑eq段，tau_p设置为1"
+    )
+
+    assert "待确认 fork 方案" in reply
+    status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
+    assert status["state"] == "awaiting_confirmation"
+    proposal = frontend_api.get_pending_fork(parent.name)
+    assert proposal is not None, status
+    assert proposal["changes"] == [{"path": "md.eq.tau_p", "value": 1}]
+    assert not list((tmp_path / "md_run").glob("md__20260814000[2-9]"))
+    events = (parent / "events.jsonl").read_text(encoding="utf-8")
+    assert "fork_proposal_created" in events
+    assert "fork_proposed" in events
+
+
+def test_natural_language_fork_rejects_non_aborted_child_with_state_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    _registry, directory = _aborted_run(tmp_path, state="escalated")
+
+    reply = frontend_api.run_assistant_control_command(
+        directory.name, "/fork eq阶段的tau_p改为1"
+    )
+
+    assert "当前工程不能创建 fork" in reply
+    assert "运行不处于可控中止状态" in reply
+    assert "path=value" not in reply
+
+
+def test_confirmed_natural_language_fork_creates_child_only_after_approval(tmp_path, monkeypatch):
+    import willy.agent_config as agent_config
+    import willy.simulation.manifest as simulation_manifest
+
+    class Replies:
+        def create(self, **_kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content='{"changes":[{"path":"md.eq.tau_p","value":1}]}',
+            ))])
+
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        simulation_manifest,
+        "tool_versions",
+        lambda: {"gromacs": "test", "packmol": "test"},
+    )
+    _registry, parent = _aborted_run(tmp_path, step=9)
+    child = tmp_path / "md_run" / "md__202608140002"
+    child.mkdir(parents=True)
+    reservation = _Reservation(child)
+    spawned = []
+    monkeypatch.setattr(
+        agent_config,
+        "_DS",
+        SimpleNamespace(chat=SimpleNamespace(completions=Replies())),
+    )
+    monkeypatch.setattr(agent_config, "_LLM_SETTINGS", None)
+    monkeypatch.setattr(frontend_api, "reserve_pipeline_launch", lambda *_args: reservation)
+    monkeypatch.setattr(
+        frontend_api.subprocess, "Popen",
+        lambda args, **kwargs: spawned.append((args, kwargs)) or _Process(),
+    )
+    monkeypatch.setattr(frontend_api.threading, "Thread", _IdleThread)
+
+    frontend_api.run_assistant_control_command(parent.name, "/fork 重跑eq段，tau_p设置为1")
+    proposal = frontend_api.get_pending_fork(parent.name)
+    assert proposal is not None
+    assert spawned == []
+
+    reply = frontend_api.confirm_pending_fork(
+        proposal["proposal_id"], parent.name, state_revision=proposal["state_revision"],
+    )
+
+    assert "已创建 fork" in reply
+    assert len(spawned) == 1
+    assert json.loads((child / "config.json").read_text())["md"]["eq"]["tau_p"] == 1
+    assert frontend_api.get_pending_fork(parent.name) is None
+    parent_status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
+    assert parent_status["state"] == "aborted"
+    assert "fork_proposal_confirmed" in (parent / "events.jsonl").read_text(encoding="utf-8")
 
 
 def test_rejected_early_fork_returns_parent_to_awaiting_confirmation(tmp_path, monkeypatch):

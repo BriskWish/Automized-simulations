@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from willy._paths import get_project_root
+from willy.execution_resources import normalize_config_nproc
 from willy.llm_config import DEFAULT_LLM_MODEL, LLMConfigError, configured_llm_client
 from willy.workflow_config import _available_residues, validate_config, apply_config
 from willy.remote_registry import RemoteRegistryError, parse_execution_md
@@ -69,13 +70,13 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案
 ```
 - backend: 量子化学后端，默认 g16。用户说"用 G09""gaussian09" 时设为 g09；说"用 ORCA""orca" 时设为 orca。后端只能写入候选 JSON，不能调用写入型工具。
 - molecules/residues 的 key 必须用 struct/ 下的精确文件名: {molecules}。用户写 Li+/Li⁺/锂离子 都映射到 Li，NO3-/NO₃⁻/硝酸根 都映射到 NO3
-- **电荷和自旋不是默认值，也不能从知识库猜测。** 在输出任何完整候选 config 前，必须完成一次 `tools_inspect_quantum_inputs` 审计；g16/g09 只接受同名 `.gjf`，orca 只接受同名 `.inp`。工具返回的每个 `charge` 和 `spin` 是唯一可写入最终 JSON 的数值。语义草案阶段只能给出 backend 和 residues，服务端会冻结其 backend/name/count 后进入强制审计阶段。
+- **电荷和自旋不是默认值，也不能从知识库猜测。** 在输出任何完整候选 config 前，必须完成一次 `tools_inspect_quantum_inputs` 审计；g16/g09 只接受同名 `.gjf`，orca 只接受同名 `.inp`。工具返回的每个 `charge` 和 `spin` 是唯一可写入最终 JSON 的数值。语义草案阶段只能给出 backend 和 residues，服务端会在本轮审计上下文中固定其 backend/name/count 后进入强制审计阶段；这不是用户确认前的最终运行配置冻结。
 - 审计返回 `ok=false` 时返回阻塞 Error，不得输出可确认 config。`charge_balance=imbalanced` 时，除非用户已明确要求并在 JSON 中写入 `ion_compensation` 或 `non_neutral_confirmed=true`，否则返回 `charge_imbalance` Error，说明净电荷和缺失的配平信息；绝不能把任意分子改写为中性来绕过。
 - md 必须使用 schema_version=2；EQ 采用六段退火，PROD 只接受独立 duration_ns，PROD 温度必须等于 EQ target_temperature
 - 用户明确要求“额外输出全精度 TRR 轨迹”、"输出 TRR"或同义表述时，设 md.outputs.trr=true；未明确要求时保持 false
 - topology 默认使用 {{"backend":"sobtop","force_field":"gaff_uff"}}；用户明确要求 OPLS-AA/OPLSAA 时，设为 {{"backend":"oplsaa","force_field":"oplsaa"}}
 - 用户未指定盒边长或初始密度时，设置 `box.target_mass_density_g_cm3=0.7`；方案说明必须写“初始体积将由使用默认0.7g/cm3的密度猜测”。实际边长由建盒步骤从当前 `.itp` 的原子质量计算。用户明确指定边长时用 `box.box_size`，明确指定初始密度时用 `box.target_mass_density_g_cm3`。
-- 用户明确指定“使用 N 核/线程”时，将 N 写入 `defaults.nproc`；未指定时保持默认 8。只有明确要求某个分子单独使用不同核数时，才在该分子的 `nproc` 写覆盖值；该默认值同时控制本地 GROMACS 的 `mdrun -nt`，分子级覆盖控制该分子的量子结构优化和单点。
+- 用户明确指定“使用 N 核/线程”时，将 N 写入 `defaults.nproc`；未指定时保持默认上限 8。只有明确要求某个分子单独使用不同核数时，才在该分子的 `nproc` 写覆盖值；该默认值同时控制本地 GROMACS 的 `mdrun -nt`，分子级覆盖控制该分子的量子结构优化和单点。服务端会在用户确认启动时扫描本机 CPU 核数：未显式指定时写入 `min(8, CPU核数)`，显式值超出本机容量时写回本机核数、提示用户并继续运行。
 - 未指定的参数用 tools_lookup_md_defaults 获取默认值
 - 化合物用 tools_resolve_compound 拆分后再查电荷
 - **"各"分配**: "A和B各N个"→A=N,B=N; "A、B各N"→都N; 多个"各"依次分配
@@ -299,11 +300,17 @@ def _audit_candidate_config(config: Mapping[str, object]) -> tuple[dict[str, obj
 
 
 def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt:
-    """Start one pipeline from the session-bound, confirmed configuration."""
+    """Freeze and start a session-bound configuration after explicit confirmation.
+
+    This is the only proposal-assistant boundary that writes the active
+    ``config.json``.  Validation is repeated here so a pending candidate can
+    be edited freely without becoming a run snapshot before confirmation.
+    """
     if not isinstance(config, Mapping):
         write_startup_audit(ROOT, "failed")
         return PipelineLaunchReceipt("启动失败，请先生成有效的模拟方案。", None, "failed")
-    launch_config = copy.deepcopy(dict(config))
+    resource_plan = normalize_config_nproc(config)
+    launch_config = resource_plan.config
     try:
         audit = audit_config_quantum_inputs(launch_config, struct_dir=ROOT / "struct")
         input_issues = quantum_input_contract_issues(launch_config, audit)
@@ -320,7 +327,7 @@ def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt
 
     execution_md = _execution_md_from_config(launch_config)
     if execution_md["backend"] != "local":
-        # Phase 1 can safely select and freeze a remote profile, but no
+        # Phase 1 can safely select and bind a remote profile, but no
         # adapter is allowed to fall through to local ``run_gmx()``.  Keep the
         # proposal confirmable once the explicitly gated SSH/Slurm executor is
         # installed and externally verified.
@@ -339,6 +346,8 @@ def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt
         return PipelineLaunchReceipt("已有任务运行，未启动第二个子进程。", exc.run_id, "lock_conflict")
 
     try:
+        # The pending candidate becomes the active run configuration only
+        # after confirmation, repeat validation, and launch-lock reservation.
         apply_config(launch_config)
         backend = launch_config.get("backend", "g16")
         proc = subprocess.Popen(
@@ -371,8 +380,11 @@ def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt
         cleanup_finished_launch(ROOT, reservation.run_id, reservation.token)
 
     threading.Thread(target=_wait_then_cleanup, daemon=True).start()
+    resource_notice = ""
+    if resource_plan.warnings:
+        resource_notice = "\n\n资源提示：" + "；".join(resource_plan.warnings)
     return PipelineLaunchReceipt(
-        f"流水线已启动。\n\n运行：{reservation.run_id}\n\n后端：{backend}",
+        f"流水线已启动。\n\n运行：{reservation.run_id}\n\n后端：{backend}{resource_notice}",
         reservation.run_id,
         "started",
     )
@@ -409,7 +421,7 @@ def get_system_prompt(
         ),
         "quantum_input_audit": (
             "当前仅处于原始量子输入审计阶段。必须发出唯一一个 tools_inspect_quantum_inputs "
-            "调用，且参数必须逐字匹配服务端冻结的 backend 与 components；不得输出文本或 JSON。"
+            "调用，且参数必须逐字匹配服务端锁定的 backend 与 components；不得输出文本或 JSON。"
         ),
         "strict_json": (
             "当前处于审计后的严格 JSON 输出阶段。不得调用工具；必须使用受控上下文中的"
@@ -448,7 +460,7 @@ def _config_task_context(
     mode: str,
     user_request: str,
     execution_facts: str,
-    frozen_config: Mapping[str, object] | None = None,
+    pending_config: Mapping[str, object] | None = None,
     recent_history: list[dict[str, str]] | None = None,
     attempt: int = 0,
     tool_round: int = 0,
@@ -464,8 +476,8 @@ def _config_task_context(
         "available_structure_names": available,
         "raw_input_rule": "g16/g09 仅接受 .gjf；orca 仅接受 .inp；电荷和自旋必须来自审计工具。",
     }
-    if frozen_config is not None:
-        immutable["frozen_plan_outline"] = _config_outline(frozen_config)
+    if pending_config is not None:
+        immutable["pending_plan_outline"] = _config_outline(pending_config)
     evidence: dict[str, object] = {
         "server_validated": [
             "候选方案会在展示前重新审计原始量子输入、回填电荷和自旋，并校验 workflow/MD schema",
@@ -782,7 +794,12 @@ def _fingerprint_payload(value: object) -> str:
 
 
 def create_pending_launch_plan(config: Mapping[str, object], summary: str) -> dict[str, object]:
-    """Freeze one generated configuration for exactly one browser session."""
+    """Store one validated, unconfirmed candidate for exactly one browser session.
+
+    This is deliberately not a run snapshot.  The final configuration freeze
+    happens only in ``start_pipeline`` after the user gives an explicit launch
+    confirmation and the server repeats validation.
+    """
     snapshot = copy.deepcopy(dict(config))
     return {
         "version": _PENDING_LAUNCH_PLAN_VERSION,
@@ -842,10 +859,10 @@ def _is_launch_confirmation(message: str) -> bool:
     return _normalized_confirmation(message) in LAUNCH_CONFIRMATIONS
 
 
-# A pending proposal is an interactive editing session.  These markers are
-# deliberately conservative: a plain question must not silently mutate a
-# frozen plan, while an explicit field/value change is sent back through the
-# normal audited config-generation path.
+# A pending proposal is an interactive editing session. These markers are
+# deliberately conservative: a plain question must not silently mutate the
+# pending candidate, while an explicit field/value change is sent back through
+# the normal audited config-generation path.
 _CONFIG_REPLACEMENT_MARKERS = (
     "新的项目", "新项目", "新体系", "新的体系", "另一个体系", "另一个项目",
     "新的模拟", "新模拟", "新的需求", "新需求", "重新提交", "重新生成",
@@ -935,7 +952,7 @@ def _pending_revision_message(
         mode="plan_revise",
         user_request=message,
         execution_facts=execution_facts,
-        frozen_config=context.get("config") if isinstance(context.get("config"), Mapping) else None,
+        pending_config=context.get("config") if isinstance(context.get("config"), Mapping) else None,
         recent_history=context.get("recent_history") if isinstance(context.get("recent_history"), list) else None,
         attempt=attempt,
         tool_round=tool_round,
@@ -950,7 +967,7 @@ def _answer_pending_config_question(message: str, context: Mapping[str, object])
         mode="plan_explain",
         user_request=message,
         execution_facts="当前方案尚未确认，任何执行目标均未授权。",
-        frozen_config=context.get("config") if isinstance(context.get("config"), Mapping) else None,
+        pending_config=context.get("config") if isinstance(context.get("config"), Mapping) else None,
         recent_history=context.get("recent_history") if isinstance(context.get("recent_history"), list) else None,
     )
     try:
@@ -960,7 +977,7 @@ def _answer_pending_config_question(message: str, context: Mapping[str, object])
                 scope="解释当前待确认方案，不产生或修改配置",
                 domain_rules=(
                     "只回答问题，不生成 config JSON，不启动流水线，也不改变方案。"
-                    "只能解释受控上下文中的冻结方案概要；需要修改时要求用户提出具体字段。"
+                    "只能解释受控上下文中的当前待确认方案概要；需要修改时要求用户提出具体字段。"
                 ),
             ),
             prompt,
@@ -1118,7 +1135,7 @@ def _answer_framework_design_question(message: str) -> str:
 
 
 def _execution_md_from_config(config: Mapping[str, object]) -> dict[str, object]:
-    """Return the frozen execution choice, retaining the legacy local default."""
+    """Return the validated execution choice, retaining the legacy local default."""
     execution = config.get("execution")
     if not isinstance(execution, Mapping):
         return {"backend": "local", "profile": None, "retain_remote_run": True}
@@ -1139,7 +1156,7 @@ def _trusted_execution_selection(
 
     The browser context is only a selection intent.  It cannot grant remote
     access: the backend/profile pair is parsed again against the private,
-    permission-checked registry before it is allowed into a frozen plan.
+    permission-checked registry before it is allowed into a pending plan.
     """
     if execution_context is None:
         return (
@@ -1252,7 +1269,7 @@ def chat(
                 h = user_h + [{
                     "role": "assistant",
                     "content": (
-                        "远程任务页的执行选择已在方案生成后变化。为避免将冻结方案提交到错误的"
+                        "远程任务页的执行选择已在方案生成后变化。为避免将待确认方案提交到错误的"
                         "执行目标，请先按当前选择重新生成或修改方案，再确认运行。"
                     ),
                 }]
@@ -1285,9 +1302,9 @@ def chat(
         return
 
     # Keep an awaiting proposal alive while the user asks about it or edits it.
-    # The exact frozen config and the recent turns are bound into the next LLM
+    # The exact pending candidate and recent turns are bound into the next LLM
     # request, so a second turn is an incremental edit rather than a stateless
-    # replacement. Explicitly starting a new project still invalidates it.
+    # replacement. It remains unconfirmed until an explicit launch reply.
     pending_context = _pending_config_context(pending_plan, history)
     pending_intent = _classify_pending_config_intent(message)
     revision_mode = False

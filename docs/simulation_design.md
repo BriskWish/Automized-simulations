@@ -2,7 +2,7 @@
 
 维护范围：`src/willy/simulation/`、`agent_simulation.py`、`toolist_simulation.py`。
 
-模拟层在单个 run workspace 中执行 GROMACS `EM -> NPT EQ -> PROD`。它消费拓扑层交接的 `topol.top`、`.itp` 和坐标文件，不改写量子产物或拓扑参数。GROMACS 仅由 `WILLY_GMX_BIN` 显式指定（进程环境优先，其次项目 `.env`）；本版本不从 `PATH`、系统扫描或 GROMACS 原生环境变量发现。编排器会经 `env_checker.ensure()` 预检，实际子进程复用相同解析结果。
+模拟层在单个 run workspace 中执行 GROMACS `EM -> NPT EQ -> PROD`。它消费拓扑层交接的 `topol.top`、`.itp` 和坐标文件，不改写量子产物或拓扑参数。GROMACS 与其他外部二进制使用相同解析优先级：显式 `WILLY_GMX_BIN`、项目 `.env`，最后是启动进程继承的 `PATH`；不做磁盘扫描，也不单独读取 GROMACS 原生环境变量。编排器会经 `env_checker.ensure()` 预检，实际子进程复用相同解析结果和环境。
 
 本版本的模拟层验收标准是：四条已归档历史 profile 与后续确定性回归组成验收并集，目标机任选一条受支持 profile 严格完成 Step 1--10、所有阶段正常退出、最终状态为 `done`，且 manifest/status 与阶段产物契约通过。后处理/分析实现仅作内部实验保留，不属于本版本公开可用范围；不依据短链路推断科学体系性质。
 

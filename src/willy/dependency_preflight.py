@@ -15,6 +15,7 @@ from typing import Iterable, TypedDict
 
 from willy._paths import get_project_root
 from willy.env_registry import AVAILABLE, ResolvedTool, resolve_tool
+from willy.execution_resources import default_nproc, local_cpu_count
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,15 @@ class DependencyPreflightReport(TypedDict):
     recommendations: list[str]
     written_defaults: list[str]
     persistence_warning: str
+    resources: "ResourcePreflightReport"
     markdown: str
+
+
+class ResourcePreflightReport(TypedDict):
+    """Read-only local resource observation for the advisory configuration UI."""
+
+    cpu_count: int
+    recommended_default_nproc: int
 
 
 _MULTIWFN = _Requirement("multiwfn", "内置 Multiwfn", tool_id="multiwfn")
@@ -140,7 +149,7 @@ _GROUPS = (
                 (_Requirement("gmx", "GROMACS", tool_id="gmx"), _PACKMOL),
             ),
         ),
-        "安装 GROMACS 后，将其可执行文件路径设置为 WILLY_GMX_BIN 后重新检查。",
+        "安装并初始化 GROMACS 后，将其加入 PATH，或设置 WILLY_GMX_BIN，然后重新检查。",
     ),
 )
 
@@ -153,6 +162,7 @@ _PERSISTED_ENV: dict[str, tuple[str, str]] = {
     "formchk": ("WILLY_FORMCHK_BIN", "executable"),
     "g09": ("WILLY_G09_BIN", "executable"),
     "g09_formchk": ("WILLY_G09_FORMCHK_BIN", "executable"),
+    "gmx": ("WILLY_GMX_BIN", "executable"),
     "orca": ("WILLY_ORCA_HOME", "home"),
     "orca_2mkl": ("WILLY_ORCA_2MKL_BIN", "executable"),
     "ligpargen": ("WILLY_LIGPARGEN_BIN", "executable"),
@@ -315,8 +325,14 @@ def _markdown(
     recommendations: list[str],
     written_defaults: list[str],
     persistence_warning: str,
+    resources: ResourcePreflightReport,
 ) -> str:
     lines = ["### 本机依赖预检", "此结果仅供参考，不会阻止本地任务启动。"]
+    lines.append(
+        "本机资源：检测到 "
+        f"{resources['cpu_count']} 个 CPU 核；未显式指定时将使用 "
+        f"{resources['recommended_default_nproc']} 核。"
+    )
     for index, group in enumerate(groups, start=1):
         status = "满足" if group["ready"] else "不满足"
         lines.append(f"{index}. {group['label']}（{status}）")
@@ -372,6 +388,11 @@ def run_dependency_preflight(project_root: str | Path | None = None) -> Dependen
             resolved[tool_id] = resolve_tool(tool_id, project_root=root)
     written_defaults, persistence_warning = _persist_discovered_defaults(root, resolved.values())
     ready = all(group["ready"] for group in groups)
+    cpu_count = local_cpu_count()
+    resources: ResourcePreflightReport = {
+        "cpu_count": cpu_count,
+        "recommended_default_nproc": default_nproc(cpu_count),
+    }
     return {
         "schema_version": 1,
         "advisory": True,
@@ -380,11 +401,13 @@ def run_dependency_preflight(project_root: str | Path | None = None) -> Dependen
         "recommendations": recommendations,
         "written_defaults": written_defaults,
         "persistence_warning": persistence_warning,
+        "resources": resources,
         "markdown": _markdown(
             groups,
             ready,
             recommendations,
             written_defaults,
             persistence_warning,
+            resources,
         ),
     }

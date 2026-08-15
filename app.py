@@ -768,6 +768,7 @@ RUN_ASSISTANT_SLASH_MENU_JS = r"""
     const options = [
         {command: "/resume", description: "按原参数从安全步骤续跑"},
         {command: "/fork", description: "修改参数并创建独立子运行"},
+        {command: "/switch", description: "切换到指定工程及其对话历史"},
     ];
     let activeIndex = 0;
     let activeOptions = [];
@@ -827,7 +828,8 @@ RUN_ASSISTANT_SLASH_MENU_JS = r"""
     const chooseActive = () => {
         const choice = activeOptions[activeIndex];
         if (!choice || !activeInput) return;
-        setInputValue(activeInput, choice.command === "/fork" ? "/fork " : choice.command);
+        setInputValue(activeInput, ["/fork", "/switch"].includes(choice.command)
+            ? `${choice.command} ` : choice.command);
         hideMenu();
     };
 
@@ -1242,6 +1244,17 @@ def _is_pending_action_approval(message: str | None) -> bool:
     return has_approval and (has_execution or has_proposal)
 
 
+def _is_pending_fork_approval(message: str | None) -> bool:
+    """Require an explicit fork-labelled approval for an LLM fork proposal."""
+    normalized = _normalize_run_control_text(message).lower()
+    if not normalized or any(marker in normalized for marker in ("拒绝", "取消", "暂停", "稍后")):
+        return False
+    return normalized in {
+        "确认fork", "同意fork", "批准fork", "确认fork方案", "同意fork方案",
+        "确认分叉", "同意分叉", "批准分叉",
+    }
+
+
 def _pending_option_id(message: str | None, action: Mapping[str, object] | None) -> str | None:
     """Parse an explicit Chinese/Arabic option number for the current action."""
     if not action or not isinstance(action.get("options"), list) or len(action["options"]) < 2:
@@ -1286,13 +1299,28 @@ def _run_assistant_welcome_history() -> list[dict[str, str]]:
 
 
 def _run_assistant_history_for_current_run(history, bound_run_id=None, current_run_id=None):
-    """Discard browser-only dialogue when the rendered run changes."""
+    """Load the selected run's durable history when the rendered run changes."""
     if current_run_id is None:
         current_run_id = frontend_api.latest_run_id()
     current_history = list(history or [])
-    if bound_run_id is not None and bound_run_id != current_run_id:
-        current_history = _run_assistant_welcome_history()
+    if current_run_id and (bound_run_id is None or bound_run_id != current_run_id):
+        stored = frontend_api.get_run_assistant_history(current_run_id)
+        current_history = stored or _run_assistant_welcome_history()
     return current_history, current_run_id
+
+
+def _persist_run_assistant_history(run_id: str | None, history) -> None:
+    """Best-effort persistence; browser rendering must remain responsive."""
+    if isinstance(run_id, str) and run_id:
+        frontend_api.save_run_assistant_history(run_id, history)
+
+
+def _follow_controlled_run(current_run_id: str | None, reply: str) -> str | None:
+    """Follow a newly-created fork while leaving resume bound to its same run."""
+    if not isinstance(reply, str):
+        return current_run_id
+    match = re.match(r"^已创建 fork (md__\d{12})(?:[；。]|$)", reply)
+    return match.group(1) if match else current_run_id
 
 
 def _public_pending_action(value: object) -> dict[str, object] | None:
@@ -1307,6 +1335,20 @@ def _public_pending_action(value: object) -> dict[str, object] | None:
     return dict(value)
 
 
+def _public_pending_fork(value: object) -> dict[str, object] | None:
+    """Validate the bounded natural-language fork proposal for display."""
+    if not isinstance(value, Mapping):
+        return None
+    if value.get("status") != "awaiting_confirmation":
+        return None
+    if not isinstance(value.get("proposal_id"), str) or not value["proposal_id"]:
+        return None
+    changes = value.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return None
+    return dict(value)
+
+
 def _awaiting_confirmation_action(action: Mapping[str, object] | None) -> dict[str, object] | None:
     """Return an action only while its owning run waits for confirmation."""
     if action and action.get("status") == "awaiting_confirmation":
@@ -1314,16 +1356,22 @@ def _awaiting_confirmation_action(action: Mapping[str, object] | None) -> dict[s
     return None
 
 
-def _run_assistant_snapshot() -> dict[str, object]:
-    """Read the status and proposal from one backend-selected run identity."""
+def _run_assistant_snapshot(run_id: str | None = None) -> dict[str, object]:
+    """Read the status and proposal from one selected run identity."""
     try:
-        snapshot = frontend_api.get_run_panel_snapshot()
+        try:
+            snapshot = frontend_api.get_run_panel_snapshot(run_id)
+        except TypeError:
+            # Compatibility for older/fake adapters that expose the original
+            # no-argument snapshot API.
+            snapshot = frontend_api.get_run_panel_snapshot()
     except Exception:
         snapshot = {}
     run_id = snapshot.get("run_id") if isinstance(snapshot, Mapping) else None
     summary = snapshot.get("summary") if isinstance(snapshot, Mapping) else None
     live_summary = snapshot.get("live_summary") if isinstance(snapshot, Mapping) else None
     action = snapshot.get("pending_action") if isinstance(snapshot, Mapping) else None
+    pending_fork = snapshot.get("pending_fork") if isinstance(snapshot, Mapping) else None
     error_event = snapshot.get("error_event") if isinstance(snapshot, Mapping) else None
     status_event_id = snapshot.get("status_event_id") if isinstance(snapshot, Mapping) else None
     return {
@@ -1331,6 +1379,7 @@ def _run_assistant_snapshot() -> dict[str, object]:
         "summary": summary if isinstance(summary, str) else "### 工程状态\n\n暂时无法读取当前运行。",
         "live_summary": live_summary if isinstance(live_summary, str) else summary,
         "pending_action": _public_pending_action(action),
+        "pending_fork": _public_pending_fork(pending_fork),
         "error_event": dict(error_event) if isinstance(error_event, Mapping) else None,
         # Older adapters can omit this field.  Keep one live card rather than
         # treating each polling result as a fresh historical transition.
@@ -1523,6 +1572,13 @@ def _snapshot_notice_bubbles(snapshot: Mapping[str, object]) -> list[dict[str, s
         notices.append(_run_assistant_event(
             "proposal", f"{run_id}:pending_action:{action_id}", action_text
         ))
+    fork = snapshot.get("pending_fork")
+    fork_text = _pending_fork_text(fork if isinstance(fork, Mapping) else None)
+    proposal_id = fork.get("proposal_id") if isinstance(fork, Mapping) else None
+    if fork_text and isinstance(run_id, str) and isinstance(proposal_id, str) and proposal_id:
+        notices.append(_run_assistant_event(
+            "proposal", f"{run_id}:pending_fork:{proposal_id}", fork_text
+        ))
     return notices
 
 
@@ -1588,11 +1644,12 @@ def _render_run_assistant_chat(history) -> list[dict[str, str]]:
 
 def _refresh_run_assistant_view(history, bound_run_id, stop_requested, stop_confirmation_pending):
     """Refresh the current status card and retain prior status/event bubbles."""
-    snapshot = _run_assistant_snapshot()
+    snapshot = _run_assistant_snapshot(bound_run_id)
     current_history, current_run_id = _run_assistant_history_for_current_run(
         history, bound_run_id, snapshot["run_id"]
     )
     current_history = _sync_run_assistant_history(current_history, snapshot)
+    _persist_run_assistant_history(current_run_id, current_history)
     return (
         _render_run_assistant_chat(current_history),
         current_history,
@@ -1632,6 +1689,22 @@ def _confirm_pending_action(action: Mapping[str, object]) -> str:
     except Exception:
         return "确认请求未送达，请稍后重试。"
     return _public_action_text(result, limit=240) or "确认请求未送达，请稍后重试。"
+
+
+def _confirm_pending_fork(proposal: Mapping[str, object]) -> str:
+    """Delegate one explicitly approved natural-language fork proposal."""
+    proposal_id = proposal.get("proposal_id")
+    run_id = proposal.get("run_id")
+    confirmer = getattr(frontend_api, "confirm_pending_fork", None)
+    if not isinstance(proposal_id, str) or not proposal_id or not isinstance(run_id, str) or not callable(confirmer):
+        return "当前待确认 fork 方案暂不可执行，请刷新状态后重试。"
+    revision = proposal.get("state_revision")
+    kwargs = {"state_revision": revision} if isinstance(revision, int) and not isinstance(revision, bool) else {}
+    try:
+        result = confirmer(proposal_id, run_id, **kwargs)
+    except Exception:
+        return "fork 确认请求未送达，请稍后重试。"
+    return _public_action_text(result, limit=240) or "fork 确认请求未送达，请稍后重试。"
 
 
 def _select_pending_action(action: Mapping[str, object], option_id: str) -> str:
@@ -1704,7 +1777,7 @@ def _revise_pending_action(action: Mapping[str, object], user_request: str) -> s
 
 
 def _ask_run_assistant(message, history, bound_run_id=None):
-    snapshot = _run_assistant_snapshot()
+    snapshot = _run_assistant_snapshot(bound_run_id)
     current_history, current_run_id = _run_assistant_history_for_current_run(
         history, bound_run_id, snapshot["run_id"]
     )
@@ -1738,13 +1811,14 @@ def _ask_run_assistant(message, history, bound_run_id=None):
         )
     except Exception:
         reply = "运行助理暂时不可用，请稍后重试。"
-    final_snapshot = _run_assistant_snapshot()
+    final_snapshot = _run_assistant_snapshot(current_run_id)
     final_history, final_run_id = _run_assistant_history_for_current_run(
         current_history, current_run_id, final_snapshot["run_id"]
     )
     if final_run_id == current_run_id:
         final_history = current_history + [user_entry, {"role": "assistant", "content": reply}]
     final_history = _sync_run_assistant_history(final_history, final_snapshot)
+    _persist_run_assistant_history(final_run_id, final_history)
     yield (
         gr.update(value="", interactive=True),
         _render_run_assistant_chat(final_history),
@@ -1762,19 +1836,30 @@ def _handle_run_assistant_message(
     bound_run_id=None,
 ):
     """Handle public action approvals before the read-only Run Assistant dialogue."""
-    snapshot = _run_assistant_snapshot()
+    snapshot = _run_assistant_snapshot(bound_run_id)
     current_history, current_run_id = _run_assistant_history_for_current_run(
         history, bound_run_id, snapshot["run_id"]
     )
     current_history = _sync_run_assistant_history(current_history, snapshot)
     control_reply = run_assistant_control_command(current_run_id, message)
     if control_reply is not None:
+        switched_run_id = frontend_api.get_run_assistant_switch_target(message)
+        if switched_run_id and control_reply.startswith("已切换至工程"):
+            _persist_run_assistant_history(current_run_id, current_history)
+            current_run_id = switched_run_id
+            current_history = frontend_api.get_run_assistant_history(current_run_id) or _run_assistant_welcome_history()
+        followed_run_id = _follow_controlled_run(current_run_id, control_reply)
+        if followed_run_id != current_run_id:
+            _persist_run_assistant_history(current_run_id, current_history)
+            current_run_id = followed_run_id
+            current_history = frontend_api.get_run_assistant_history(current_run_id) or _run_assistant_welcome_history()
         updated = _run_assistant_reply(current_history, message, control_reply)
-        final_snapshot = _run_assistant_snapshot()
+        final_snapshot = _run_assistant_snapshot(current_run_id)
         final_history, final_run_id = _run_assistant_history_for_current_run(
             updated, current_run_id, final_snapshot["run_id"]
         )
         final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        _persist_run_assistant_history(final_run_id, final_history)
         yield (
             gr.update(value="", interactive=True),
             _render_run_assistant_chat(final_history),
@@ -1787,23 +1872,50 @@ def _handle_run_assistant_message(
         )
         return
     normalized = _normalize_run_control_text(message)
+    pending_fork = snapshot.get("pending_fork") if isinstance(snapshot, Mapping) else None
+    if isinstance(pending_fork, Mapping) and _is_pending_fork_approval(message):
+        public_reply = _confirm_pending_fork(pending_fork)
+        followed_run_id = _follow_controlled_run(current_run_id, public_reply)
+        if followed_run_id != current_run_id:
+            _persist_run_assistant_history(current_run_id, current_history)
+            current_run_id = followed_run_id
+            current_history = frontend_api.get_run_assistant_history(current_run_id) or _run_assistant_welcome_history()
+        updated = _run_assistant_reply(current_history, message, public_reply)
+        final_snapshot = _run_assistant_snapshot(current_run_id)
+        final_history, final_run_id = _run_assistant_history_for_current_run(
+            updated, current_run_id, final_snapshot["run_id"]
+        )
+        final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        _persist_run_assistant_history(final_run_id, final_history)
+        yield (
+            gr.update(value="", interactive=True),
+            _render_run_assistant_chat(final_history),
+            final_history,
+            gr.update(interactive=True),
+            _refresh_stop_button(stop_requested, stop_confirmation_pending),
+            stop_confirmation_pending,
+            stop_requested,
+            final_run_id,
+        )
+        return
     action = _awaiting_confirmation_action(snapshot["pending_action"])
     option_id = _pending_option_id(message, action)
     if action and option_id:
         selection_reply = _select_pending_action(action, option_id)
         # “确认方案一” is an explicit selection plus approval in one request.
         if _is_option_confirmation(message):
-            selected_snapshot = _run_assistant_snapshot()
+            selected_snapshot = _run_assistant_snapshot(current_run_id)
             selected_action = _awaiting_confirmation_action(selected_snapshot.get("pending_action"))
             if selected_action and selected_action.get("selected_option_id") == option_id:
                 selection_reply = _confirm_pending_action(selected_action)
                 selection_reply = f"已选择并确认方案{option_id.rsplit('_', 1)[-1]}。{selection_reply}"
         updated = _run_assistant_reply(current_history, message, selection_reply)
-        final_snapshot = _run_assistant_snapshot()
+        final_snapshot = _run_assistant_snapshot(current_run_id)
         final_history, final_run_id = _run_assistant_history_for_current_run(
             updated, current_run_id, final_snapshot["run_id"]
         )
         final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        _persist_run_assistant_history(final_run_id, final_history)
         yield (
             gr.update(value="", interactive=True),
             _render_run_assistant_chat(final_history),
@@ -1819,6 +1931,7 @@ def _handle_run_assistant_message(
         if action.get("selection_required") and not action.get("selected_option_id"):
             public_reply = "当前有多个候选方案，请先回复“方案1/方案一”“方案2/方案二”或“方案3/方案三”，再明确确认。"
             updated = _run_assistant_reply(current_history, message, public_reply)
+            _persist_run_assistant_history(current_run_id, updated)
             yield (
                 gr.update(value="", interactive=True),
                 _render_run_assistant_chat(updated),
@@ -1832,11 +1945,13 @@ def _handle_run_assistant_message(
             return
         public_reply = _confirm_pending_action(action)
         updated = _run_assistant_reply(current_history, message, public_reply)
-        final_snapshot = _run_assistant_snapshot()
+        _persist_run_assistant_history(current_run_id, updated)
+        final_snapshot = _run_assistant_snapshot(current_run_id)
         final_history, final_run_id = _run_assistant_history_for_current_run(
             updated, current_run_id, final_snapshot["run_id"]
         )
         final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        _persist_run_assistant_history(final_run_id, final_history)
         yield (
             gr.update(value="", interactive=True),
             _render_run_assistant_chat(final_history),
@@ -1866,13 +1981,14 @@ def _handle_run_assistant_message(
             current_run_id,
         )
         public_reply = _revise_pending_action(action, message)
-        final_snapshot = _run_assistant_snapshot()
+        final_snapshot = _run_assistant_snapshot(current_run_id)
         final_history, final_run_id = _run_assistant_history_for_current_run(
             current_history, current_run_id, final_snapshot["run_id"]
         )
         if final_run_id == current_run_id:
             final_history = current_history + [user_entry, {"role": "assistant", "content": public_reply}]
         final_history = _sync_run_assistant_history(final_history, final_snapshot)
+        _persist_run_assistant_history(final_run_id, final_history)
         yield (
             gr.update(value="", interactive=True),
             _render_run_assistant_chat(final_history),
@@ -2034,6 +2150,17 @@ def _format_dependency_preflight_result(result: object) -> str:
         return "**依赖预检未返回有效结果。**\n\n请检查本机环境后重试；该检查不会阻止本地任务启动。"
 
     lines = ["### 本机依赖预检"]
+    resources = result.get("resources")
+    if isinstance(resources, Mapping):
+        cpu_count = resources.get("cpu_count")
+        recommended = resources.get("recommended_default_nproc")
+        if (
+            isinstance(cpu_count, int) and not isinstance(cpu_count, bool) and cpu_count > 0
+            and isinstance(recommended, int) and not isinstance(recommended, bool) and recommended > 0
+        ):
+            lines.append(
+                f"本机资源：检测到 {cpu_count} 个 CPU 核；未显式指定时使用 {recommended} 核。"
+            )
     for category, dependencies in _DEPENDENCY_DISPLAY_GROUPS:
         lines.append(f"#### {category}")
         for index, (label, requirement_ids) in enumerate(dependencies, start=1):
@@ -2042,6 +2169,29 @@ def _format_dependency_preflight_result(result: object) -> str:
             status = "满足" if satisfied else "不满足"
             lines.append(f"{index}. {label}：{status}；来源：{_dependency_source_label(items)}")
     return "\n".join(lines)
+
+
+def _pending_fork_text(proposal: Mapping[str, object] | None) -> str | None:
+    """Render an LLM fork candidate without exposing raw prompt content."""
+    if not proposal:
+        return None
+    changes = proposal.get("changes")
+    if not isinstance(changes, list):
+        return None
+    rendered = []
+    for item in changes[:16]:
+        if isinstance(item, Mapping) and isinstance(item.get("path"), str):
+            rendered.append(f"{item['path']}={item.get('value')}")
+    if not rendered:
+        return None
+    restart = proposal.get("restart_step")
+    restart_text = f"第 {restart} 步" if isinstance(restart, int) else "受影响步骤"
+    return (
+        "### 待确认 fork 方案\n\n"
+        f"修改：{'；'.join(rendered)}\n\n"
+        f"将从{restart_text}重新生成受影响阶段。当前未修改父工程配置，也未启动子运行。\n\n"
+        "请回复“确认 fork”或“同意 fork”执行。"
+    )
 
 
 _LOCAL_EXECUTION_CONTEXT = {

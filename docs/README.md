@@ -1,6 +1,6 @@
 # Willy 文档索引
 
-> 本文件是 `docs/` 的唯一导航入口。文档用途、责任人和生命周期状态以 [`document_registry.md`](document_registry.md) 为准。最后整理：2026-08-14。
+> 本文件是 `docs/` 的唯一导航入口。文档用途、责任人和生命周期状态以 [`document_registry.md`](document_registry.md) 为准。最后整理：2026-08-15（v0.5.0）。
 
 ## 文档架构
 
@@ -27,6 +27,7 @@ tests/reports/                   自动生成的测试目录与时间戳审计�
 | 制定修订路线、确定边界和验收规则 | [`revision_strategy.md`](revision_strategy.md) |
 | 建设运行助理、运行历史与受控续跑 | [`run_assistant_design.md`](run_assistant_design.md) |
 | 运行回归、真实 smoke 与发布门禁 | [`testing_strategy.md`](testing_strategy.md) |
+| 查阅 v0.5.0 的发布范围、可溯源记录和 CPU 预检核数 | [`release_notes_v0.5.0.md`](release_notes_v0.5.0.md) |
 | 查询任一测试的对象、内容、方式和执行 ID | [`../tests/reports/test_case_catalog.md`](../tests/reports/test_case_catalog.md) |
 | 查看一次性环境、网关和安全审计快照 | [`../tests/reports/README.md`](../tests/reports/README.md) |
 | 新增或重命名 tool、toolist、agent 或模块 | [`naming_convention.md`](naming_convention.md)、[`revision_strategy.md`](revision_strategy.md) |
@@ -69,6 +70,7 @@ tests/reports/                   自动生成的测试目录与时间戳审计�
 | [`revision_strategy.md`](revision_strategy.md) | 总体修订路线、优先级、模块边界和完成定义。 |
 | [`run_assistant_design.md`](run_assistant_design.md) | 运行助理的阶段计划、权限模型、审计契约和后续能力边界。 |
 | [`testing_strategy.md`](testing_strategy.md) | 测试分层、外部 smoke、LLM eval 和发布质量门禁。 |
+| [`release_notes_v0.5.0.md`](release_notes_v0.5.0.md) | v0.5.0 发布范围、源码 tag、测试基线、环境摘要和资源预检记录。 |
 | [`../tests/reports/test_case_catalog.md`](../tests/reports/test_case_catalog.md) | 由 pytest 收集生成的逐条测试与 LLM mock eval 用例目录。 |
 
 ### 规范与变更类

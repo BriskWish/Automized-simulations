@@ -657,6 +657,24 @@ class PipelineOrchestrator:
         manifest = registry._read_registry_manifest(run_dir)
         if manifest.get("backend") != self.backend:
             raise ValueError("恢复运行的后端与冻结配置不一致")
+        # A normal resume preserves its existing MD manifest.  An early fork
+        # from the original rollout could contain only the registry section,
+        # which is not a valid MD manifest for the MDP metadata writer.
+        try:
+            from willy.simulation.manifest import (
+                ManifestError,
+                initialize_manifest,
+                load_manifest,
+            )
+            try:
+                load_manifest(run_dir)
+            except ManifestError:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                md = config.get("md")
+                raw_seed = md.get("run_seed", 1) if isinstance(md, dict) else 1
+                initialize_manifest(run_dir, config_path, random_seed=int(raw_seed))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"恢复运行的 MD manifest 无效: {exc}") from exc
         status = registry.get_run_status(run_dir.name, reconcile=False)
         if status.get("state") != State.RETRYING.value:
             raise ValueError("恢复运行未进入受控重试状态")

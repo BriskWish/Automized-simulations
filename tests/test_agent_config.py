@@ -64,6 +64,50 @@ def test_start_pipeline_rejects_validation_issues_before_reserving_a_run(monkeyp
     assert reserved == []
 
 
+def test_start_pipeline_clamps_explicit_cpu_request_and_returns_warning(tmp_path, monkeypatch):
+    import willy.execution_resources as resources
+
+    applied = []
+    reservation = SimpleNamespace(
+        run_dir=tmp_path / "md_run" / "md__202608150001",
+        fd=7,
+        token="token",
+        run_id="md__202608150001",
+        mark_runner_started=lambda _pid: None,
+        detach_parent=lambda: None,
+        release=lambda: None,
+    )
+    process = SimpleNamespace(pid=1234, wait=lambda: None)
+    monkeypatch.setattr(agent_config, "ROOT", tmp_path)
+    monkeypatch.setattr(resources, "local_cpu_count", lambda: 2)
+    monkeypatch.setattr(agent_config, "audit_config_quantum_inputs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(agent_config, "quantum_input_contract_issues", lambda *_args: [])
+    monkeypatch.setattr(agent_config, "apply_audited_quantum_properties", lambda config, _audit: config)
+    monkeypatch.setattr(agent_config, "validate_config", lambda _config: [])
+    monkeypatch.setattr(agent_config, "reserve_pipeline_launch", lambda _root: reservation)
+    monkeypatch.setattr(agent_config, "apply_config", lambda config: applied.append(config))
+    monkeypatch.setattr(agent_config.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(agent_config, "cleanup_finished_launch", lambda *_args: None)
+    monkeypatch.setattr(
+        agent_config.threading,
+        "Thread",
+        lambda **_kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    receipt = agent_config.start_pipeline({
+        "backend": "g16",
+        "residues": {"Li": 1},
+        "molecules": {"Li": {"nproc": 4}},
+        "defaults": {"nproc": 4},
+    })
+
+    assert receipt.state == "started"
+    assert applied[0]["defaults"]["nproc"] == 2
+    assert applied[0]["molecules"]["Li"]["nproc"] == 2
+    assert "资源提示" in receipt.message
+    assert "当前系统检测到 2 核" in receipt.message
+
+
 def test_plan_prompt_exposes_only_read_only_tools_and_structured_contract():
     tool_names = {
         item["function"]["name"]
@@ -242,7 +286,7 @@ def test_new_failed_request_clears_an_older_pending_plan(monkeypatch):
     assert "当前没有待确认的模拟方案" in confirmation[-1][1][-1]["content"]
 
 
-def test_pending_plan_revision_sends_frozen_context_and_replaces_plan(monkeypatch):
+def test_pending_plan_revision_reaudits_and_replaces_pending_plan(monkeypatch):
     class Replies:
         def __init__(self):
             self.calls = []
@@ -274,6 +318,8 @@ def test_pending_plan_revision_sends_frozen_context_and_replaces_plan(monkeypatc
 
     old_config = {"backend": "g16", "residues": {"Li": 1}}
     replies = Replies()
+    applied = []
+    started = []
     audit = {
         "ok": True,
         "backend": "g16",
@@ -289,6 +335,8 @@ def test_pending_plan_revision_sends_frozen_context_and_replaces_plan(monkeypatc
         lambda _name, _args: __import__("json").dumps(audit),
     )
     monkeypatch.setattr(agent_config, "_audit_candidate_config", lambda config: (dict(config), []))
+    monkeypatch.setattr(agent_config, "apply_config", lambda config: applied.append(config))
+    monkeypatch.setattr(agent_config, "start_pipeline", lambda config: started.append(config))
 
     history = _pending_plan()
     plan = _plan(old_config)
@@ -297,9 +345,14 @@ def test_pending_plan_revision_sends_frozen_context_and_replaces_plan(monkeypatc
     structured = replies.calls[0]["messages"][1]["content"]
     assert "受控结构化上下文" in structured
     assert '"mode":"plan_revise"' in structured
-    assert "frozen_plan_outline" in structured
+    assert "pending_plan_outline" in structured
     assert '"Li":1' in structured
     assert "把 Li 改为 2 个" in structured
+    assert len(replies.calls) == 3
+    assert replies.calls[1]["tools"][0]["function"]["name"] == "tools_inspect_quantum_inputs"
+    assert applied == []
+    assert started == []
+    assert plan["config"] == old_config
     assert updates[-1][3] is not plan
     assert updates[-1][3]["config"]["residues"] == {"Li": 2}
     assert "模拟方案确认" in updates[-1][1][-1]["content"]
@@ -326,7 +379,7 @@ def test_pending_plan_question_keeps_plan_and_sends_context_to_llm(monkeypatch):
     structured = calls[0]["messages"][1]["content"]
     assert "受控结构化上下文" in structured
     assert '"mode":"plan_explain"' in structured
-    assert "frozen_plan_outline" in structured
+    assert "pending_plan_outline" in structured
     assert '"Li":1' in structured
 
 
@@ -487,7 +540,7 @@ def test_summary_uses_mass_density_default_prompt():
     assert "分子数密度" not in summary
 
 
-def test_remote_selection_is_server_validated_and_frozen_into_new_plan(monkeypatch):
+def test_remote_selection_is_server_validated_and_bound_into_new_plan(monkeypatch):
     class Replies:
         def __init__(self):
             self.calls = []
@@ -557,8 +610,8 @@ def test_remote_selection_is_server_validated_and_frozen_into_new_plan(monkeypat
         },
     ))
 
-    frozen = updates[-1][3]["config"]
-    assert frozen["execution"] == {
+    pending = updates[-1][3]["config"]
+    assert pending["execution"] == {
         "md": {"backend": "ssh", "profile": "lab_gpu", "retain_remote_run": True}
     }
     assert "profile: lab_gpu" in updates[-1][1][-1]["content"]

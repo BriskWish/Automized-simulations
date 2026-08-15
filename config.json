@@ -1,16 +1,24 @@
 {
   "backend": "g16",
   "molecules": {
-    "Na": {
-      "charge": 1,
+    "EMC": {
+      "charge": 0,
       "spin": 1,
       "basis": "b3lyp/6-311+g(d,p)",
       "solvent": "acetone",
       "mem": "",
       "nproc": null
     },
-    "EC": {
+    "FEC": {
       "charge": 0,
+      "spin": 1,
+      "basis": "b3lyp/6-311+g(d,p)",
+      "solvent": "acetone",
+      "mem": "",
+      "nproc": null
+    },
+    "Li": {
+      "charge": 1,
       "spin": 1,
       "basis": "b3lyp/6-311+g(d,p)",
       "solvent": "acetone",
@@ -24,12 +32,22 @@
       "solvent": "acetone",
       "mem": "",
       "nproc": null
+    },
+    "TFSI": {
+      "charge": -1,
+      "spin": 1,
+      "basis": "b3lyp/6-311+g(d,p)",
+      "solvent": "acetone",
+      "mem": "",
+      "nproc": null
     }
   },
   "residues": {
-    "Na": 100,
-    "EC": 100,
-    "NO3": 100
+    "EMC": 400,
+    "FEC": 400,
+    "Li": 100,
+    "NO3": 50,
+    "TFSI": 50
   },
   "md": {
     "schema_version": 2,
@@ -76,7 +94,7 @@
       }
     },
     "prod": {
-      "duration_ns": 5,
+      "duration_ns": 10,
       "temperature": 298,
       "tau_p": 2.0
     }

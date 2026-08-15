@@ -457,6 +457,26 @@ def test_dependency_preflight_failure_reenables_its_button(monkeypatch):
     assert updates[-1][1]["interactive"] is True
 
 
+def test_dependency_preflight_formatter_displays_cpu_capacity():
+    result = {
+        "resources": {"cpu_count": 4, "recommended_default_nproc": 4},
+        "groups": [{
+            "alternatives": [{
+                "items": [{
+                    "requirement_id": "gmx",
+                    "status": "available",
+                    "source": "path",
+                }],
+            }],
+        }],
+    }
+
+    markdown = app_module._format_dependency_preflight_result(result)
+
+    assert "检测到 4 个 CPU 核" in markdown
+    assert "未显式指定时使用 4 核" in markdown
+
+
 def test_llm_connection_action_shows_loading_and_public_success_or_failure(monkeypatch):
     monkeypatch.setattr(
         app_module,
@@ -645,13 +665,33 @@ def test_run_assistant_shows_message_before_waiting_for_reply(monkeypatch):
     assert updates[-1][4] == "md_current"
 
 
-def test_run_assistant_resets_browser_history_when_run_changes(monkeypatch):
+def test_run_assistant_restores_target_history_when_run_changes(monkeypatch):
     old_history = [
         {"role": "user", "content": "旧工程为什么失败？"},
         {"role": "assistant", "content": "旧工程的调整方案。"},
     ]
+    target_history = [
+        {"role": "user", "content": "新工程之前到哪一步？"},
+        {"role": "assistant", "content": "新工程已进入第 6 步。"},
+    ]
     received_history = []
     monkeypatch.setattr(app_module.frontend_api, "latest_run_id", lambda: "md_new")
+    monkeypatch.setattr(
+        app_module,
+        "_run_assistant_snapshot",
+        lambda _run_id=None: {
+            "run_id": "md_new",
+            "summary": "### 工程状态\n\n状态：运行中",
+            "live_summary": "### 工程状态\n\n状态：运行中",
+            "status_event_id": "md_new:status:running:1:none:none",
+        },
+    )
+    monkeypatch.setattr(
+        app_module.frontend_api,
+        "get_run_assistant_history",
+        lambda run_id: target_history if run_id == "md_new" else [],
+    )
+    monkeypatch.setattr(app_module.frontend_api, "save_run_assistant_history", lambda *_args: True)
     monkeypatch.setattr(
         app_module,
         "chat_run_assistant",
@@ -662,9 +702,61 @@ def test_run_assistant_resets_browser_history_when_run_changes(monkeypatch):
         app_module._ask_run_assistant("现在到哪一步了？", old_history, "md_old")
     )
 
-    assert received_history == [app_module._run_assistant_welcome_history()]
+    assert len(received_history) == 1
+    assert "新工程之前" in str(received_history[0])
+    assert "旧工程" not in str(received_history[0])
     assert updates[-1][4] == "md_new"
     assert "旧工程" not in str(updates[-1][1])
+    assert "新工程之前" in str(updates[-1][1])
+
+
+def test_switch_command_rebinds_chat_to_target_run_history(monkeypatch):
+    source_id = "md__202608150001"
+    target_id = "md__202608150002"
+    source_history = [{"role": "assistant", "content": "源工程历史"}]
+    target_history = [{"role": "assistant", "content": "目标工程历史"}]
+    saved = []
+
+    def snapshot(run_id=None):
+        selected = run_id or source_id
+        return {
+            "run_id": selected,
+            "summary": f"### 工程状态\n\n{selected}",
+            "live_summary": f"### 工程状态\n\n{selected}",
+            "status_event_id": f"{selected}:status:aborted:8:none:none",
+            "pending_action": None,
+            "pending_fork": None,
+            "error_event": None,
+            "timeline_events": True,
+        }
+
+    monkeypatch.setattr(app_module, "_run_assistant_snapshot", snapshot)
+    monkeypatch.setattr(
+        app_module, "run_assistant_control_command",
+        lambda run_id, message: f"已切换至工程 {target_id}。",
+    )
+    monkeypatch.setattr(
+        app_module.frontend_api, "get_run_assistant_switch_target",
+        lambda message: target_id,
+    )
+    monkeypatch.setattr(
+        app_module.frontend_api, "get_run_assistant_history",
+        lambda run_id: target_history if run_id == target_id else source_history,
+    )
+    monkeypatch.setattr(
+        app_module.frontend_api, "save_run_assistant_history",
+        lambda run_id, history: saved.append((run_id, list(history))) or True,
+    )
+
+    update = list(app_module._handle_run_assistant_message(
+        f"/switch {target_id}", source_history, False, False, source_id,
+    ))[-1]
+
+    assert update[-1] == target_id
+    assert "目标工程历史" in str(update[1])
+    assert f"已切换至工程 {target_id}" in str(update[1])
+    assert any(run_id == source_id for run_id, _history in saved)
+    assert saved[-1][0] == target_id
 
 
 def test_run_assistant_refresh_updates_one_status_bubble_without_growing_history(monkeypatch):
@@ -886,6 +978,45 @@ def test_run_assistant_explicit_fork_resume_command_bypasses_read_only_llm(monke
     assert update[1][-1]["content"] == "已接受 /resume。"
 
 
+def test_run_assistant_confirms_pending_natural_language_fork(monkeypatch):
+    snapshot = {
+        "run_id": "md_current",
+        "summary": "### 工程状态\n\n状态：等待确认",
+        "live_summary": "### 工程状态\n\n状态：等待确认",
+        "status_event_id": "md_current:status:awaiting_confirmation:9:none:none",
+        "pending_action": None,
+        "pending_fork": {
+            "proposal_id": "fork-proposal-123",
+            "run_id": "md_current",
+            "status": "awaiting_confirmation",
+            "state_revision": 4,
+            "restart_step": 6,
+            "changes": [{"path": "md.eq.tau_p", "value": 1}],
+        },
+    }
+    calls = []
+    monkeypatch.setattr(app_module.frontend_api, "get_run_panel_snapshot", lambda: snapshot)
+    monkeypatch.setattr(app_module, "run_assistant_control_command", lambda *_args: None)
+    monkeypatch.setattr(
+        app_module.frontend_api,
+        "confirm_pending_fork",
+        lambda proposal_id, run_id, **kwargs: calls.append((proposal_id, run_id, kwargs)) or "已创建 fork md_child。",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "chat_run_assistant",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("fork confirmation must not reach LLM")),
+    )
+
+    update = list(
+        app_module._handle_run_assistant_message("确认 fork", [], False, False)
+    )[-1]
+
+    assert calls == [("fork-proposal-123", "md_current", {"state_revision": 4})]
+    assert update[1][-1]["content"] == "已创建 fork md_child。"
+
+
 def test_run_assistant_slash_menu_uses_document_events_across_gradio_shadow_dom():
     config = app_module.app.get_config_file()
     run_input = next(
@@ -900,6 +1031,7 @@ def test_run_assistant_slash_menu_uses_document_events_across_gradio_shadow_dom(
     assert "menu.hidden = false" in script
     assert 'command: "/resume"' in script
     assert 'command: "/fork"' in script
+    assert 'command: "/switch"' in script
     assert "setInputValue" in script
     assert "chooseActive" in script
     assert "event.composedPath()" in script

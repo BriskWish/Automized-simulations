@@ -26,6 +26,30 @@ def _record_run_status(tmp_path, run_id, status):
     return run_dir
 
 
+def test_run_assistant_history_is_persisted_per_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    first = _record_run_status(tmp_path, "md__202608150001", {"state": "aborted", "step": 8})
+    second = _record_run_status(tmp_path, "md__202608150002", {"state": "done", "step": 11})
+    first_history = [
+        {"role": "user", "content": "为什么停止？"},
+        {
+            "role": "assistant", "content": "停在第 8 步。",
+            "_run_assistant_event_kind": "status",
+            "_run_assistant_event_id": "md__202608150001:status:aborted:8:none:none",
+        },
+    ]
+    second_history = [{"role": "assistant", "content": "第二个工程已完成。"}]
+
+    assert frontend_api.save_run_assistant_history(first.name, first_history) is True
+    assert frontend_api.save_run_assistant_history(second.name, second_history) is True
+
+    assert frontend_api.get_run_assistant_history(first.name) == first_history
+    assert frontend_api.get_run_assistant_history(second.name) == second_history
+    payload = json.loads((first / "run_assistant_history.json").read_text(encoding="utf-8"))
+    assert payload["run_id"] == first.name
+    assert payload["schema_version"] == 1
+
+
 def test_stop_during_gromacs_requests_checkpoint_first_shutdown(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     run_dir = _record_run_status(tmp_path, "run-001", {"state": "running", "step": 9})
@@ -332,6 +356,11 @@ def test_run_panel_snapshot_resolves_the_run_once_for_status_and_action(monkeypa
         "get_pending_action",
         lambda run_id: calls.append(("action", run_id)) or {"action_id": "act-1"},
     )
+    monkeypatch.setattr(
+        frontend_api,
+        "get_pending_fork",
+        lambda run_id: calls.append(("fork", run_id)) or None,
+    )
 
     snapshot = frontend_api.get_run_panel_snapshot()
 
@@ -340,6 +369,7 @@ def test_run_panel_snapshot_resolves_the_run_once_for_status_and_action(monkeypa
         "summary": "状态摘要",
         "live_summary": "实时状态摘要",
         "pending_action": {"action_id": "act-1"},
+        "pending_fork": None,
         "error_event": None,
         "status_event_id": "md_current:status:unavailable:none:act-1:none",
         "timeline_events": True,
@@ -348,6 +378,7 @@ def test_run_panel_snapshot_resolves_the_run_once_for_status_and_action(monkeypa
         ("summary", "md_current", True),
         ("summary", "md_current", False),
         ("action", "md_current"),
+        ("fork", "md_current"),
     ]
 
 

@@ -572,6 +572,7 @@ def grompp_and_mdrun(
     nproc: int | None = None,
     extra_grompp: list[str] | None = None,
     extra_mdrun: list[str] | None = None,
+    mdrun_timeout_s: int | None = None,
     continuation_checkpoint: str | Path | None = None,
     append: bool = False,
     on_progress=None,
@@ -736,7 +737,12 @@ def grompp_and_mdrun(
         mdrun_args.extend(extra_mdrun)
     try:
         mdrun_kwargs = {"on_mdrun_heartbeat": on_heartbeat} if on_heartbeat is not None else {}
-        mdrun = run_gmx(mdrun_args, inputs.work_dir, **mdrun_kwargs)
+        mdrun = run_gmx(
+            mdrun_args,
+            inputs.work_dir,
+            timeout=mdrun_timeout_s,
+            **mdrun_kwargs,
+        )
     except FileNotFoundError:
         return _gmx_missing_result(stage, started_at, inputs)
     except RunLockError as exc:

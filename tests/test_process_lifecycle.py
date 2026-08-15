@@ -66,8 +66,10 @@ def test_managed_command_honors_stop_request_and_records_audit(tmp_path):
         [sys.executable, "-c", "import time; time.sleep(30)"],
         run_dir=tmp_path,
         stop_check=lambda: True,
-        interrupt_grace_s=0.01,
-        terminate_grace_s=0.01,
+        # Give a normally interruptible child enough scheduling time to
+        # acknowledge SIGINT before testing the escalation boundary.
+        interrupt_grace_s=1.0,
+        terminate_grace_s=0.5,
         poll_interval_s=0.01,
     )
 
@@ -92,8 +94,8 @@ def test_managed_command_timeout_terminates_and_records_audit(tmp_path):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             run_dir=tmp_path,
             timeout=0.01,
-            interrupt_grace_s=0.01,
-            terminate_grace_s=0.01,
+            interrupt_grace_s=1.0,
+            terminate_grace_s=0.5,
             poll_interval_s=0.01,
         )
 

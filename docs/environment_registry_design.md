@@ -16,7 +16,7 @@ Willy 同时依赖项目内置程序和用户安装的外部程序。当前运�
 
 `env_registry` 不负责以下内容：
 
-- 不读取或执行用户的 `.bashrc`、`.profile` 等 shell 配置文件；应用只继承启动进程的环境。
+- 不读取或执行用户的 `.bashrc`、`.profile` 等 shell 配置文件；应用只继承启动进程的环境。若启动 shell 已由这些文件初始化 GROMACS，继承的 `PATH`、`LD_LIBRARY_PATH` 等变量会传给子进程。
 - 不解析任务级模拟参数；这些仍只来自 `config.json`。
 - 不存储 API key，也不把任意 `.env` 内容传递给外部子进程。
 - 不替代内置软件的固定路径和发布完整性检查。
@@ -35,7 +35,7 @@ Willy 同时依赖项目内置程序和用户安装的外部程序。当前运�
 | `orca` | `WILLY_ORCA_BIN`、`WILLY_ORCA_HOME` | `ORCA_DIR` | `PATH:orca` |
 | `orca_2mkl` | `WILLY_ORCA_2MKL_BIN`、`WILLY_ORCA_HOME` | `ORCA_DIR` | ORCA 同目录或 `PATH:orca_2mkl` |
 | `multiwfn` | 无（固定内置负载） | 无 | `vendor/multiwfn/.../Multiwfn` |
-| `gmx` | `WILLY_GMX_BIN` | 无 | 不自动发现；仅进程环境或 `.env` 中的显式值 |
+| `gmx` | `WILLY_GMX_BIN` | 无 | `PATH:gmx` |
 | `ligpargen` | `WILLY_LIGPARGEN_BIN` | 无 | `PATH:LigParGen`；执行时以私有兼容入口调用已配置的 `obabel` |
 | `obabel` | `WILLY_OBABEL_BIN` | 无 | `PATH:obabel`；必须是含格式插件和数据文件的完整 Open Babel 安装 |
 | `csh` | `WILLY_CSH_BIN` | 无 | `PATH:csh`；BOSS 运行脚本所必需 |
@@ -194,8 +194,8 @@ LigParGen 的上游服务和 Sobtop 页面不由 Willy 解释或替代其使用�
 
 ### 2.4 当前开发机审计快照
 
-2026-08-11 在不启动科学软件的条件下完成以下只读检查：Python `3.12.3`，Linux
-`x86_64`/glibc `2.39`，GROMACS `2025.0`，`csh` 和系统 Open Babel 均可发现。registry
+2026-08-11 在不启动科学软件的条件下完成以下只读检查：Ubuntu `24.04.4` LTS/WSL2、Python
+`3.12.3`，Linux `x86_64`/glibc `2.39`，GROMACS `2025.0`，`csh` 和系统 Open Babel 均可发现。registry
 仍固定使用 vendor 内置 Multiwfn，不受本机 `/home/.../Multiwfn` 或 PATH 中同名程序影响。
 
 当前 `cryptography==41.0.7`，低于 `pyproject.toml` 声明的 `cryptography>=42`，因此该开发机
@@ -291,7 +291,7 @@ ResolvedTool(
 
 预检分为四层：
 
-1. **配置页依赖预检（已实现）**：用户显式点击“预检运行依赖”后，`dependency_preflight.py` 仍按可替代链路组完成内部判定、自动发现外置工具并补写缺失默认项；前端仅将已有结果渲染为量化结构、电荷配置、拓扑参数、初始建盒和模拟运行下的独立软件或模组清单。每项仅展示一次“满足/不满足”及“内置/已检测到外置/已配置外置”来源，不展示完整链路结论、推荐安装或内部组件细节。这是建议性结果，绝不创建 run、改变状态机或阻止本地任务启动。
+1. **配置页依赖预检（已实现）**：用户显式点击“预检运行依赖”后，`dependency_preflight.py` 仍按可替代链路组完成内部判定、自动发现外置工具并补写缺失默认项；同时只读扫描当前 CPU 核数并展示未显式指定时的 `min(8, CPU核数)` 建议值。前端仅将已有结果渲染为量化结构、电荷配置、拓扑参数、初始建盒和模拟运行下的独立软件或模组清单。每项仅展示一次“满足/不满足”及“内置/已检测到外置/已配置外置”来源，不展示完整链路结论、推荐安装或内部组件细节。这是建议性结果，绝不创建 run、改变状态机或阻止本地任务启动；确认启动时才将资源边界写入 run-local `config.json`。
 2. **能力发现（已实现）**：每个新 run 创建后、进入步骤前，非阻塞扫描全部外部工具并写入脱敏报告；缺少未选中的工具不使服务不可用。
 3. **方案预检（已实现）**：配置与后端确定后，按该流程需要的模块检查所需工具。当前没有自动切换后端；必需工具不可用时在执行前返回结构化失败。
 4. **工步预检**：进入外部命令前，再验证当前输入、附属文件、可执行权限和子进程环境。软件可发现不代表当前任务一定可运行。
@@ -353,10 +353,23 @@ Packmol 已登记为受管工具，`resolve_tool("packmol")` 与 `env_checker` �
 该证据只对 Ubuntu 24.04 WSL2 目标有条件成立；若发布目标仍是 Ubuntu 20/22 或其他 libc/ABI，
 必须在对应发行版重复最小 Packmol 探针和错误矩阵，不能以本机结果替代。
 
+#### 4.2.2 2026-08-15 完整 profile 运行记录补充
+
+开发者补充确认：远程 Ubuntu 20.04.6 验收机已完成一条受支持 profile 的完整 Step 1--10 运行，
+最终状态为 `done`；完整原始记录保留在远程机，当前检出仅登记环境事实。已知远程版本包括 Python 3.11.7
+和 Packmol 21.2.3，其余版本以远程原始记录为准。
+
+当前开发机已完成四条历史 profile：`md__202608110001`、`md__202608110005`、
+`md__202608110010`、`md__202608110011`，共同 source commit 为
+`2e0f9f235f4d9af61d8f81193f41ef55c8cf428c`。运行环境为 Ubuntu 24.04.4 LTS/WSL2、Python 3.12.3、
+GROMACS 2025.0、Packmol 21.2.3、内置 Multiwfn `3.8(dev)-2025-02-14`；当前 registry 基线为
+ORCA 6.1.1、Open Babel 3.1.1。Gaussian 16、LigParGen、BOSS 和 Sobtop 的精确 revision 未在
+运行 manifest 中固化，不将未记录版本写成验收事实。
+
 ## 5. 模块职责与迁移
 
 - `env_registry.py`：工具声明、路径解析、校验、子进程环境构造和脱敏能力报告。
-- `dependency_preflight.py`：配置页调用的建议性分组预检；读取 registry、核验内置 Vendor，并仅补写自动发现的缺失外部 `WILLY_*` 默认项。它不创建工程、不进入状态机，也不替代执行期检查。
+- `dependency_preflight.py`：配置页调用的建议性分组预检；读取 registry、核验内置 Vendor、扫描 CPU 容量，并仅补写自动发现的缺失外部 `WILLY_*` 默认项。它不创建工程、不进入状态机，也不替代执行期检查。
 - `step_registry.py`：维护主流程 step 及其执行模块、外部工具和内置依赖的归属关系。
 - `env_checker.py`：保留现有 `check_all()`、`check_module()`、`ensure()` API，按执行模块
   注册表生成依赖归属并适配 `env_registry` 的报告，避免现有调用方一次性破坏。

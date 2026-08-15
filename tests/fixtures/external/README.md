@@ -29,7 +29,7 @@
 
 当前 case 路径：
 
-- `gromacs_minimal/topol.top`、`model.pdb`、`em.mdp`、`eq.mdp`、`prod.mdp`
+- `gromacs_minimal/topol.top`、`g01_minimal.itp`、`model.pdb`、`em.mdp`、`eq.mdp`、`prod.mdp`
 - `sobtop_ec/EC.mol2`、`sobtop_ec/EC.chg`
 - `g16_minimal/input.gjf`
 - `orca_minimal/input.gjf`

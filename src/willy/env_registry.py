@@ -371,24 +371,9 @@ def _resolve_binary(spec: ToolSpec, project_root: str | Path | None) -> Resolved
 
 
 def _resolve_gmx(project_root: str | Path | None) -> ResolvedTool:
-    """Resolve GROMACS from Willy's explicit configuration only.
-
-    GROMACS installations often need a matching runtime environment.  This
-    project therefore deliberately does not infer a ``gmx`` binary from PATH:
-    the user must make the selected installation explicit through
-    ``WILLY_GMX_BIN`` in the process environment or the project ``.env``.
-    """
+    """Resolve GROMACS with the same precedence as other external binaries."""
     spec = TOOL_SPECS["gmx"]
-    value, source = _configured_value(spec.binary_env, project_root)
-    if value:
-        return _binary_result(spec, value, source, strict=True)
-    return ResolvedTool(
-        spec.tool_id,
-        spec.label,
-        MISSING,
-        source="willy_env",
-        public_reason="未设置 WILLY_GMX_BIN",
-    )
+    return _resolve_binary(spec, project_root)
 
 
 def _resolve_multiwfn(project_root: str | Path | None) -> ResolvedTool:

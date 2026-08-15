@@ -92,7 +92,8 @@ SMOKE_CASES: tuple[ExternalSmokeCase, ...] = (
         "gromacs_minimal", "GROMACS 可执行、版本和最小三阶段输入的受控验收",
         ("gmx",),
         (
-            "gromacs_minimal/topol.top", "gromacs_minimal/model.pdb",
+            "gromacs_minimal/topol.top", "gromacs_minimal/g01_minimal.itp",
+            "gromacs_minimal/model.pdb",
             "gromacs_minimal/em.mdp", "gromacs_minimal/eq.mdp",
             "gromacs_minimal/prod.mdp",
         ),

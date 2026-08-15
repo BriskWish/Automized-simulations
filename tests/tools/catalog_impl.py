@@ -143,7 +143,7 @@ FILE_TARGETS = {
     "test_multi_factor_pending_action.py": "willy.simulation.pending_action multi-factor confirmation",
     "test_postprocess.py": "willy.simulation.postprocess",
     "test_run_assistant.py": "willy.run_registry / toolist_run / agent_run",
-    "test_run_control.py": "willy.run_control / frontend_api controlled resume and fork",
+    "test_run_control.py": "willy.run_control / frontend_api controlled resume, fork and switch",
     "test_run_metadata.py": "willy.run_metadata schema-v2 / migration / section CAS",
     "test_run_provenance.py": "willy.run_provenance",
     "test_run_store.py": "willy.run_store",

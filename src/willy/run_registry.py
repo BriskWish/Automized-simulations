@@ -220,7 +220,7 @@ class RunRegistry:
         """
         if action not in {"resume", "fork"}:
             raise ValueError("运行控制动作无效")
-        if outcome not in {"accepted", "rejected", "launched", "launch_failed", "created"}:
+        if outcome not in {"accepted", "rejected", "launched", "launch_failed", "created", "proposed"}:
             raise ValueError("运行控制结果无效")
         directory = self.resolve_run_id(run_id)
         clean_paths = [
@@ -1201,6 +1201,9 @@ class RunRegistry:
         pending_action = self._public_pending_action(status.get("extra", {}))
         if pending_action:
             extra["pending_action"] = pending_action
+        pending_fork = self._public_pending_fork(status.get("extra", {}))
+        if pending_fork:
+            extra["pending_fork"] = pending_fork
         completion_scope = self._public_completion_scope(status.get("extra", {}))
         if completion_scope:
             extra["completion_scope"] = completion_scope
@@ -1352,6 +1355,61 @@ class RunRegistry:
         if len(options) > 1:
             public["options"] = options
         return public
+
+    @staticmethod
+    def _public_pending_fork(extra: object) -> dict[str, Any]:
+        """Keep a bounded, user-reviewable natural-language fork proposal."""
+        if not isinstance(extra, Mapping):
+            return {}
+        raw = extra.get("pending_fork")
+        if not isinstance(raw, Mapping) or raw.get("status") != "awaiting_confirmation":
+            return {}
+        proposal_id = raw.get("proposal_id")
+        run_id = raw.get("run_id")
+        fingerprint = raw.get("config_fingerprint")
+        if not all(isinstance(value, str) and value for value in (proposal_id, run_id, fingerprint)):
+            return {}
+        if not re.fullmatch(r"[A-Za-z0-9_-]{12,128}", proposal_id):
+            return {}
+        if not _RUN_ID_RE.fullmatch(run_id) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+            return {}
+        restart_step = raw.get("restart_step")
+        stopped_step = raw.get("stopped_step")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value <= STEP_REGISTRY.total_steps
+            for value in (restart_step, stopped_step)
+        ):
+            return {}
+        changes = raw.get("changes")
+        if not isinstance(changes, list) or not 1 <= len(changes) <= 16:
+            return {}
+        clean_changes: list[dict[str, Any]] = []
+        for item in changes:
+            if not isinstance(item, Mapping):
+                return {}
+            path = item.get("path")
+            value = item.get("value")
+            if not isinstance(path, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,159}", path):
+                return {}
+            if isinstance(value, bool) or isinstance(value, (Mapping, list)) or value is None:
+                return {}
+            if not isinstance(value, (str, int, float)):
+                return {}
+            clean_changes.append({"path": path, "value": value})
+        paths = raw.get("parameter_paths")
+        if not isinstance(paths, list) or sorted(paths) != sorted(item["path"] for item in clean_changes):
+            return {}
+        return {
+            "proposal_id": proposal_id,
+            "run_id": run_id,
+            "status": "awaiting_confirmation",
+            "config_fingerprint": fingerprint,
+            "stopped_step": stopped_step,
+            "restart_step": restart_step,
+            "parameter_paths": sorted(paths),
+            "changes": clean_changes,
+        }
 
     @staticmethod
     def _public_completion_scope(extra: object) -> dict[str, Any]:

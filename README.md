@@ -2,7 +2,7 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **版本 0.4.1**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版更新验收缺口、浏览器交互验证、受控恢复和目标机外部执行证据边界。
+> **版本 0.5.0**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版加入受控 `/resume`、`/fork`、`/switch`、按工程持久化运行助理历史、CPU 资源预检写回和 G-01 最小 GROMACS 验收 fixture。可溯源工作记录、测试基线和预检核数见 [`docs/release_notes_v0.5.0.md`](docs/release_notes_v0.5.0.md)。
 
 > 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。四条 G16/ORCA + Sobtop/LigParGen 历史完整 run 的脱敏核心证据已归档，并与后续版本的确定性回归共同构成验收并集；新目标机只需任选一条受支持 profile 完成十步，另行完成真实 LLM 错误处理验收即可。
 
@@ -105,7 +105,7 @@ cp .env.example .env
 # 编辑 .env，填入 API Key、Base URL 和 Model
 ```
 
-配置页的“运行依赖预检”会在创建工程前按量子、拓扑和模拟三组展示内置 Vendor 与外部依赖的满足状态；每组任一完整可替代链路可用即通过。它会将从 `PATH` 或受限默认目录发现的可用外部软件写入缺失的 `WILLY_*` 默认项，不覆盖已有进程环境或 `.env` 设置，也不会阻止本地任务启动。**GROMACS 是例外：本版本只读取显式的 `WILLY_GMX_BIN`，不从 `PATH` 或系统位置自动发现，也不自动写入该项。**实际运行仍按任务选定的后端和步骤进行强制预检。
+配置页的“运行依赖预检”会在创建工程前按量子、拓扑和模拟三组展示内置 Vendor 与外部依赖的满足状态；每组任一完整可替代链路可用即通过。它会将从 `PATH` 或受限默认目录发现的可用外部软件写入缺失的 `WILLY_*` 默认项，不覆盖已有进程环境或 `.env` 设置，也不会阻止本地任务启动。GROMACS 与其他外部二进制使用相同的优先级：显式 `WILLY_GMX_BIN` 优先，其次是项目 `.env`，最后从启动进程继承的 `PATH` 自动发现；通过 `.bashrc`/GROMACS 环境脚本初始化后再启动 Willy 即可继承这些变量。实际运行仍按任务选定的后端和步骤进行强制预检。
 
 外部软件可使用 `WILLY_G16_BIN`、`WILLY_G09_BIN`、`WILLY_G09_FORMCHK_BIN`、`WILLY_ORCA_HOME`、`WILLY_GMX_BIN`、
 `WILLY_LIGPARGEN_BIN`、`WILLY_BOSS_HOME`、`WILLY_OBABEL_BIN`、`WILLY_CSH_BIN`

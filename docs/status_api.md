@@ -17,23 +17,28 @@ status = RunRegistry().get_run_status(run_id)
 
 ## 停止与失活对账
 
-停止意图只支持按钮的确定性 UI 路径：首次点击“中止流水线”只把按钮切换为“确认中止”，第二次点击才由前端服务端直接调用 `stop_pipeline`。首次操作不得写运行状态、`stop.request` 或发送进程信号；停止不得依赖浏览器 `window.confirm`，也不得经 LLM 或 Run Assistant tool。运行助理文本框中的“中止”“暂停”“稍后”“确认中止”及其等效讨论语只可产生对话提示或保留等待状态，绝不能调用停止、重跑或退出工程。仅对已经由该按钮或进程信号中止的当前工程，完整的显式 `/resume` 与 `/fork` 消息由前端在调用只读运行助理前确定性处理；它们不是 LLM tool，也不会由自然语言近义表达触发。
+停止意图只支持按钮的确定性 UI 路径：首次点击“中止流水线”只把按钮切换为“确认中止”，第二次点击才由前端服务端直接调用 `stop_pipeline`。首次操作不得写运行状态、`stop.request` 或发送进程信号；停止不得依赖浏览器 `window.confirm`，也不得经 LLM 或 Run Assistant tool。运行助理文本框中的“中止”“暂停”“稍后”“确认中止”及其等效讨论语只可产生对话提示或保留等待状态，绝不能调用停止、重跑或退出工程。仅对已经由该按钮或进程信号中止的当前工程，完整的显式 `/resume` 与 `/fork` 消息由前端在调用只读运行助理前进入受控分支；完整 `/switch` 与它们处于同一确定性命令层，但只切换展示工程，不改状态机。三者都不是 Run Assistant tool，也不会由缺少 slash 标识的自然语言近义表达触发。
 
 ## 用户中止后的受控续跑
 
-当前选中的 run 处于 `aborted`（或此前被拒绝 fork 留下的、没有 `pending_action` 的 `awaiting_confirmation`）时，才允许下列完整命令：
+当前选中的 run 处于 `aborted`（或此前被拒绝 fork 留下的、没有 `pending_action`/`pending_fork` 的 `awaiting_confirmation`）时，才允许 `/resume` 与 `/fork`；已存在 `pending_fork` 时只能明确确认或重新提交 `/fork` 以替换候选。`/switch` 不要求目标处于中止状态，因为它不启动、停止或修改任何工程：
 
 ```text
 /resume
 /fork md.eq.tau_p=3
 /fork {"md":{"eq":{"tau_p":3}}}
+/fork 重跑 EQ 段，tau_p 设置为 1
+/switch md__202608150002
+/switch 202608150002
 ```
 
 `/resume` 不接受参数。服务端重新读取该 run 内冻结的 `config.json`，以 `done_steps` 的首个缺失步骤作为安全续跑点，在**原** `md_run/<run_id>/` 预占启动锁后按 `aborted -> awaiting_confirmation -> retrying -> running` 流转；启动失败则回到无 `pending_action` 的 `awaiting_confirmation`。它不会从项目根目录、任意路径或另一个 run 推断输入。
 
-`/fork` 必须给出实际发生变化的现有配置路径。支持的路径仅为 `topology`（Step 4）、`box`（Step 7）、`md`（默认 Step 6，`md.eq` 为 Step 9、`md.prod` 为 Step 10）和 `execution`（Step 6）；`md.run_seed` 及其他根字段禁止修改。每项路径的首次消费步骤必须不早于上次停止步骤，否则拒绝并通过 CAS 回到无 `pending_action` 的 `awaiting_confirmation`。有效 fork 创建新的 run、冻结修改后的 `config.json`、登记 `parent_run_id`，并重放 Step 4 或 Step 6 的安全边界；父 run 保持不变。参数值只保留在子 run 配置快照中，控制审计只记录路径。
+`/fork path=value` 与 `/fork {JSON}` 必须给出实际发生变化的现有配置路径，继续由确定性解析器直接校验。若完整 `/fork` 标识后的正文不是可解析的路径赋值，服务端可调用无工具、只输出 JSON 的受限 LLM，将自然语言转为候选路径和值；LLM 不拥有文件、命令、启动或状态迁移权限。两条路径都只支持 `topology`（Step 4）、`box`（Step 7）、`md`（默认 Step 6，`md.eq` 为 Step 9、`md.prod` 为 Step 10）和 `execution`（Step 6）；`md.run_seed` 及其他根字段禁止修改。每项路径的首次消费步骤必须不早于上次停止步骤，并且修改后的配置必须通过 schema 校验，否则拒绝并通过 CAS 回到无 `pending_action` 的 `awaiting_confirmation`。LLM 候选通过后写入受限 `pending_fork` 并保持 `awaiting_confirmation`；用户必须回复“确认 fork”或“同意 fork”，服务端再校验状态版本、配置指纹、字段和 schema，才创建新的 run、冻结修改后的 `config.json`、登记 `parent_run_id` 并重放 Step 4 或 Step 6 的安全边界。父 run 保持不变。`control_history` 与事件审计只记录参数路径，不记录参数值；待确认卡仅向当前会话显示已校验的候选值。
 
-当阶段失败并等待协议调整授权时，公开 `status.json` 可带受限的 `pending_action`。单方案只含 `action_id`、`state`、失败步骤的公开标签、`restart_step` 和至多 8 项已脱敏的核心修改项（名称、旧值、新值与简短目的）；还可带至多 8 项可复审参数（名称、当前值、允许范围和简短目的），供用户提出替代要求。若诊断有多个可信原因，`options` 最多含 3 个独立选项，每项只公开 `option_id`、序号、标题、可能原因、证据摘要、重跑起点和同样脱敏的修改项。每项可额外带来源字段：`knowledge_status`（`retrieved`、`not_matched` 或 `unavailable`）、实际读取且数字/名称验证过的 `knowledge_entries`（仅 `number`、`name`）、`advice_source`（`knowledge_base` 或 `llm_unverified`）及固定的 `compatibility_notice`。未命中或不可用时，前端必须明确“LLM 未经知识库验证的推断”；不得把模型假设显示为文档事实。`selected_option_id` 仅在用户选定后出现，`selection_required=true` 时普通“确认/同意”必须被拒绝，不能默认选项。`restart_step` 只能为 9（仅重跑 EQ）或 7（修改建盒后依次重跑 Box、EM、EQ、PROD）。不得含日志、路径、命令、模型推理、原始错误或内部配置。前端将新 `action_id` 渲染为运行助理对话框末尾的独立、不可变调整事件气泡；轮询同一 `action_id` 时不重复追加。带有 `pending_action` 的 `awaiting_confirmation` 表示“LLM 已返回方案，尚未得到用户对当前 `action_id` 的明确确认”；它不能被渲染或解释成状态未知、自动重试或已在运行。无 `pending_action` 的同一状态仅用于被拒绝或启动失败的显式续跑控制，前端显示等待下一条受控命令，绝不把它交给 EQ 方案确认入口。
+`/switch` 必须且只能携带一个参数，格式限 `md__YYYYMMDDHHMM` 或 `YYYYMMDDHHMM`；后者在服务端规范化为前者。缺参、多参、其他前缀、路径字符或不存在的 run 均拒绝。成功切换只更新前端选中的 `run_id`，从目标目录读取 `run_assistant_history.json` 和状态快照，并在源/目标 `events.jsonl` 写入不含聊天正文的 `run_assistant_switch_out`/`run_assistant_switch_in`。`/resume` 保持同一 run 的历史绑定；fork 启动成功后绑定新子 run，且不得复制父 run 的历史文件。
+
+当阶段失败并等待协议调整授权时，公开 `status.json` 可带受限的 `pending_action`。单方案只含 `action_id`、`state`、失败步骤的公开标签、`restart_step` 和至多 8 项已脱敏的核心修改项（名称、旧值、新值与简短目的）；还可带至多 8 项可复审参数（名称、当前值、允许范围和简短目的），供用户提出替代要求。若诊断有多个可信原因，`options` 最多含 3 个独立选项，每项只公开 `option_id`、序号、标题、可能原因、证据摘要、重跑起点和同样脱敏的修改项。每项可额外带来源字段：`knowledge_status`（`retrieved`、`not_matched` 或 `unavailable`）、实际读取且数字/名称验证过的 `knowledge_entries`（仅 `number`、`name`）、`advice_source`（`knowledge_base` 或 `llm_unverified`）及固定的 `compatibility_notice`。未命中或不可用时，前端必须明确“LLM 未经知识库验证的推断”；不得把模型假设显示为文档事实。`selected_option_id` 仅在用户选定后出现，`selection_required=true` 时普通“确认/同意”必须被拒绝，不能默认选项。`restart_step` 只能为 9（仅重跑 EQ）或 7（修改建盒后依次重跑 Box、EM、EQ、PROD）。不得含日志、路径、命令、模型推理、原始错误或内部配置。前端将新 `action_id` 渲染为运行助理对话框末尾的独立、不可变调整事件气泡；轮询同一 `action_id` 时不重复追加。带有 `pending_action` 的 `awaiting_confirmation` 表示“LLM 已返回方案，尚未得到用户对当前 `action_id` 的明确确认”；它不能被渲染或解释成状态未知、自动重试或已在运行。自然语言 `/fork` 的独立 `pending_fork` 只含候选 ID、配置指纹、停止/重放步骤、已校验字段路径和值，并且只接受带 fork 的明确批准语；它确认后创建子 run，绝不复用 EQ 的确认入口。无 `pending_action` 和 `pending_fork` 的同一状态仅用于被拒绝或启动失败的显式续跑控制，前端显示等待下一条受控命令，绝不把它交给 EQ 方案确认入口。
 
 用户只有以精确白名单批准语（“同意”“确认重跑”“按方案执行”）回应当前待确认方案时，才可经 `frontend_api.confirm_pending_action(action_id, run_id)` 请求受控重跑；该入口必须校验 run、action 和配置指纹。多方案时，“方案1/方案一/选择方案1”仅调用 `select_pending_action_option` 固化选择并保持 `awaiting_confirmation`；“确认方案1/确认方案一”会先以同一 run 的 CAS 选择该项，再调用确认入口。未选方案的普通确认被拒绝。确认后编排器必须先持久化 `retrying`，重建受影响 MDP，再转为 `running` 并调用首个需重跑的科学阶段。未回复、暂停、稍后、否决或不匹配文本均保持 `awaiting_confirmation`，不改写配置、不发起重跑，也不终止工程。
 
@@ -49,7 +54,7 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
 
 ## 轮询频率
 
-推荐 `gr.Timer(3)`（3 秒），流水线内部更新频率远低于 3 秒。每次刷新先一次性解析当前 `run_id`，再读取该 run 的状态摘要、公开错误事件与待确认动作，组成同一公共快照。快照额外公开 `status_event_id`，它只由 run、公开状态、步骤、待确认 `action_id` 和公开错误事件身份构成，不随心跳或 ETA 文本变化。前端保留欢迎气泡为第一条，并关闭连续助理消息合并；同一 `status_event_id` 的状态卡原位刷新，身份变化时旧卡封存为历史并新建当前状态卡。失败以 `run_id + state_revision` 作为事件身份，新的待确认调整以 `run_id + action_id` 作为事件身份，均作为彼此独立的历史气泡追加；重复轮询同一身份不得重复追加。状态、错误和方案在当前浏览器会话内保留，切换 run 时一并清空；它们不追加到 LLM 的普通对话上下文。可用 ETA 在状态气泡中仅显示“当前步骤预计结束：<本地时间>”，不重复显示预测观测时刻。
+推荐 `gr.Timer(3)`（3 秒），流水线内部更新频率远低于 3 秒。每次刷新读取当前选中 `run_id` 的状态摘要、公开错误事件与待确认动作，组成同一公共快照。快照额外公开 `status_event_id`，它只由 run、公开状态、步骤、待确认 `action_id` 和公开错误事件身份构成，不随心跳或 ETA 文本变化。前端保留欢迎气泡为第一条，并关闭连续助理消息合并；同一 `status_event_id` 的状态卡原位刷新，身份变化时旧卡封存为历史并新建当前状态卡。失败以 `run_id + state_revision` 作为事件身份，新的待确认调整以 `run_id + action_id` 作为事件身份，均作为彼此独立的历史气泡追加；重复轮询同一身份不得重复追加。对话、状态、错误和方案按 run 有界保存为 `run_assistant_history.json`，刷新或切换后仅恢复目标工程记录；它们不追加到 LLM 工具上下文。可用 ETA 在状态气泡中仅显示“当前步骤预计结束：<本地时间>”，不重复显示预测观测时刻。
 
 ## PipelineStatus 字段
 
@@ -116,7 +121,7 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
 
 确认和替代方案输入由前端确定性识别，不交给只读运行助理解释；它们的控制前置条件是当前工程带有 `pending_action` 的 `awaiting_confirmation`。`确认`、`同意`、`同意该方案并重跑` 等无歧义批准表达才会调用受控确认接口；修改词和受限参数词才会请求 LLM 生成替代方案。涉及拒绝、取消、暂停或等待的表达绝不触发重跑。除完整 `/resume`、`/fork` 外，其他文本在任意状态下都进入只读运行助理，包括非等待状态中的“确认”或“修改”文本；它们不能触发配置或进程操作。接口取得启动锁并再次校验后，先写入 `confirmation_retry_started` 与 `state=retrying`，再启动恢复进程，因此刷新不会显示旧的等待快照。恢复进程只接受同一动作的 `awaiting_confirmation` 或已受理 `retrying` 快照；若进程无法创建，服务端写入 `confirmation_launch_failed` 并恢复原等待快照和待确认方案。
 
-新 run 的 `done_steps` 必须从空列表开始。只有显式指定原 run 与已验证断点的受控操作才能预置完成步骤。批量量子步骤只有配置中的每个分子都满足本步骤产物契约后才写入 `step_succeeded`；因此 Step 3 不得将部分 `*_opt.fchk` 的 RESP 结果记作整体成功。
+新 run 的 `done_steps` 必须从空列表开始。fork 子 run 在写入 `retrying` 前还必须建立自己的私有 simulation/protocol manifest，并只复制重放边界之前的科学输入；父 run 的 MDP、Packmol、GROMACS 产物、阶段许可、checkpoint、轨迹和配置修订不得进入子目录。只有显式指定原 run 与已验证断点的受控操作才能预置完成步骤。批量量子步骤只有配置中的每个分子都满足本步骤产物契约后才写入 `step_succeeded`；因此 Step 3 不得将部分 `*_opt.fchk` 的 RESP 结果记作整体成功。
 
 对于 Step 8--10，`mark_done()` 还必须通过私有阶段完成门禁：EM 为 `accepted` 加 `em.tpr/.gro/.xtc/.edr`，EQ 为 `accepted` 加 `eq.tpr/.gro/.xtc/.edr/.cpt`，PROD 为 `completed` 加 `prod.tpr/.gro/.xtc/.edr/.cpt`。Agent 工具结果只可触发重跑或回滚指令，不能绕过该门禁。
 
@@ -133,9 +138,10 @@ CLI 收到 `SIGINT` 或 `SIGTERM` 时也必须写 `aborted` 后释放启动锁�
 | `events.jsonl` | run 创建、状态变化、步骤结果的公开摘要 | 运行级单调序列单行追加、`fsync` 并加锁 |
 | `logs/structured.jsonl` | 运行期间的脱敏结构化状态、步骤、决策、进程及低频心跳事件 | RunStore 单调序列单行追加、`fsync` 并加锁；写入失败不阻断计算 |
 | `mdrun_eta.json` | GROMACS `mdrun -v` 的 ETA 预测，以及独立的进程/阶段产物心跳 | 原子替换 |
+| `run_assistant_history.json` | schema v1：仅属于该 run 的有界浏览器对话和显示事件；fork 不继承 | 原子替换 |
 | `md_run/index.json` | 历史 run 的安全摘要 | 原子替换并加锁 |
 
-`events.jsonl` 的公共字段为 `sequence`、`timestamp`、`event_type`、`run_id`、`details`；由可恢复写入包产生的记录另带不含业务信息的 `transaction_id`。`sequence` 与同一 run 的决策审计、进程生命周期记录共享单调递增序列。步骤结果的 `details` 仅包含 `step_id`、注册表产物契约 `artifact_contract`、`activity`、`success`、`error_kind` 和摘要 `error`；状态事件可额外包含与 `status.json` 相同的受限 `repair`、`pending_action` 或 `escalation` 摘要。受控续跑额外使用 `resume_accepted`、`resume_launched`、`resume_launch_failed`、`fork_accepted`、`fork_created`、`fork_launched`、`fork_launch_failed` 和 `fork_rejected`；details 只含动作、结果、停止/续跑步骤、参数路径和可校验的父 run ID。停止事件仅说明已请求停止或已中止，不携带底层信号、命令或日志。不会写入原始错误消息、`hint`、命令行、绝对路径、产物路径、日志内容或 Agent 原始工具参数。EM 收敛失败触发重建时，状态机只记录公开状态变化；EQ 真空区仅保留为私有诊断证据。
+`events.jsonl` 的公共字段为 `sequence`、`timestamp`、`event_type`、`run_id`、`details`；由可恢复写入包产生的记录另带不含业务信息的 `transaction_id`。`sequence` 与同一 run 的决策审计、进程生命周期记录共享单调递增序列。步骤结果的 `details` 仅包含 `step_id`、注册表产物契约 `artifact_contract`、`activity`、`success`、`error_kind` 和摘要 `error`；状态事件可额外包含与 `status.json` 相同的受限 `repair`、`pending_action` 或 `escalation` 摘要。受控续跑额外使用 `resume_accepted`、`resume_launched`、`resume_launch_failed`、`fork_proposed`、`fork_proposal_created`、`fork_proposal_confirmed`、`fork_accepted`、`fork_created`、`fork_launched`、`fork_launch_failed` 和 `fork_rejected`；工程历史切换使用 `run_assistant_switch_out`/`run_assistant_switch_in`，CPU 写回使用 `resource_nproc_adjusted`。details 只含动作、结果、停止/续跑步骤、参数路径、可校验的 run ID、核数及调整数量，不含聊天正文或被钳制前的用户输入。停止事件仅说明已请求停止或已中止，不携带底层信号、命令或日志。不会写入原始错误消息、`hint`、命令行、绝对路径、产物路径、日志内容或 Agent 原始工具参数。EM 收敛失败触发重建时，状态机只记录公开状态变化；EQ 真空区仅保留为私有诊断证据。
 
 结构化内部流的 `event_code` 采用固定事件族：`run_started`、`state_changed`、`step_started`、`step_skipped`、`step_result`、`decision_recorded`、`process_started`、`process_heartbeat` 和 `process_finished`。它只保留逻辑标签和受控标识，不是原始程序日志的替代品。
 

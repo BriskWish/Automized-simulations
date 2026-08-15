@@ -1,10 +1,10 @@
 # Willy 测试策略与质量门禁
 
 > 维护角色：6 号测试工程师
-> 最后更新：2026-08-14
-> 当前基线：2026-08-14 完整 `pytest -q` 为 **916 passed、10 skipped**（收集 926 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 944 条记录）。四条历史完整 profile 的核心证据已归档；新目标机只需执行一条受支持十步链路，并通过真实 LLM 的 EQ 参数调整提案与允许重试判断。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in。Python 3.10 的测试 extras 会安装 `tomli`，作为发布门禁读取 TOML 的兼容解析器；Python 3.11 及以上继续使用标准库 `tomllib`。
+> 最后更新：2026-08-15 · 发布基线：`v0.5.0`
+> 当前基线：2026-08-15 完整 `pytest -q` 为 **920 passed、10 skipped**（收集 930 条 pytest 用例；测试台账另含 18 条离线 LLM 场景，共 948 条记录）。四条历史完整 profile 已确认来自当前开发机，核心证据已归档；另有远程 Ubuntu 20.04.6 的一条完整 profile 记录。新目标机只需执行一条受支持十步链路，并通过真实 LLM 的 EQ 参数调整提案与允许重试判断。网关协议和远程执行代码保留离线回归，但不属于本版本产品入口或发布验收；外部工具、浏览器运行时和真实 LLM 网络测试仍为显式 opt-in。Python 3.10 的测试 extras 会安装 `tomli`，作为发布门禁读取 TOML 的兼容解析器；Python 3.11 及以上继续使用标准库 `tomllib`。
 
-> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **916 passed、10 skipped**（收集 926 条 pytest），测试台账为 **926 pytest + 18 LLM = 944 条记录**。离线 LLM mock 评测当前为 **18/18**，`q_scf_001` 已通过具名诊断后本层恢复工具契约；当天真实模型 + fake executor 报告也为 18/18，二者均保留独立脱敏证据。仓内文档链接、目录计数和责任归属由 `tests/test_documentation_consistency.py` 门禁。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要、前端建议、四条 profile 的只读终态证据契约、发布工件审计、客户端部署包运行态隔离，以及中止后的受控 resume/fork 均已有本地回归；四条历史 profile 的 JSON/JUnit 已归档，目标机仍需任选一条完成真实十步流程。
+> **最新基线覆盖上面的历史摘要：** 当前 `pytest -q` 为 **940 passed、10 skipped**（收集 950 条 pytest），测试台账为 **950 pytest + 18 LLM = 968 条记录**。离线 LLM mock 评测当前为 **18/18**，`q_scf_001` 已通过具名诊断后本层恢复工具契约；当天真实模型 + fake executor 报告也为 18/18，二者均保留独立脱敏证据。仓内文档链接、目录计数和责任归属由 `tests/test_documentation_consistency.py` 门禁。Packmol 运行时 ABI 预检、无实际修复不进入 `retrying`、终态 `escalated` 摘要、前端建议、四条 profile 的只读终态证据契约、发布工件审计、客户端部署包运行态隔离，以及中止后的受控 resume/fork/switch 与按工程持久化历史均已有本地回归；四条历史 profile 的 JSON/JUnit 已归档，目标机仍需任选一条完成真实十步流程。
 
 > 网关冻结边界：当前发行版的前端、LLM provider、网关/管理端启动器和托管客户端包命令均拒绝托管路径；归档的 ASGI、账本和 fake-upstream 测试仅用于后续维护，不构成产品入口或部署验收。
 
@@ -56,6 +56,14 @@ pytest -m external --run-external -q
 # 目标验收机将缺少的工具或 fixture 视为失败，而非跳过。
 WILLY_EXTERNAL_SMOKE_REQUIRED=1 pytest -m external --run-external -q
 
+# G-01b：创建并验证最小 fixture，再经 Willy 受管接口实际完成 EM/EQ/PROD。
+# 该三原子氩簇只验证流程与产物契约，不构成科学体系结论。
+PYTHONPATH=src python3 -m tests.tools.g01_gromacs_minimal_acceptance \
+  --fixture-root test-results/g01-gromacs-fixture \
+  --initialize-fixture \
+  --evidence-dir test-results/external-smoke \
+  --output test-results/g01-gromacs-minimal.json
+
 # 在不运行任何科学计算的前提下，校验一个外部 fixture bundle。
 python3 -m willy.external_smoke \
   --fixture-root /secure/willy-smoke-fixtures \
@@ -90,14 +98,14 @@ python3 -m tests.llm_eval.run_eval
 | 当前工程可视化 | `tests/test_frontend_api.py` + `tests/test_app_ui.py`；覆盖运行目录/结构文件双选择器、目录切换后的文件隔离、启动锁优先/最新数字目录回退、PDB/MOL2 白名单、完整文件名和查看器渲染 |
 | GROMACS 实时 ETA | `tests/test_mdrun_eta.py` + `tests/test_run_assistant.py` + 模拟执行回归；目标环境补 `mdrun -v` 真实 smoke |
 | 确认停止与失活对账 | `tests/test_frontend_api.py` + `tests/test_app_ui.py` + `tests/test_pipeline_state.py` + `tests/test_pipeline_launch.py` + `tests/test_pipeline_orchestrator.py`；覆盖仅按钮的服务端两次确认、失败回执可重试、文本中止/暂停词不停止、前端轮询只读、GROMACS ETA/阶段产物存活证据、进程组仍存活时不误中止、revision 竞争放弃写入和失活事件审计；目标环境补 GROMACS checkpoint-first stop smoke |
-| 中止后的 `/resume` 与 `/fork` | `tests/test_run_control.py` + `tests/test_pipeline_state.py` + `tests/test_pipeline_orchestrator.py` + `tests/test_app_ui.py`；覆盖只有完整标识进入控制分支、原 run 的 config/安全步骤续跑、CAS 的 `aborted -> awaiting_confirmation -> retrying`、child 快照与 `parent_run_id`、参数归属和过早修改拒绝、`control_history`/`events.jsonl` 审计，以及控制命令不进入 LLM |
+| 中止后的 `/resume`、`/fork` 与工程 `/switch` | `tests/test_run_control.py` + `tests/test_pipeline_state.py` + `tests/test_pipeline_orchestrator.py` + `tests/test_app_ui.py` + `tests/test_frontend_api.py`；覆盖只有完整标识进入控制分支、原 run 的 config/安全步骤续跑、CAS 的 `aborted -> awaiting_confirmation -> retrying`、child 快照与 `parent_run_id`、子 run 私有 MDP manifest 初始化、父 run 下游 MDP/建盒/GROMACS 产物及历史隔离、参数归属和过早修改拒绝、`control_history`/`events.jsonl` 审计；精确路径命令不进入 LLM，而自然语言 `/fork` 只能产生待确认候选，批准后才创建 child；`/switch` 仅接受两种编号格式，恢复目标历史并记录切入/切出事件 |
 | 量子或拓扑外部命令 | `tests/test_process_lifecycle.py` + 受影响后端契约回归；覆盖进程组 `SIGINT -> SIGTERM -> SIGKILL`、停止/超时的脱敏审计与既有 `StepResult` 错误分类；目标环境补对应真实 smoke |
 | 协议调整待确认 | `tests/test_pending_action.py` + `tests/test_app_ui.py` + `tests/test_frontend_api.py` + `tests/test_pipeline_orchestrator.py`；覆盖脱敏待确认方案展示、等待状态不降级为未知、无歧义批准语、替代方案的 action ID 替换与配置不变、无回复/暂停/否决保持等待、非 `awaiting_confirmation` 状态的控制拒绝并回退只读问答，以及跨 run 或过期 action 拒绝 |
-| 运行助理性能、降级与状态时间线 | `tests/test_run_assistant.py` + `tests/test_frontend_api.py` + `tests/test_app_ui.py` + LLM mock eval；覆盖独立气泡、关闭连续消息合并、同一状态原位刷新、状态转换封存、错误/方案去重、确认后新状态卡与 LLM 上下文隔离；目标环境补真实模型耗时 smoke |
+| 运行助理性能、降级与状态时间线 | `tests/test_run_assistant.py` + `tests/test_frontend_api.py` + `tests/test_app_ui.py` + LLM mock eval；覆盖独立气泡、关闭连续消息合并、同一状态原位刷新、状态转换封存、错误/方案去重、按 run 持久化及刷新恢复、确认/fork 后新状态卡与 LLM 上下文隔离；目标环境补真实模型耗时 smoke |
 | 外部环境解析、配置页依赖预检、预检或部署变量 | `tests/test_env_registry.py` + `tests/test_env_checker.py` + `tests/test_dependency_preflight.py` + 受影响模块回归 |
 | 发布 | 全量 pytest、相关 LLM eval、质量契约（编译与测试用例台账漂移检查）、相关 external preflight/真实执行证据、验收记录 |
 
-本地编排回归必须覆盖：新 run 不继承旧 `done_steps`；Step 2 Agent 只补上游产物时会重跑 Step 2；Step 3 对配置中任一缺失的 `*_opt.fchk` 失败，而不是以部分结果继续进入拓扑层；修复工具必须保留实际步骤身份；EQ 失败必须生成脱敏待确认方案，未授权不得修改配置、重跑或启动 PROD；替代方案必须生成新 action ID、使旧动作失效、保留 `awaiting_confirmation` 且不改写配置；批准当前动作后必须按 `awaiting_confirmation -> retrying -> running` 流转，并只能从其受限的 Step 9 或 Step 7 重跑，且成功的 EQ 许可与 checkpoint 仍是 PROD 的前置条件；用户中止后只有完整 `/resume` 或 `/fork` 可进入控制分支，前者在原 run 从首个未完成步骤恢复，后者只接受停止步骤及之后的字段、创建独立子 run，并对接受、拒绝和启动结果写入 manifest/event 审计；历史公开状态越过仍在运行的 EQ 时只能修正状态，不得改写模拟文件。
+本地编排回归必须覆盖：新 run 不继承旧 `done_steps`；Step 2 Agent 只补上游产物时会重跑 Step 2；Step 3 对配置中任一缺失的 `*_opt.fchk` 失败，而不是以部分结果继续进入拓扑层；修复工具必须保留实际步骤身份；EQ 失败必须生成脱敏待确认方案，未授权不得修改配置、重跑或启动 PROD；替代方案必须生成新 action ID、使旧动作失效、保留 `awaiting_confirmation` 且不改写配置；批准当前动作后必须按 `awaiting_confirmation -> retrying -> running` 流转，并只能从其受限的 Step 9 或 Step 7 重跑，且成功的 EQ 许可与 checkpoint 仍是 PROD 的前置条件；用户中止后只有完整 `/resume` 或 `/fork` 可进入恢复控制，前者在原 run 从首个未完成步骤恢复，后者只接受停止步骤及之后的字段、创建独立子 run，并对接受、拒绝和启动结果写入 manifest/event 审计；完整 `/switch` 只改变选中 run 并恢复其独立历史；历史公开状态越过仍在运行的 EQ 时只能修正状态，不得改写模拟文件。
 
 ## 4. Smoke 实现规范
 
@@ -269,8 +277,8 @@ ORCA profile，根目录 `config.json` 已恢复。
 
 在第二台受控 Ubuntu 20.04.6 验收机的项目检出中，使用 Python 3.11.7 的项目虚拟环境，确认根目录
 历史验收机曾在不存在 `.env`、且显式清除 `WILLY_G16_BIN`、`WILLY_FORMCHK_BIN` 与 `WILLY_GMX_BIN` 时，
-通过厂商环境将 `g16`、`formchk`、`gmx` 从 `PATH` 解析为 `available`。该记录仅描述当时行为：**当前版本已收紧
-GROMACS 策略，`gmx` 只接受 `WILLY_GMX_BIN` 的显式进程环境或 `.env` 配置，不再从 `PATH` 发现。**
+通过厂商环境将 `g16`、`formchk`、`gmx` 从 `PATH` 解析为 `available`。当前版本恢复统一外部二进制策略：`gmx` 与其他工具一样，在显式
+`WILLY_GMX_BIN` 和 `.env` 未配置时从启动进程继承的 `PATH` 发现。
 
 **结果：通过（环境自动发现）。** 此记录只证明 Willy 不依赖 `WILLY_*` 显式路径即可消费正确初始化的
 运行环境；不证明磁盘扫描能力，也不证明 G16、formchk 或 GROMACS 已完成真实执行。后续真实进程、产物和
@@ -379,8 +387,8 @@ SHA-256 为 `b4ec513ea4c950a2af763f60233cd4d20ef705562aa700b3e9daaf6c1addb818`�
 
 本机和 Ubuntu 20.04 构建机均以 4 个单原子模板在 20 A 周期盒中实际调用项目 `InpGenerator` 或等价
 Packmol 输入：返回码为 0，输出含 `Success!`、4 个 `ATOM/HETATM` 记录和一个 `CRYST1` 记录。
-**结果：通过（Packmol 二进制兼容与最小建盒）。** 这不替代更新验收机检出后的 Step 1--10 端到端重跑；
-后者仍是 G-01/G-03 的人工验收项。
+**结果：通过（Packmol 二进制兼容与最小建盒）。** 该段本身只证明 Packmol 兼容性；后续开发者已在远程
+Ubuntu 20.04.6 验收机完成至少一条完整 Step 1--10 profile，详见 6.20。
 
 ### 6.17 2026-08-14 当前 Ubuntu 24.04 WSL2 G-07/T-07 错误矩阵
 
@@ -394,8 +402,8 @@ Packmol 输入：返回码为 0，输出含 `Success!`、4 个 `ATOM/HETATM` 记
 `awaiting_confirmation`；grompp/PROD 停在升级边界；环境错误零次参数修复且不调用 LLM。
 私有记录均保留 `run_id/step/error_kind`，公开 panel 不含路径、完整命令、密钥或原始日志；无效
 LLM 配置在 run 创建前安全拒绝。脱敏报告归档为
-`tests/reports/audits/g07_local_wsl_20260814.json`，该结果只对当前 Ubuntu 24.04 WSL2 ABI
-成立，Ubuntu 20/22 目标需独立重跑。
+`tests/reports/audits/g07_local_wsl_20260814.json`，该历史结果只对当前 Ubuntu 24.04 WSL2 ABI
+成立，Ubuntu 20/22 目标需独立重跑；本次 Ubuntu 22.04.5 回执见 6.18。
 
 ### 6.16 2026-08-12 第二台受控验收机：G16 + Sobtop 真实全流程
 
@@ -408,4 +416,63 @@ GAFF/UFF；EM 和 EQ 阶段许可为 `accepted`，PROD 为 `completed`。`topol.
 **结果：通过（受控验收机上的 G16 + Sobtop 真实十步流程）。** 该结果同时证明兼容 Packmol
 构建未再触发此前的 glibc 阻塞，且本次流程没有观察到公开错误。核验只读取终态状态和固定产物存在性，
 未启动、续跑、停止或修改任何模拟。四条历史 profile 的标准化脱敏 JSON/JUnit 已在 2026-08-14 归档；
-G-01 仍等待干净 WSL 报告，G-03 只等待目标机任选一条完整链路。
+目标机回执已登记在 6.18，但 G-01 仍有停止审计失败，G-03 仍只完成到 Step 2，二者均未达到关闭条件。
+
+### 6.18 2026-08-14 Ubuntu 22.04.5 WSL2 目标机回执
+
+本节记录开发者在全新隔离检出（提交 `6045c7b6be80`）的目标机结果，不改变仓内
+`v0.4.1` 离线基线。环境为 Ubuntu 22.04.5/WSL2、Python 3.10.12；未继承 `.env`、
+`md_run/`、`.venv` 或 `WILLY_*`，仅在项目 `.env` 配置 GROMACS。GROMACS 2025.1、ORCA 6.1.1、
+`orca_2mkl`、Packmol 21.2.3、Sobtop、Playwright 1.62.0/Chromium 151 和 Python 测试依赖均可用，
+`pip check` 通过。
+
+| 验收项 | 结果 | 状态 |
+|------|------|------|
+| G-01 | `compileall`、显式工具解析通过；完整 pytest 为 `915 passed, 10 skipped, 1 failed`。失败为停止审计仅期望 SIGINT，实际还记录 SIGTERM；受管外部 smoke 未完成。 | 开放 |
+| G-03 | `orca_sobtop_electrolyte` 的工具预检和原始输入审计通过；Step 2 Li RESP 电荷计算失败，运行 `aborted`，无 `done`/阶段许可/固定产物哈希。 | 开放 |
+| G-06 | fake-executor `1/1`、运行助理/UI 契约 `89/89` 通过；项目切换重置浏览器聊天历史，刷新后恢复和独立项目设计问答仍无证据。 | 开放 |
+| G-07 | 六类注入、真实 Packmol 启动、ABI/依赖缺失分类、LLM 配置边界及公开/私有脱敏均通过。 | 仅 Ubuntu 22.04.5 WSL2 关闭 |
+
+目标机回执列出的证据文件名为 `g01-pytest.xml`、`g06-browser-existing.xml`、
+`g06-contracts.xml`、`g07-local-wsl-acceptance.json`、`g03-tool-preflight.json`、
+`g03-input-audit.json`、`g03-execution-summary.json`；这些文件未自动导入当前检出，不能作为本地
+文件存在性证据。
+
+下一步按优先级执行：
+
+1. G-01：在最终候选提交上重跑已放宽 grace 的停止回归，并执行自生成 fixture 的受管 GROMACS harness。
+2. G-03：保存 Li RESP 的脱敏 stderr/error kind，分别复核 ORCA 输入、`orca_2mkl`/Sobtop 产物和资源参数；先完成最小 Li 电荷重现，再以新 run 重跑全链路，不绕过 RESP。
+3. G-06：增加按工程/run 绑定的聊天历史持久化与刷新恢复测试，并增加只读项目设计问答的独立浏览器/契约测试，确认无工具调用和配置变更。
+4. G-07：将通过结论限定在 Ubuntu 22.04.5 WSL2；若发布范围扩大到其他 Ubuntu/ABI，按同一六类矩阵重新执行。
+
+### 6.19 2026-08-15 G-01/G-03/G-06 本地修复回归
+
+本轮不改写 6.18 的目标机历史结果，只登记针对回执的后续实现：
+
+- G-01：保留 `SIGINT -> SIGTERM -> SIGKILL` 实现契约，将“可响应 SIGINT 的子进程只应记录 SIGINT”测试的确认窗口由 10ms 拓宽为 1s，终止窗口为 0.5s，避免 WSL 调度延迟造成误升级。全量回归为 `940 passed, 10 skipped`。已纳入自生成、manifest 校验的三原子 fixture 与受管 EM/EQ/PROD harness；尚待目标机执行证据。
+- G-03：将该外置 SSD WSL 上 ORCA 并行受限视为目标环境资源边界。预检现优先读取当前进程 CPU affinity，再回退系统 CPU 核数；启动确认时将默认值写为 `min(8, 可用核数)`，显式全局或分子级值超过容量时写回容量、向用户警告并继续启动。运行时仍对旧快照执行同一上限兜底，fork 子 run 也重新规范化且记录资源调整事件。
+- G-06：运行助理历史按 `run_id` 原子保存到 `run_assistant_history.json`；刷新和严格 `/switch` 只恢复目标 run，resume 保持原编号，fork 成功后跟随子编号且不复制父历史。`/switch` 只接受带或不带 `md__` 的 12 位时间编号，多参及其他格式拒绝；切换在源/目标事件流分别审计。控制、历史、资源及 UI 定向回归为 `276 passed, 1 skipped`。
+
+当前环境执行浏览器 E2E 时因缺少可导入的可选 Playwright Python runtime 而跳过，不能替代目标机的刷新、slash menu 和双向切换实测。
+
+### 6.20 2026-08-15 完整 profile 运行记录补充
+
+#### Ubuntu 20.04.6 远程验收机
+
+开发者补充确认：远程 Ubuntu 20.04.6 验收机已完成一条受支持 profile 的 Step 1--10，最终状态为
+`done`，阶段产物和运行记录已保留在远程机。本次登记只记录事实，不复制私有运行目录；该环境已知版本包括
+Python 3.11.7 和 Packmol 21.2.3，其余外部工具版本以远程原始记录为准。
+
+#### 当前开发机四条 profile
+
+| Profile | Run | 结果 | source commit |
+|---|---|---|---|
+| G16 + Sobtop | `md__202608110001` | Step 1--10，`done` | `2e0f9f235f4d9af61d8f81193f41ef55c8cf428c` |
+| ORCA + Sobtop | `md__202608110005` | Step 1--10，`done` | 同上 |
+| G16 + LigParGen/BOSS | `md__202608110010` | Step 1--10，`done` | 同上 |
+| ORCA + LigParGen/BOSS | `md__202608110011` | Step 1--10，`done` | 同上 |
+
+本机运行版本：Ubuntu 24.04.4 LTS/WSL2、Python 3.12.3、GROMACS 2025.0、Packmol 21.2.3、内置
+Multiwfn `3.8(dev)-2025-02-14`；registry 基线为 ORCA 6.1.1、Open Babel 3.1.1。Gaussian 16、
+LigParGen、BOSS 和 Sobtop 的精确 revision 未在运行 manifest 中固化，保持未记录状态。证据目录为
+`tests/reports/baselines/external_profiles_20260814/`，不包含 `.xtc`、`.trr` 或原始日志。

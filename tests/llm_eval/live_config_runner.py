@@ -328,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", action="append", help="run only this case (repeatable)")
     parser.add_argument("--output", type=Path, default=Path("tests/reports/live_llm_config_eval.json"))
-    parser.add_argument("--project-version", default="0.4.1")
+    parser.add_argument("--project-version", default="0.5.0")
     args = parser.parse_args(argv)
 
     settings = load_llm_settings()

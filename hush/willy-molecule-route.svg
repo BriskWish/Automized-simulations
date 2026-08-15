@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Node-built W monogram</title>
+  <desc id="desc">Five molecular nodes and their bonds make a compact geometric W letter.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M88 130 158 366 256 188 354 366 424 130" stroke="#17324D" stroke-width="18"/>
+    <path d="M88 130 256 188 424 130" stroke="#2A9D8F" stroke-width="10" opacity=".75"/>
+    <path d="M158 366h196" stroke="#E9C46A" stroke-width="10" opacity=".8"/>
+  </g>
+  <g stroke="#F4F1EA" stroke-width="9">
+    <circle cx="88" cy="130" r="31" fill="#17324D"/>
+    <circle cx="158" cy="366" r="34" fill="#2A9D8F"/>
+    <circle cx="256" cy="188" r="34" fill="#E76F51"/>
+    <circle cx="354" cy="366" r="34" fill="#2A9D8F"/>
+    <circle cx="424" cy="130" r="31" fill="#17324D"/>
+  </g>
+  <g fill="#E9C46A">
+    <circle cx="88" cy="130" r="10"/>
+    <circle cx="424" cy="130" r="10"/>
+  </g>
+</svg>

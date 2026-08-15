@@ -232,7 +232,10 @@ def _apply_defaults(config_dict: dict) -> dict:
     out.setdefault("execution", {})
     execution = out["execution"]
     execution["md"] = merge_execution_md_defaults(execution.get("md"))
-    return out
+    # All local engines consume this shared run-local configuration.  Bound
+    # defaults and explicit molecule overrides once here before writing it.
+    from willy.execution_resources import normalize_config_nproc
+    return normalize_config_nproc(out).config
 
 
 def migrate_md_config(

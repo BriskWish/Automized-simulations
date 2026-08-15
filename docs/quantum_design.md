@@ -60,8 +60,10 @@ Step 3: RESP 电荷
 
 ### 2.1 算力配置
 
-`config.json.defaults.nproc` 是量子与本地 GROMACS 主计算的 CPU 默认值，默认 `8`；
-`molecules.<name>.nproc` 可以覆盖单个分子的 G16/G09/ORCA 结构优化和单点。
+`config.json.defaults.nproc` 是量子与本地 GROMACS 主计算的 CPU 默认值，默认上限为 `8`；
+启动前会扫描当前系统可用 CPU 核数，未显式指定时写入 `min(8, CPU核数)`。
+`molecules.<name>.nproc` 可以覆盖单个分子的 G16/G09/ORCA 结构优化和单点，但任何显式值
+都不会超过当前系统核数。超出时只给出用户可见警告并将值钳制后继续运行，不因资源建议阻塞任务。
 `defaults.mem` 与分子级 `mem` 同样传给 Gaussian；ORCA 运行副本将其换算为
 每核的 `%maxcore`，并与 `%pal nprocs ... end` 一起写入。原始 `.gjf/.inp`
 始终不改写，资源指令只出现在私有运行输入中。
@@ -229,7 +231,7 @@ ORCA 新任务不再依赖将 `.gjf` 静默转写成 `.inp`。`struct_orca` 消�
 3. 缺文件、格式错误、坐标不完整、后端输入类型不匹配或未能得到电荷/多重度时，不创建可确认方案。总净电荷不为零时，只返回明确的电荷不平衡提示；除非用户另行声明受支持的补偿/非中性策略，否则不能启动。
 4. `start_pipeline()` 和 `PipelineOrchestrator._prepare_run_directory()` 在写入或复制输入前再次审计同一后端、同一组分、同一数目。二次审计失败不得创建有效 run，也不得用旧的 `config.json` 电荷兜底。
 
-实现位置：`quantum/input_audit.py` 负责只读解析和契约比较；`toolist_global.py` 暴露审计工具；`agent_config.py` 要求模型调工具并冻结审计值；`pipeline_orchestrator.py` 复制对应后缀的原始文件；`struct_orca.py` 只执行原始 `.inp`。
+实现位置：`quantum/input_audit.py` 负责只读解析和契约比较；`toolist_global.py` 暴露审计工具；`agent_config.py` 要求模型调工具并固定本轮审计值，修改待确认方案时重新审计并覆写候选；`pipeline_orchestrator.py` 复制对应后缀的原始文件；`struct_orca.py` 只执行原始 `.inp`。
 
 ### 10.4 验收
 

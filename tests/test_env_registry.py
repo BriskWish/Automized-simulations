@@ -51,17 +51,26 @@ def test_dotenv_standard_override_is_loaded_from_project_root(tmp_path, monkeypa
     assert result.executable == gmx.resolve()
 
 
-def test_gmx_does_not_fall_back_to_path(tmp_path, monkeypatch):
+def test_standard_binary_falls_back_to_path(tmp_path, monkeypatch):
     path_gmx = _executable(tmp_path / "gmx")
     monkeypatch.delenv("WILLY_GMX_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
 
     result = resolve_tool("gmx", project_root=tmp_path)
 
-    assert path_gmx.exists()
-    assert result.status == MISSING
-    assert result.source == "willy_env"
-    assert result.public_reason == "未设置 WILLY_GMX_BIN"
+    assert result.status == AVAILABLE
+    assert result.source == "path"
+    assert result.executable == path_gmx.resolve()
+
+
+def test_gmx_child_environment_inherits_path(tmp_path, monkeypatch):
+    _executable(tmp_path / "gmx")
+    monkeypatch.delenv("WILLY_GMX_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    child_env = build_tool_env("gmx", base_env={"PATH": "/opt/gromacs/bin"})
+
+    assert child_env["PATH"] == "/opt/gromacs/bin"
 
 
 def test_dotenv_value_uses_process_environment_before_dotenv(tmp_path, monkeypatch):

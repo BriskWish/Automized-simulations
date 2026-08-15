@@ -1,6 +1,6 @@
 # 运行助理开发方案
 
-> 状态：Phase A 与性能/可靠性升级核心实现完成；EQ 失败后的提案、替代方案、明确授权和受控重跑已实现；用户中止后的显式 `/resume` 与 `/fork` 已实现；实际建盒审计查询已实现。当前版本的成熟方案只验收受支持 profile 十步完成且最终无错误；科学体系预测、后处理/分析和远程执行不在本版本范围内。项目说明与架构问答已并入方案助理的只读子模式；Phase B-D 的其余增强仍为后续工作。
+> 状态：Phase A 与性能/可靠性升级核心实现完成；EQ 失败后的提案、替代方案、明确授权和受控重跑已实现；用户中止后的显式 `/resume` 与 `/fork`、按 run 历史持久化和严格 `/switch` 已实现；实际建盒审计查询已实现。当前版本的成熟方案只验收受支持 profile 十步完成且最终无错误；科学体系预测、后处理/分析和远程执行不在本版本范围内。项目说明与架构问答已并入方案助理的只读子模式；Phase B-D 的其余增强仍为后续工作。
 > 最后核验：2026-08-14
 > 责任边界：0 号负责跨层契约和验收；3 号负责运行控制与模拟执行接口；4 号负责前端交互；各层工程师负责本层失败报告的准确性。
 
@@ -45,9 +45,9 @@ Phase A 之前的基线与目标如下：
 
 初版已提供历史列表和只读运行观察。EQ 协议调整的受控重跑已落地：失败后只创建待确认动作，方案会列出允许复审的 EQ 参数；带 `pending_action` 的 `awaiting_confirmation` 表示“LLM 已返回当前方案、尚未得到用户明确确认”，不能回退为未知、重试中或运行中。诊断证据同时支持多个可能原因时，动作可含最多 3 个相互独立的候选方案；每项公开可能原因、证据摘要、核心修改和重跑起点。用户回复“方案1/方案一/选择方案1”只选择该项并保持等待；回复“确认方案1/确认方案一”才同时选择并授权执行。未选择时的“确认”不启动任何进程。只有当前工程仍携带 `pending_action` 的 `awaiting_confirmation` 时，用户提出明确的参数或阶段修正才能请求替代方案、无歧义批准语才能启动受控重跑；其他状态下的同类文本仍只读解释，不具备控制权限。替代方案会生成新的 `action_id`，原方案失效，配置在再次明确确认前保持不变；确认接口在成功保留启动锁后立即写入 `retrying`，随后由受控子进程流转到 `running`。启动失败时恢复原 `awaiting_confirmation` 快照。当前受限动作只允许从 Step 9 重跑 EQ；真空区和密度只作为诊断证据，不会强制回到 Step 7 重建盒子。不开放任意 run、任意路径或任意步骤的通用 resume。替代方案若未通过后端校验，运行助理将显示脱敏的具体原因而非统一失败文案，原动作保持可见、可继续修改或确认；拒绝原因来自服务器的字段/范围/快照校验，不是 LLM 对运行结果的解释。
 
-G06 对中止 run 增加了严格受限的例外，而非任意 resume：只有完整 `/resume` 或 `/fork` 会在调用只读 Agent 前进入确定性控制分支。`/resume` 重新读取原 run 的冻结 `config.json`，在原目录从首个未完成步骤恢复；`/fork path=value` 或 `/fork {JSON}` 只能修改首次消费步骤不早于停止步骤的既有 `topology`、`box`、`md` 或 `execution` 字段，创建带 `parent_run_id` 的子 run，并从 Step 4 或 Step 6 的安全边界重放。普通文本和不完整命令仍只读。带 `pending_action` 的 `awaiting_confirmation` 仍专用于 EQ 方案；过早、未知或未变化的 fork 参数被拒绝后，父 run 通过 CAS 回到无 `pending_action` 的 `awaiting_confirmation`，只等待下一条显式命令。
+G06 对中止 run 增加了严格受限的例外，而非任意 resume：只有完整 `/resume` 或 `/fork` 会在调用只读 Agent 前进入受控分支。`/resume` 重新读取原 run 的冻结 `config.json`，在原目录从首个未完成步骤恢复；`/fork path=value` 或 `/fork {JSON}` 继续以确定性路径直接校验。完整 `/fork` 后的自然语言可调用无工具 LLM 生成候选字段和值，例如“重跑 EQ 段，tau_p 设置为 1”只能映射为 `md.eq.tau_p=1`；服务端重新校验字段归属、停止步骤、配置 schema 和指纹后，写入独立 `pending_fork`，用户回复“确认 fork/同意 fork”才创建带 `parent_run_id` 的子 run，并从 Step 4 或 Step 6 的安全边界重放。子 run 在进入 `retrying` 前必须初始化自己的私有 simulation/protocol manifest；它只复制边界之前的科学输入，绝不继承父 run 的 MDP、建盒、阶段许可、checkpoint、轨迹、配置修订或浏览器历史。LLM 不拥有文件、状态机或进程权限。普通文本和不完整命令仍只读。带 `pending_action` 的 `awaiting_confirmation` 仍专用于 EQ 方案；过早、未知或未变化的 fork 参数被拒绝后，父 run 通过 CAS 回到无 `pending_action` 的 `awaiting_confirmation`，只等待下一条显式命令。
 
-运行助理输入框仅在内容以 `/` 开头时显示本地 slash menu，提供 `/resume` 与 `/fork` 的补全、鼠标选择和方向键/Enter 选择；选择只回填命令文本，绝不提交或启动进程。菜单没有常驻布局空间，普通问答、其他面板及控制权限不受影响；提交后仍由服务端的命令解析、状态和启动锁校验裁决。
+运行助理输入框仅在内容以 `/` 开头时显示本地 slash menu，提供 `/resume`、`/fork` 与 `/switch` 的补全、鼠标选择和方向键/Enter 选择；选择只回填命令文本，绝不提交或启动进程。`/switch` 仅接受 `/switch md__YYYYMMDDHHMM` 或 `/switch YYYYMMDDHHMM`，其余数量或格式的参数全部拒绝；目标必须是 registry 中已存在的 run。菜单没有常驻布局空间，普通问答、其他面板及控制权限不受影响；提交后仍由服务端的命令解析、状态和启动锁校验裁决。
 
 ## 3. 运行数据契约
 
@@ -135,7 +135,7 @@ LLM 的系统提示必须明确：不运行 shell，不编辑源代码、配置�
 
 运行助理在每轮模型调用都将服务端选中的 `当前工程编号` 写入“不可修改事实”，并在再次 tool-call 前刷新剩余模型轮次和总时限。初始上下文仅选取状态、公开错误、ETA、建盒与环境的白名单摘要；**不**直接注入完整 `config.json`、日志尾部、绝对路径、产物清单或浏览器聊天历史。模型后续调用 `get_config`、`list_artifacts` 等只读工具时，返回内容同样会归约为配置字段摘要、数量或可用性统计，避免二轮 Prompt 重新扩张或泄露私有运行数据。
 
-配置方案助理复用同一契约，但其“冻结方案概要”仅用于待确认配置的增量修改，候选方案仍须通过量子输入审计和 workflow schema 校验。共享模块定义权限、证据、预算与输出边界；`agent_config.py`、`agent_run.py` 各自保留领域规则和实际 tool 白名单。当前实现不把模型输出当作状态机或动作契约的授权依据。
+配置方案助理复用同一契约。方案生成和明确修改阶段只保存会话级“待确认方案概要”，供下一轮增量修改使用；它不是运行配置冻结，也不会写入根目录 `config.json`。用户提出修改后，服务端以当前待确认候选为基线重新生成，并再次执行量子输入审计、workflow schema 校验和执行边界校验；全部通过后才覆写待确认候选。只有用户明确确认开始运行后，`start_pipeline()` 才重复审计、取得启动锁并写入最终运行配置，随后由运行器复制 run-local 快照。共享模块定义权限、证据、预算与输出边界；`agent_config.py`、`agent_run.py` 各自保留领域规则和实际 tool 白名单。当前实现不把模型输出当作状态机或动作契约的授权依据。
 
 ### 4.2 MD 运行知识库（本轮已实现，维护契约）
 
@@ -196,11 +196,11 @@ src/willy/agent_run.py          # 运行问题的只读对话编排
 src/willy/toolist_run.py        # 只读 LLM tool schema 与 handler
 ```
 
-已完成：`PipelineOrchestrator` 在创建 run 时注册 manifest、写入脱敏外部工具能力报告，并在每个状态转换时同步 run 状态和事件；GROMACS `mdrun -v` 的 ETA 与阶段产物心跳会被归约为 `mdrun_eta.json`，并每 15 秒刷新 run 内状态快照而不扩张事件流。`RunRegistry` 以只读、安全字段和本地化展示时间供运行助理查询；`frontend_api.py` 只经 `RunRegistry` 读取运行信息。`app.py` 将欢迎语固定为对话框的第一个独立气泡，并关闭 Gradio 对连续助理消息的视觉合并。浏览器会话维护同一 run 的显示时间线：当前状态卡由 `status_event_id` 绑定 run、状态、步骤、待确认动作和公开错误事件；同一身份内 ETA、心跳或进度文字只原位刷新。身份改变时，旧状态卡封存为历史，随后新建当前状态卡；公开错误以 `run_id + state_revision`、待确认调整以 `run_id + action_id` 各自作为独立、去重且持久的事件气泡。状态卡、错误和方案在当前会话内不再合并或截断；切换 run 时一并清空并从欢迎语和新 run 状态重新开始。可用 ETA 在状态气泡中简写为“当前步骤预计结束：<本地时间>”。状态、公开错误与待确认动作必须从同一个当前 `run_id` 快照读取，绝不扫描历史等待项；状态和事件气泡属于显示历史，不传入 LLM。浏览器内的普通对话也绑定该 run，工程切换后先重置为欢迎消息再向 LLM 传递上下文。确认停止会公开 `stopping` 与最终 `aborted`，运行助理只解释该持久化事实，不执行停止操作。为保证高影响控制不经模型推断，文本“中止”“暂停”“稍后”等只保留工程当前状态；只有独立的“中止流水线”按钮经第二次点击才调用停止入口。`agent_run.py` 和其 tool list 仍严格只读。`agent_run.py` 是按请求创建的无状态 Agent；对话历史仅保留在浏览器会话，不作为运行事实或审计记录。
+已完成：`PipelineOrchestrator` 在创建 run 时注册 manifest、写入脱敏外部工具能力报告，并在每个状态转换时同步 run 状态和事件；GROMACS `mdrun -v` 的 ETA 与阶段产物心跳会被归约为 `mdrun_eta.json`，并每 15 秒刷新 run 内状态快照而不扩张事件流。`RunRegistry` 以只读、安全字段和本地化展示时间供运行助理查询；`frontend_api.py` 只经 `RunRegistry` 解析运行身份。`app.py` 将欢迎语固定为对话框的第一个独立气泡，并关闭 Gradio 对连续助理消息的视觉合并。每个 run 的有界显示历史原子保存为 `run_assistant_history.json`；刷新页面或用 `/switch` 切换工程时只加载目标 run 的记录，不扫描或合并其他工程。当前状态卡由 `status_event_id` 绑定 run、状态、步骤、待确认动作和公开错误事件；同一身份内 ETA、心跳或进度文字只原位刷新。身份改变时，旧状态卡封存为历史，随后新建当前状态卡；公开错误以 `run_id + state_revision`、待确认调整以 `run_id + action_id` 各自作为独立、去重的事件气泡。可用 ETA 在状态气泡中简写为“当前步骤预计结束：<本地时间>”。状态、公开错误与待确认动作必须从同一个选中 `run_id` 快照读取；显示事件不会作为运行事实，也不传入 LLM 工具。`/resume` 保持原 run 绑定，成功 `/fork` 自动跟随新的子 run；`/switch` 在源、目标 `events.jsonl` 分别写切出/切入事件。确认停止会公开 `stopping` 与最终 `aborted`，运行助理只解释该持久化事实，不执行停止操作。`agent_run.py` 和其 tool list 仍严格只读。
 
-`agent_run.py` 与其 tool list 保持严格只读。控制例外均位于 `frontend_api`：`revise_pending_action` 仅在同一 run 带 `pending_action` 的 `awaiting_confirmation` 时生成并校验替代方案；`run_assistant_control_command` 只接受完整 `/resume` 与 `/fork`，在调用只读 Agent 前处理。后者只针对用户中止的当前 run，重新校验状态 revision、启动锁、冻结配置、断点和参数归属；不匹配的普通文本仍进入只读问答。浏览器会话历史可以保留给界面显示，但不会透传给运行助理模型；当前工程的服务端事实始终优先。
+`agent_run.py` 与其 tool list 保持严格只读。控制例外均位于 `frontend_api`：`revise_pending_action` 仅在同一 run 带 `pending_action` 的 `awaiting_confirmation` 时生成并校验替代方案；`run_assistant_control_command` 只接受完整 `/resume`、`/fork` 与 `/switch`，在调用只读 Agent 前处理。前两者重新校验状态 revision、启动锁、冻结配置、断点和参数归属；`/switch` 只改变当前展示绑定，不修改状态机、配置或进程。持久化浏览器历史可以保留给界面显示，但服务端运行事实始终优先。
 
-验收：可列出至少三个历史 run；选中旧 run 后能看到正确状态、步骤、失败原因和已登记产物；未确认或仅替换方案时不产生新进程、不改写配置；确认后先观察到 `retrying`，再观察到 `running` 和对应重跑阶段；中止 run 的 `/resume` 必须在原目录从安全步骤恢复，`/fork` 必须创建独立子 run 和 `parent_run_id`，过早参数必须被拒绝并返回等待状态。
+验收：可列出至少三个历史 run；刷新及 `/switch` 后恢复该 run 独立历史且不串工程；选中旧 run 后能看到正确状态、步骤、失败原因和已登记产物；未确认或仅替换方案时不产生新进程、不改写配置；确认后先观察到 `retrying`，再观察到 `running` 和对应重跑阶段；中止 run 的 `/resume` 必须在原目录从安全步骤恢复，`/fork` 必须创建独立子 run 和 `parent_run_id`，过早参数必须被拒绝并返回等待状态。
 
 ### Phase B：错误解释与 MD 指导
 
