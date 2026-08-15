@@ -230,8 +230,9 @@ GitHub 的 Contributors 图由默认分支上的提交作者自动统计。项�
 
 ### 第三方组件引用与著作权
 
-Willy 集成并编排第三方科学软件，但 Willy 作者不拥有其原始项目的著作权。研究工作如使用了 Willy 集成的 Sobtop 参数化路径及其中涉及的 Multiwfn 工作，请至少引用以下文献：
+Willy 集成并编排第三方科学软件，但 Willy 作者不拥有其原始项目的著作权。研究工作如使用了 Willy 集成的 Sobtop 参数化路径、 Multiwfn 电荷生成等内容，请至少引用以下文献/网页：
 
+- Tian Lu, Sobtop, Version [当前版本], http://sobereva.com/soft/Sobtop (accessed on 日 月 年)　注：此处的时期是你最后访问本页面的日期
 - Tian Lu, Feiwu Chen, *Multiwfn: A Multifunctional Wavefunction Analyzer*, *Journal of Computational Chemistry* **33**, 580-592 (2012). DOI: [10.1002/jcc.22885](https://doi.org/10.1002/jcc.22885)
 - Tian Lu, *A comprehensive electron wavefunction analysis toolbox for chemists, Multiwfn*, *Journal of Chemical Physics* **161**, 082503 (2024). DOI: [10.1063/5.0216272](https://doi.org/10.1063/5.0216272)
 
