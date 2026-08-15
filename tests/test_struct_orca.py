@@ -28,6 +28,7 @@ def _fake_orca_process(calls: list[list[str]], runtime_inputs: list[str] | None 
 
 def test_single_atom_opt_uses_private_sp_input_and_preserves_raw_input(tmp_path, monkeypatch):
     from willy.quantum import struct_orca
+    from willy.execution_resources import default_nproc
 
     raw_input = tmp_path / "Li.inp"
     original = "! B3LYP 6-311+G(d,p) Opt\n\n* xyz 1 1\nLi 0 0 0\n*\n"
@@ -40,15 +41,16 @@ def test_single_atom_opt_uses_private_sp_input_and_preserves_raw_input(tmp_path,
     monkeypatch.setattr(struct_orca, "run_managed_command", _fake_orca_process(calls, runtime_inputs))
 
     result = struct_orca.run_one("Li", {"charge": 1, "spin": 1}, {}, str(tmp_path))
+    expected_nproc = default_nproc()
 
     assert result.success is True
-    assert result.extra == {"nproc": 8, "single_atom_fallback": "sp"}
+    assert result.extra == {"nproc": expected_nproc, "single_atom_fallback": "sp"}
     assert raw_input.read_text(encoding="utf-8") == original
     assert calls[0] == ["orca", "Li__single_atom_sp__willy_run.inp"]
     assert not (tmp_path / "Li__single_atom_sp.inp").exists()
     assert not (tmp_path / "Li__single_atom_sp__willy_run.inp").exists()
     assert "%maxcore 5000" in runtime_inputs[0]
-    assert "%pal nprocs 8 end" in runtime_inputs[0]
+    assert f"%pal nprocs {expected_nproc} end" in runtime_inputs[0]
     assert not list(tmp_path.glob("Li__single_atom_sp.*"))
     assert (tmp_path / "Li.gbw").exists()
     assert (tmp_path / "Li.molden").exists()
