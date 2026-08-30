@@ -179,7 +179,16 @@ def _create_sdk_client(api_key: str, base_url: str):
         from openai import OpenAI
     except ImportError as exc:  # pragma: no cover - dependency declared by project
         raise LLMConfigError("未安装 OpenAI Python SDK") from exc
-    return OpenAI(api_key=api_key, base_url=base_url)
+    except Exception as exc:
+        raise LLMConfigError(
+            "OpenAI Python SDK 或其传输依赖不兼容，请使用项目虚拟环境重新安装依赖"
+        ) from exc
+    try:
+        return OpenAI(api_key=api_key, base_url=base_url)
+    except Exception as exc:
+        raise LLMConfigError(
+            "OpenAI Python SDK 初始化失败，请使用项目虚拟环境重新安装依赖"
+        ) from exc
 
 
 def form_llm_settings(api_key: str, base_url: str, model: str) -> LLMSettings:

@@ -96,6 +96,31 @@ def test_configured_client_uses_resolved_endpoint_and_model(tmp_path, monkeypatc
     assert settings.base_url == "https://example.test/v1"
 
 
+def test_sdk_import_dependency_failure_is_a_safe_configuration_error(monkeypatch):
+    import builtins
+    import willy.llm_config as llm_config
+
+    original_import = builtins.__import__
+
+    def broken_openai_import(name, *args, **kwargs):
+        if name == "openai":
+            raise AttributeError("SocketTimeoutError")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_openai_import)
+    settings = LLMSettings(
+        api_key="test-secret",
+        base_url="https://example.test/v1",
+        model="compatible-model",
+        source="form",
+    )
+
+    with pytest.raises(LLMConfigError, match="传输依赖不兼容") as error:
+        llm_config.create_openai_client(settings)
+
+    assert "SocketTimeoutError" not in str(error.value)
+
+
 def test_stale_managed_mode_cannot_route_to_gateway_and_falls_back_to_local_key(tmp_path, monkeypatch):
     (tmp_path / "managed_gateway.json").write_text(
         '{"schema_version":1,"profile_id":"home-gateway","label":"Home gateway","base_url":"https://gateway.example.test","model":"willy-default"}',
