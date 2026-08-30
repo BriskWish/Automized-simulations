@@ -1106,7 +1106,7 @@ def get_molecule_catalog() -> dict[str, dict[str, str]]:
 
 
 def flatten_catalog(catalog: dict[str, dict[str, str]]) -> list[str]:
-    """展平为 Gradio Dropdown 可用的 choice 列表。
+    """展平为前端选择器可用的 choice 列表。
 
     Example: ['🟢 阳离子', '  Li', '  ...']
     """
@@ -1197,6 +1197,12 @@ DEFAULT_STICK_RADIUS = 0.22
 VIEWER_SPHERE_SCALE_RANGE = (0.15, 0.65)
 VIEWER_STICK_RADIUS_RANGE = (0.08, 0.40)
 VIEWER_SPHERE_RENDER_FACTOR = 0.5
+DEFAULT_VIEWER_BACKGROUND = "beige"
+VIEWER_BACKGROUNDS = {
+    "beige": "#eee9e2",
+    "white": "#ffffff",
+    "silver": "#e5eaed",
+}
 _VIEWER_ELEMENT_LEGEND = {
     "H": ("氢", "#FFFFFF"),
     "C": ("碳", "#909090"),
@@ -1469,6 +1475,15 @@ def _viewer_style_value(
     return max(value_range[0], min(value_range[1], parsed))
 
 
+def _viewer_background_color(value: object) -> str:
+    """Resolve a named viewer background without embedding browser input."""
+    if isinstance(value, str):
+        color = VIEWER_BACKGROUNDS.get(value)
+        if color is not None:
+            return color
+    return VIEWER_BACKGROUNDS[DEFAULT_VIEWER_BACKGROUND]
+
+
 def _render_viewer_html(
     mol_data: str,
     fmt: str,
@@ -1476,6 +1491,7 @@ def _render_viewer_html(
     display_name: str,
     sphere_scale: float | int | None = DEFAULT_SPHERE_SCALE,
     stick_radius: float | int | None = DEFAULT_STICK_RADIUS,
+    background: str | None = DEFAULT_VIEWER_BACKGROUND,
 ) -> str:
     """Render one already-authorized PDB/MOL2 structure in the embedded viewer."""
     sphere_scale = (
@@ -1485,6 +1501,7 @@ def _render_viewer_html(
     )
     stick_radius = _viewer_style_value(
         stick_radius, DEFAULT_STICK_RADIUS, VIEWER_STICK_RADIUS_RANGE)
+    background_color = _viewer_background_color(background)
 
     if fmt == "pdb":
         mol_data = _pdb_with_explicit_elements(mol_data)
@@ -1495,7 +1512,7 @@ def _render_viewer_html(
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#eee9e2}}
+html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:{background_color}}}
 #v{{width:100%;height:100%;position:absolute;top:0;left:0}}
 </style></head><body>
 <div id="v"></div>
@@ -1504,7 +1521,7 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
 (function(){{
   function init(){{
     if(typeof $3Dmol==="undefined"){{setTimeout(init,150);return;}}
-    var v=$3Dmol.createViewer("v",{{backgroundColor:"#eee9e2"}});
+    var v=$3Dmol.createViewer("v",{{backgroundColor:"{background_color}"}});
     var model=v.addModel({mol_json},"{fmt}",{{keepH:true}});
     v.setStyle({{}},{{stick:{{radius:{stick_radius:.2f},colorscheme:"Jmol"}},sphere:{{scale:{sphere_scale:.2f},colorscheme:"Jmol"}}}});
     // Use the same fixed color table as the legend for all known elements.
@@ -1534,11 +1551,12 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
     import html as _h
     safe_display_name = _h.escape(display_name)
     return (
-        f'<div class="structure-viewer-frame" style="background:#eee9e2;border-radius:6px;display:grid;'
-        f'grid-template-rows:minmax(0,1fr) auto;height:43.2rem;min-height:0;overflow:hidden">'
+        '<style>html,body{width:100%;height:100%;margin:0;overflow:hidden}.structure-viewer-frame{height:100%!important}</style>'
+        f'<div class="structure-viewer-frame" style="background:{background_color};border-radius:6px;display:grid;'
+        f'grid-template-rows:minmax(0,1fr) auto;height:100%;min-height:0;overflow:hidden">'
         f'<iframe srcdoc="{_h.escape(html)}" style="width:100%;height:100%;border:none" '
         f'sandbox="allow-scripts allow-same-origin"></iframe>'
-        f'<div class="structure-viewer-name">{safe_display_name}</div>'
+        f'<div class="structure-viewer-name" style="text-align:center">{safe_display_name}</div>'
         f'</div>'
     )
 
@@ -1547,6 +1565,7 @@ def render_viewer_html(
     mol_choice: str | None = None,
     sphere_scale: float | int | None = DEFAULT_SPHERE_SCALE,
     stick_radius: float | int | None = DEFAULT_STICK_RADIUS,
+    background: str | None = DEFAULT_VIEWER_BACKGROUND,
 ) -> str:
     """Render a legacy structure-library selection for compatibility callers."""
     viewer_data = get_molecule_viewer_data(mol_choice) if mol_choice else None
@@ -1559,6 +1578,7 @@ def render_viewer_html(
         Path(str(viewer_data["file_path"])).stem,
         sphere_scale,
         stick_radius,
+        background,
     )
 
 
@@ -1566,6 +1586,7 @@ def render_run_visualization_html(
     choice: str | None,
     sphere_scale: float | int | None = DEFAULT_SPHERE_SCALE,
     stick_radius: float | int | None = DEFAULT_STICK_RADIUS,
+    background: str | None = DEFAULT_VIEWER_BACKGROUND,
     *,
     run_id: str | None = None,
 ) -> str:
@@ -1583,6 +1604,7 @@ def render_run_visualization_html(
         str(viewer_data["label"]),
         sphere_scale,
         stick_radius,
+        background,
     )
 
 

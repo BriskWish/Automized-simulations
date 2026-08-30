@@ -69,6 +69,14 @@ def write_json(path: str | Path, payload: Any) -> Path:
     return target
 
 
+def write_text(path: str | Path, content: str) -> Path:
+    """Atomically replace a UTF-8 text file while holding its writer lock."""
+    target = Path(path)
+    with _exclusive_lock(target):
+        _atomic_write_bytes_unlocked(target, content.encode("utf-8"))
+    return target
+
+
 def copy_file(path: str | Path, destination: str | Path) -> Path:
     """Copy a file through an atomic replacement at the destination."""
     source = Path(path)

@@ -1,125 +1,48 @@
-"""Browser acceptance path for the real UI and an in-memory executor."""
+"""Browser acceptance for the built FastAPI/React workbench."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-import socket
+import shutil
 import subprocess
-import sys
-import time
 
-import httpx
 import pytest
 
 
 pytestmark = pytest.mark.e2e
+ROOT = Path(__file__).resolve().parents[2]
+FRONTEND = ROOT / "frontend"
 
 
 def _browser_unavailable(message: str) -> None:
-    """Skip local convenience runs but fail an explicitly required CI gate."""
     if os.environ.get("WILLY_E2E_REQUIRED", "").strip().lower() in {"1", "true", "yes"}:
         pytest.fail(message)
     pytest.skip(message)
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as socket_handle:
-        socket_handle.bind(("127.0.0.1", 0))
-        return int(socket_handle.getsockname()[1])
-
-
-@pytest.fixture
-def browser_api():
-    try:
-        from playwright import sync_api
-    except ImportError:
-        _browser_unavailable("requires the optional Playwright browser runtime")
-    return sync_api
-
-
-@pytest.fixture
-def fake_ui_server(tmp_path):
-    port = _free_port()
-    environment = dict(os.environ)
-    environment["WILLY_ROOT"] = str(tmp_path / "workspace")
-    process = subprocess.Popen(
-        [
-            sys.executable, "-m", "tests.e2e.fake_service",
-            "--root", environment["WILLY_ROOT"], "--port", str(port),
-        ],
-        cwd=Path(__file__).resolve().parents[2],
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+def _run_frontend_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=FRONTEND,
+        text=True,
+        capture_output=True,
+        timeout=90,
+        check=False,
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        try:
-            if httpx.get(base_url, timeout=0.5).status_code == 200:
-                break
-        except httpx.HTTPError:
-            pass
-        time.sleep(0.1)
-    else:
-        process.terminate()
-        process.wait(timeout=5)
-        pytest.fail("fake UI service did not start")
-    try:
-        yield base_url
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
 
 
-def test_browser_workflow_uses_fake_executor_without_touching_a_real_run(browser_api, fake_ui_server, tmp_path):
-    with browser_api.sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.launch(headless=True)
-        except browser_api.Error as exc:
-            _browser_unavailable(f"Playwright Chromium is unavailable: {exc}")
-        try:
-            page = browser.new_page(viewport={"width": 1440, "height": 1000})
-            # Gradio's timer keeps a polling request open, so network-idle is
-            # not a meaningful readiness signal for this page.
-            page.goto(fake_ui_server, wait_until="domcontentloaded", timeout=30_000)
-
-            page.locator("#app-title").get_by_text("Willy").wait_for(timeout=10_000)
-            run_panel = page.locator("#run-assistant")
-            run_panel.get_by_text("公开错误").wait_for(timeout=10_000)
-            run_panel.get_by_text("待确认的模拟调整").wait_for(timeout=10_000)
-
-            run_message = run_panel.locator("#run-message textarea")
-            run_message.fill("/")
-            slash_menu = page.locator("#run-slash-menu")
-            slash_menu.get_by_role("option", name="/resume 按原参数从安全步骤续跑").wait_for(timeout=10_000)
-            slash_menu.get_by_role("option", name="/resume 按原参数从安全步骤续跑").click()
-            assert run_message.input_value() == "/resume"
-            assert not slash_menu.is_visible()
-
-            run_panel.locator("textarea").fill("确认")
-            run_panel.get_by_role("button", name="发送").click()
-            run_panel.get_by_text("已确认，正在重跑").wait_for(timeout=10_000)
-
-            stop = page.locator("#stop-pipeline-button")
-            stop.wait_for(state="visible", timeout=10_000)
-            stop.click()
-            stop.get_by_text("确认中止").wait_for(timeout=5_000)
-            stop.click()
-            stop.get_by_text("正在安全停止").wait_for(timeout=10_000)
-
-            selector = page.locator("#structure-run-selector")
-            selector.locator("input[role='combobox']").click()
-            page.locator("#structure-run-selector [role='option'][aria-label='project-beta']").click()
-            page.locator("#structure-viewer").get_by_text("project-beta.pdb").wait_for(timeout=10_000)
-
-            screenshot = tmp_path / "browser-e2e.png"
-            page.screenshot(path=str(screenshot), full_page=True)
-            assert screenshot.stat().st_size > 0
-        finally:
-            browser.close()
+def test_browser_workflow_uses_the_built_react_workbench() -> None:
+    if shutil.which("npm") is None:
+        _browser_unavailable("requires npm and the frontend dependencies")
+    build = _run_frontend_command(["npm", "run", "build"])
+    if build.returncode:
+        pytest.fail(f"React production build failed:\n{build.stdout}\n{build.stderr}")
+    browser = _run_frontend_command(["npm", "run", "visual-check"])
+    if browser.returncode:
+        combined = f"{browser.stdout}\n{browser.stderr}"
+        if "Executable doesn't exist" in combined or "Cannot find package 'playwright'" in combined:
+            _browser_unavailable("requires the Playwright browser runtime")
+        pytest.fail(f"React browser acceptance failed:\n{combined}")
+    assert '"方案助理"' in browser.stdout
+    assert '"日志"' in browser.stdout

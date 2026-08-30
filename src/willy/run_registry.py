@@ -45,6 +45,7 @@ EVENTS_FILENAME = "events.jsonl"
 DECISION_TRACE_FILENAME = "decision_trace.jsonl"
 LEGACY_ENVIRONMENT_REPORT_FILENAME = "environment_report.json"
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _LOG_SUFFIXES = {".err", ".log", ".out", ".txt"}
 _MD_STAGE_STEPS = {
     stage: STEP_REGISTRY.index_for_stage(stage)
@@ -178,6 +179,45 @@ class RunRegistry:
             self._write_registry_manifest(directory, manifest, unified=unified)
         self._update_index(directory, manifest)
         return manifest
+
+    def set_display_name(self, run_id: str, display_name: str) -> dict[str, Any]:
+        """Set an ASCII display name while preserving the immutable run ID.
+
+        ``md_run/<run_id>`` remains the physical directory because its name is
+        referenced by the run manifest, events, pipeline lock and controlled
+        resume/fork commands.  The display name is the user-facing folder
+        label, recorded in the registry manifest and event log instead.
+        """
+        if not isinstance(display_name, str):
+            raise RunRegistryError("工程名称必须是文本")
+        normalized = display_name.strip()
+        if not _DISPLAY_NAME_RE.fullmatch(normalized):
+            raise RunRegistryError(
+                "工程名称只能包含英文字母、数字、下划线和连字符，长度不超过 64"
+            )
+        directory = self.resolve_run_id(run_id)
+        with self._status_lock(directory):
+            unified = self._load_unified_manifest(directory)
+            manifest = self._read_registry_manifest(directory, unified=unified)
+            previous = manifest.get("display_name")
+            if previous == normalized:
+                return {
+                    "run_id": directory.name,
+                    "display_name": normalized,
+                    "changed": False,
+                }
+            manifest["display_name"] = normalized
+            manifest["updated_at"] = _now()
+            manifest = self._write_registry_manifest(directory, manifest, unified=unified)
+        self.append_event(directory, "run_display_name_changed", {
+            "display_name": normalized,
+        })
+        self._update_index(directory, manifest)
+        return {
+            "run_id": directory.name,
+            "display_name": normalized,
+            "changed": True,
+        }
 
     def refresh_config_fingerprint(self, run_dir: str | Path) -> dict[str, Any]:
         """Refresh the registry manifest's hash for the final run config.
@@ -1581,6 +1621,7 @@ class RunRegistry:
                 snapshot = dict(status or {})
                 entries.append({
                     "run_id": directory.name,
+                    "display_name": manifest.get("display_name", ""),
                     "created_at": manifest.get("created_at", ""),
                     "updated_at": snapshot.get("updated_at", manifest.get("updated_at", _now())),
                     "backend": manifest.get("backend", ""),
@@ -1612,6 +1653,7 @@ class RunRegistry:
                 continue
             entries.append({
                 "run_id": directory.name,
+                "display_name": manifest.get("display_name", ""),
                 "created_at": manifest.get("created_at", ""),
                 "updated_at": status.get("updated_at", manifest.get("updated_at", "")),
                 "backend": manifest.get("backend", ""),

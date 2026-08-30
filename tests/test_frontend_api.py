@@ -1161,8 +1161,10 @@ def test_visualization_scans_only_pdb_and_mol2_from_current_run_directory(tmp_pa
     assert "&quot;mol2&quot;" in html
     assert "Li.mol2" in html
     assert 'class="structure-viewer-frame"' in html
-    assert "height:43.2rem" in html
-    assert '<div class="structure-viewer-name">Li.mol2</div>' in html
+    assert "height:100%" in html
+    assert "height:43.2rem" not in html
+    assert "background:#eee9e2" in html
+    assert '<div class="structure-viewer-name" style="text-align:center">Li.mol2</div>' in html
     assert str(run_dir) not in html
     assert "engine.log" not in str(frontend_api.get_run_visualization_choices())
     assert "linked-outside.pdb" not in frontend_api.get_run_visualization_choices()

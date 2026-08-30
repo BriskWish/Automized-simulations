@@ -12,6 +12,19 @@ from willy.quantum.input_audit import (
 )
 from willy.simulation.protocol import default_md_config
 from willy.run_metadata import load_run_manifest
+from willy.structure_uploads import load_uploaded_structures
+
+
+def _bundled_struct_paths(suffix: str):
+    """Return versioned profiles without mutable user-uploaded structures."""
+    from pathlib import Path
+
+    struct_dir = Path(__file__).resolve().parents[1] / "struct"
+    uploaded_names = {entry.name for entry in load_uploaded_structures(struct_dir.parent)}
+    return [
+        path for path in sorted(struct_dir.glob(f"*{suffix}"))
+        if path.stem not in uploaded_names
+    ]
 
 
 def _gjf(charge: int, spin: int = 1) -> str:
@@ -68,12 +81,12 @@ def test_imported_ionic_gjf_inputs_match_the_registered_filename_charges():
 
 
 def test_struct_gjf_headers_are_canonical_and_dmaa_is_removed():
-    """每个保留 GJF 都必须有相对 checkpoint、同名标题和 charge 行。"""
+    """每个内置 GJF 都必须有相对 checkpoint、同名标题和 charge 行。"""
     import re
     from pathlib import Path
 
     struct_dir = Path(__file__).resolve().parents[1] / "struct"
-    paths = sorted(struct_dir.glob("*.gjf"))
+    paths = _bundled_struct_paths(".gjf")
 
     assert paths
     assert not (struct_dir / "DMAA.gjf").exists()
@@ -86,12 +99,12 @@ def test_struct_gjf_headers_are_canonical_and_dmaa_is_removed():
 
 
 def test_every_retained_gjf_has_a_native_orca_input():
-    """每个保留 GJF 都应有可被 ORCA 原生审计器读取的同名 INP。"""
+    """每个内置 GJF 都应有可被 ORCA 原生审计器读取的同名 INP。"""
     from pathlib import Path
 
     struct_dir = Path(__file__).resolve().parents[1] / "struct"
-    names = sorted(path.stem for path in struct_dir.glob("*.gjf"))
-    inp_names = sorted(path.stem for path in struct_dir.glob("*.inp"))
+    names = sorted(path.stem for path in _bundled_struct_paths(".gjf"))
+    inp_names = sorted(path.stem for path in _bundled_struct_paths(".inp"))
     audit = audit_quantum_inputs("orca", {name: 1 for name in inp_names}, struct_dir=struct_dir)
 
     assert names == inp_names

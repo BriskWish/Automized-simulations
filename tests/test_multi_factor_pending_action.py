@@ -6,7 +6,6 @@ import json
 
 import pytest
 
-import app
 import willy.frontend_api as frontend_api
 from willy.run_registry import RunRegistry
 from willy.simulation.pending_action import (
@@ -111,13 +110,3 @@ def test_frontend_option_selection_keeps_status_waiting_and_config_unchanged(tmp
     )
     assert "已选择方案2" in reselection
     assert frontend_api.get_pending_action(run_id)["selected_option_id"] == "option_2"
-
-
-def test_text_option_parser_accepts_selection_and_confirmation_variants():
-    action = {"options": [{"option_id": "option_1"}, {"option_id": "option_2"}]}
-
-    assert app._pending_option_id("方案1", action) == "option_1"
-    assert app._pending_option_id("选择方案二", action) == "option_2"
-    assert app._pending_option_id("确认方案一", action) == "option_1"
-    assert app._is_option_confirmation("确认方案一") is True
-    assert app._is_option_confirmation("方案1") is False

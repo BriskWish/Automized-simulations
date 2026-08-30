@@ -6,7 +6,10 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+.history/
 .venv/
+node_modules/
+test-results/
 .willy/
 .pipeline.lock
 startup_audit.json
@@ -17,6 +20,9 @@ config.json.bak
 .config.json.bak.lock
 *:Zone.Identifier
 vendor/sobtop/.willy-sobtop.lock
+docs/.*.lock
+struct/.*.lock
+struct/.willy_uploaded_structures.json
 prompt.txt
 
 # Gateway deployment-only credentials and runtime state. Source code under

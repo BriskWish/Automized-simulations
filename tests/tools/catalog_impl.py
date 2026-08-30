@@ -21,7 +21,7 @@ CATEGORIES = {
     "A": {
         "title": "UI 与前端交互",
         "files": {"test_app_ui.py", "test_frontend_api.py", "test_browser_workflow.py", "test_e2e_gate.py"},
-        "description": "Gradio 布局、确认式操作、可视化、状态展示、公开错误边界与 fake-executor 浏览器验收。",
+        "description": "FastAPI/React 工作台、确认式操作、可视化、审计日志、状态展示、公开错误边界与浏览器验收。",
     },
     "B": {
         "title": "环境与基础错误模型",
@@ -33,8 +33,8 @@ CATEGORIES = {
     },
     "C": {
         "title": "配置与全局工具",
-        "files": {"test_workflow_config.py", "test_toolist_global.py"},
-        "description": "config v2、迁移、分子知识库与 Layer 0 工具 schema/handler。",
+        "files": {"test_workflow_config.py", "test_toolist_global.py", "test_structure_uploads.py"},
+        "description": "config v2、迁移、分子知识库、结构上传规范化与 Layer 0 工具 schema/handler。",
     },
     "D": {
         "title": "Agent 与 LLM 行为",
@@ -112,8 +112,8 @@ CATEGORIES = {
 }
 
 FILE_TARGETS = {
-    "test_app_ui.py": "app.py UI 结构与交互状态",
-    "test_browser_workflow.py": "app.py 浏览器端到端 fake executor 验收",
+    "test_app_ui.py": "app.py FastAPI 工作台 API 契约",
+    "test_browser_workflow.py": "React 生产构建与浏览器验收",
     "test_agent_config.py": "willy.agent_config",
     "test_action_contract.py": "willy.action_contract",
     "test_env_checker.py": "willy.env_checker",
@@ -131,6 +131,7 @@ FILE_TARGETS = {
     "test_llm_eval_live_config_report.py": "tests.llm_eval.live_config_runner 脱敏配置实时评测报告",
     "test_llm_eval_live_protocol_report.py": "tests.llm_eval.live_protocol_runner 脱敏工具协议实测报告",
     "test_workflow_config.py": "willy.workflow_config 与 MD 配置协议",
+    "test_structure_uploads.py": "willy.structure_uploads 量子输入上传规范化",
     "test_log_parsers.py": "willy.log_parsers",
     "test_struct_orca.py": "willy.quantum.struct_orca",
     "test_mdrun_eta.py": "willy.simulation.mdrun_eta",

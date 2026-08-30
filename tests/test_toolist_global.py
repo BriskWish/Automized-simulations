@@ -133,6 +133,7 @@ class TestMoleculeRegistry:
         assert result["name"] == "TFSI"
 
     @pytest.mark.parametrize(("alias", "name", "charge", "spin", "atom_count"), [
+        ("Li⁺", "Li", 1, 1, 1),
         ("钠离子", "Na", 1, 1, 1),
         ("六氟砷酸根", "AsF6", -1, 1, 7),
         ("B(CN)4-", "BCN4", -1, 1, 9),
@@ -147,6 +148,25 @@ class TestMoleculeRegistry:
         assert (result["name"], result["charge"], result["spin"], result["atom_count"]) == (
             name, charge, spin, atom_count,
         )
+
+    def test_uploaded_divalent_ion_uses_core_name_and_charge_alias(self, tmp_path, monkeypatch):
+        import willy.toolist_global as tg
+
+        (tmp_path / "struct").mkdir()
+        (tmp_path / "struct" / "Ca.gjf").write_text("#p test\n\nCa\n\n2 1\nCa 0 0 0\n")
+        (tmp_path / "struct" / ".willy_uploaded_structures.json").write_text(json.dumps({
+            "schema_version": 1,
+            "entries": [{
+                "name": "Ca", "format": ".gjf", "charge": 2, "spin": 1, "atom_count": 1,
+            }],
+        }))
+        monkeypatch.setattr(tg, "get_project_root", lambda: tmp_path)
+
+        registry = tg._MoleculeRegistry()
+        result = registry.lookup("Ca²⁺")
+
+        assert result is not None
+        assert (result["name"], result["charge"], result["spin"]) == ("Ca", 2, 1)
 
 
 # ============================================================

@@ -47,7 +47,7 @@ def test_acceptance_documents_match_the_generated_catalog() -> None:
     inline = f"{counts['pytest']} pytest + {counts['llm']} LLM = {counts['total']}"
     registry = f"（{counts['pytest']} 条 pytest、{counts['llm']} 条 LLM 场景，共 {counts['total']} 条记录）"
     assert inline in (ROOT / "docs" / "project_gap_analysis.md").read_text(encoding="utf-8")
-    assert inline in (ROOT / "docs" / "testing_strategy.md").read_text(encoding="utf-8")
+    assert inline in (ROOT / "docs" / "testing.md").read_text(encoding="utf-8")
     assert registry in (ROOT / "docs" / "document_registry.md").read_text(encoding="utf-8")
 
 
@@ -55,7 +55,7 @@ def test_registry_assigns_owners_to_current_acceptance_documents() -> None:
     registry = (ROOT / "docs" / "document_registry.md").read_text(encoding="utf-8")
     for document, owner in (
         ("project_gap_analysis.md", "0 号、5 号"),
-        ("testing_strategy.md", "6 号"),
+        ("testing.md", "6 号"),
         ("test_case_catalog.md", "6 号"),
     ):
         rows = [line for line in registry.splitlines() if document in line and line.startswith("|")]

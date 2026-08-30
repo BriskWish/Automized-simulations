@@ -1,0 +1,218 @@
+{
+  "acceptance": "passed",
+  "artifacts": [
+    {
+      "path": "em.tpr",
+      "sha256": "8a4dfd75cab53c0f7db742ad951799d94a35f798fb479d28b93854560e705033",
+      "size_bytes": 2948
+    },
+    {
+      "path": "em.gro",
+      "sha256": "4f317df1d1fcee86a6b53eab5bef521f0194eb040b11255318cef6adab909e47",
+      "size_bytes": 204
+    },
+    {
+      "path": "em.xtc",
+      "sha256": "fb310a2164880aa23956a1f974e455a7127a7b0d49d82f641dd9609d0f8ab40b",
+      "size_bytes": 92
+    },
+    {
+      "path": "em.edr",
+      "sha256": "e66f33bb3574e45ef9ac8d4375673aa04a60aef59686fa97d885cdf0056252ba",
+      "size_bytes": 728
+    },
+    {
+      "path": "em.log",
+      "sha256": "0740d9c9c4fdccdf22173e189ab546f0f6c5ab8862398da11b049f2ef2c80e61",
+      "size_bytes": 15091
+    },
+    {
+      "path": "em.trr",
+      "sha256": "d016146595cfa107949db630631530b3e8ea05d46cd0834070a043608ac19ffb",
+      "size_bytes": 156
+    },
+    {
+      "path": "eq.tpr",
+      "sha256": "56a0941d3b4bb14f997c0725f431d1689c1442e59726b70395b10b99c8191263",
+      "size_bytes": 2984
+    },
+    {
+      "path": "eq.gro",
+      "sha256": "85cb0d6dbb851e18d801782b62f3223c817e7685d81be4b83a4bd5f290bfc0bf",
+      "size_bytes": 276
+    },
+    {
+      "path": "eq.xtc",
+      "sha256": "dd2a2b52cc8e762267ed5456702adc30e1c76c2abc6e4093137de5b8f18ae223",
+      "size_bytes": 1012
+    },
+    {
+      "path": "eq.edr",
+      "sha256": "3a8c69e32b1dc470ac0012a0cf1ac4557acfd3357a784a982b5258c3d42741c3",
+      "size_bytes": 2620
+    },
+    {
+      "path": "eq.log",
+      "sha256": "a3c56560441f1e3bf920b7fcdf01d9ba4eae9036605bea7628568bd449ba73fa",
+      "size_bytes": 21458
+    },
+    {
+      "path": "eq.cpt",
+      "sha256": "f76bb2c607c95bc9ba04fb8206119798e6239785ebf13a8217b320928c55956f",
+      "size_bytes": 1076
+    },
+    {
+      "path": "prod.tpr",
+      "sha256": "dfbf77292a218cadc9e7279a2c64d437dd004d998438ec82b3e87857c3557f26",
+      "size_bytes": 2984
+    },
+    {
+      "path": "prod.gro",
+      "sha256": "d8d0f046e61d056d0a4ff0a61e7d926803d206f8bf26792053c3ae7a8bfd673b",
+      "size_bytes": 276
+    },
+    {
+      "path": "prod.xtc",
+      "sha256": "8a3ceaaeebcf4c8394b42ee6cb6adc2818e2391ade0fe5df4f56f27e49e42013",
+      "size_bytes": 1012
+    },
+    {
+      "path": "prod.edr",
+      "sha256": "e24fc13aac41d0be0b15b1ef1d7602988728c552cae74aa09d50b02f266fd49a",
+      "size_bytes": 2620
+    },
+    {
+      "path": "prod.log",
+      "sha256": "4f1f8ed55d89294d88b66bec51f38523ec639f640c0f11b0272006eafb3bc93f",
+      "size_bytes": 21463
+    },
+    {
+      "path": "prod.cpt",
+      "sha256": "c503522ea21ad194def945b2b53f556c526ca5be3bdc2cf4d3469f9b91e0df9f",
+      "size_bytes": 1076
+    }
+  ],
+  "evidence_verification_issues": [],
+  "execution_attempted": true,
+  "fixture_preflight": {
+    "capabilities": {
+      "gmx": {
+        "label": "GROMACS",
+        "reason": "",
+        "source": "dotenv",
+        "status": "available",
+        "tool_id": "gmx",
+        "version": null
+      }
+    },
+    "case_id": "gromacs_minimal",
+    "fixture_integrity": {
+      "bundle_id": "willy-g01-minimal-argon-v1",
+      "files": [
+        {
+          "path": "gromacs_minimal/topol.top",
+          "sha256": "83d6a836b0699561163e83c5ab724010f7e4a453e0c95632e3c085ac84f0ab36",
+          "size_bytes": 122
+        },
+        {
+          "path": "gromacs_minimal/g01_minimal.itp",
+          "sha256": "715d562f1a46b1d5e7df03f7a2a5b9027d353d4accee6aae30a940beb00f42a4",
+          "size_bytes": 359
+        },
+        {
+          "path": "gromacs_minimal/model.pdb",
+          "sha256": "16ae31c3b9db98c57cafeac5bf708eeecef731a0811ffb661bf59fbee1df1da2",
+          "size_bytes": 361
+        },
+        {
+          "path": "gromacs_minimal/em.mdp",
+          "sha256": "5ed0f84966ad8c07fa27e73f6b2d7994585af1effa5d1ae3b585610874b82dd8",
+          "size_bytes": 471
+        },
+        {
+          "path": "gromacs_minimal/eq.mdp",
+          "sha256": "9f7d5335f59c118c615a4376f0b8d0eecbe97918d26e6bc16b6e5d2004c47263",
+          "size_bytes": 595
+        },
+        {
+          "path": "gromacs_minimal/prod.mdp",
+          "sha256": "0055e521a024af5f01aa21801677ee1013160d7878a39d9b22e52d8b45f64a95",
+          "size_bytes": 527
+        }
+      ],
+      "issues": [],
+      "manifest_sha256": "1e8af5a27c4a15ecfc01a4d139806c3fd059a3d30b789f2d34586bbffac30e60",
+      "missing_files": [],
+      "ready": true
+    },
+    "fixture_issues": [],
+    "missing_fixtures": [],
+    "missing_tools": [],
+    "ready": true
+  },
+  "schema_version": 1,
+  "scope": "G-01b managed GROMACS minimal EM/EQ/PROD execution",
+  "stages": [
+    {
+      "artifact_names": [
+        "em.edr",
+        "em.gro",
+        "em.log",
+        "em.tpr",
+        "em.trr",
+        "em.xtc"
+      ],
+      "duration_s": 0.038,
+      "stage": "em",
+      "step_name": "md_em",
+      "success": true
+    },
+    {
+      "artifact_names": [
+        "eq.cpt",
+        "eq.edr",
+        "eq.gro",
+        "eq.log",
+        "eq.tpr",
+        "eq.xtc"
+      ],
+      "duration_s": 0.05,
+      "stage": "eq",
+      "step_name": "md_eq",
+      "success": true
+    },
+    {
+      "artifact_names": [
+        "prod.cpt",
+        "prod.edr",
+        "prod.gro",
+        "prod.log",
+        "prod.tpr",
+        "prod.xtc"
+      ],
+      "duration_s": 0.048,
+      "stage": "prod",
+      "step_name": "md_prod",
+      "success": true
+    }
+  ],
+  "structured_event_codes": [
+    "process_started",
+    "process_finished",
+    "process_started",
+    "process_heartbeat",
+    "process_finished",
+    "process_started",
+    "process_finished",
+    "process_started",
+    "process_finished",
+    "process_started",
+    "process_heartbeat",
+    "process_finished",
+    "process_started",
+    "process_finished",
+    "process_started",
+    "process_heartbeat",
+    "process_finished"
+  ]
+}

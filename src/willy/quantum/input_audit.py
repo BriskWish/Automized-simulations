@@ -155,6 +155,7 @@ def _parse_gjf(path: Path) -> dict[str, Any]:
         "charge": charge,
         "spin": multiplicity,
         "atom_count": atom_count,
+        "coordinates": coordinates,
         "directives": "route_card",
         "issues": issues,
     }
@@ -198,9 +199,27 @@ def _parse_orca_inp(path: Path) -> dict[str, Any]:
         "charge": charge,
         "spin": multiplicity,
         "atom_count": atom_count,
+        "coordinates": lines[start_index + 1:end_index],
         "directives": "orca_keywords",
         "issues": issues,
     }
+
+
+def inspect_quantum_input_file(path: str | Path) -> dict[str, Any]:
+    """Read one upload without exposing its path or unneeded directives.
+
+    This internal boundary is intentionally narrower than a general file
+    parser: only backend-native `.gjf` and `.inp` inputs are accepted, and the
+    caller receives coordinates, charge and multiplicity needed to build a
+    canonical replacement input.
+    """
+    input_path = Path(path)
+    suffix = input_path.suffix.casefold()
+    if suffix == ".gjf":
+        return _parse_gjf(input_path)
+    if suffix == ".inp":
+        return _parse_orca_inp(input_path)
+    raise ValueError("仅支持 .gjf 或 .inp 原始量子输入")
 
 
 def audit_quantum_inputs(

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "acceptance_id": "G-03",
+  "date": "2026-08-30",
+  "result": "blocked_preflight",
+  "execution_attempted": false,
+  "environment": {
+    "python": "3.11.7",
+    "gromacs": "2023.3",
+    "logical_cpu_count": 32
+  },
+  "tool_preflight": {
+    "gromacs": "ready",
+    "bundled_sobtop": "ready",
+    "quantum_orca": "unavailable",
+    "orca_2mkl": "unavailable"
+  },
+  "blocker": {
+    "kind": "quantum_orca_unavailable",
+    "summary": "The resolved orca command is not a quantum-chemistry ORCA executable, and the required orca_2mkl companion is unavailable."
+  },
+  "run_directory_state": "empty_after_cleanup",
+  "public_evidence_verified": true
+}

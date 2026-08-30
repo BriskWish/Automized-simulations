@@ -25,6 +25,11 @@ from willy.topology.validation import validate_topology_files, validate_topology
 SOBTOP_DIR = get_project_root() / "vendor" / "sobtop"
 SOBTOP_BIN = SOBTOP_DIR / "sobtop"
 _LOCK_PATH = SOBTOP_DIR / ".willy-sobtop.lock"
+# Some supported filesystems expose output mtimes at coarser precision than
+# ``time.time_ns()``.  The workspace lock and pre-launch cleanup remain the
+# primary current-output boundary; this tolerance avoids rejecting files that
+# were created by the active process but rounded down by the filesystem.
+_OUTPUT_MTIME_TOLERANCE_NS = 2_000_000_000
 
 
 def check_sobtop_ready() -> list[str]:
@@ -199,7 +204,8 @@ def make_itp_gro(inp: SobtopInput, output_dir: str | None = None) -> StepResult:
 
             not_current = [
                 str(path) for path in vendor_outputs.values()
-                if not path.is_file() or path.stat().st_mtime_ns < started_ns
+                if not path.is_file()
+                or path.stat().st_mtime_ns + _OUTPUT_MTIME_TOLERANCE_NS < started_ns
             ]
             if not_current:
                 return _failure(

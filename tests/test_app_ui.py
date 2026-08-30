@@ -1,1290 +1,352 @@
-"""Regression coverage for the Gradio conversation event adapters."""
+"""Contracts for the primary assistant-ui entry point."""
 
+import base64
+import json
 from pathlib import Path
-import app as app_module
+
+import app
+from willy.run_registry import RunRegistry
 
 
-def test_visualization_panel_refreshes_current_run_structures_on_focus():
-    config = app_module.app.get_config_file()
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
+RUN_ID = "md__202608260001"
+
+
+def _record_run(root: Path, run_id: str, *, state: str, step: int) -> None:
+    run_dir = root / "md_run" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.json").write_text("{}", encoding="utf-8")
+    registry = RunRegistry(root)
+    registry.register_run(run_dir, backend="g16", total_steps=10)
+    registry.record_status(run_dir, {"state": state, "step": step}, "status_updated")
+
+
+def test_app2_health_reports_the_independent_surface():
+    assert app.health() == {"status": "ok", "surface": "assistant-ui"}
+
+
+def test_app2_serves_the_existing_about_qr_asset():
+    response = app.official_account_qr()
+
+    assert response.path == app.OFFICIAL_ACCOUNT_QR
+    assert response.media_type == "image/jpeg"
+
+
+def test_app2_chat_adapts_assistant_ui_messages_to_the_existing_agent(monkeypatch):
+    calls = []
+
+    def fake_chat(message, history, pending_plan):
+        calls.append((message, history, pending_plan))
+        yield "", [*history, {"role": "assistant", "content": "方案已生成"}], None, {"id": "plan"}, None, None
+
+    monkeypatch.setattr(app, "chat", fake_chat)
+
+    reply = app.assistant_chat({
+        "threadId": "test-thread",
+        "messages": [
+            {"role": "assistant", "content": [{"type": "text", "text": "你好"}]},
+            {"role": "user", "content": [{"type": "text", "text": "Li 1"}]},
+        ],
+    })
+
+    assert calls == [("Li 1", [{"role": "assistant", "content": "你好"}], None)]
+    assert reply["text"] == "方案已生成"
+    assert app._threads["test-thread"]["pending_plan"] == {"id": "plan"}
+
+
+def test_app2_chat_rejects_non_list_messages():
+    try:
+        app.assistant_chat({"messages": "invalid"})
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        raise AssertionError("non-list messages must be rejected")
+
+
+def test_app2_declares_separate_proposal_and_run_assistant_routes():
+    routes = {
+        (route.path, method)
+        for route in app.app.routes
+        for method in getattr(route, "methods", set())
     }
 
     assert {
-        "visualization-panel",
-        "structure-run-selector",
-        "structure-selector",
-        "structure-viewer",
-        "structure-legend",
-    }.issubset(elem_ids)
-    assert "可视化" in str(config)
-    assert "运行目录" in str(config)
-    assert "结构文件" in str(config)
-    assert "focus" in str(config["dependencies"])
-    assert "_refresh_visualization_run_choices" in app_module.__dict__
-    assert "_refresh_visualization_file_choices" in app_module.__dict__
-    component_order = [
-        component["props"].get("elem_id")
-        for component in config["components"]
-    ]
-    assert component_order.index("structure-run-selector") < component_order.index("structure-legend")
-    assert component_order.index("structure-selector") < component_order.index("structure-legend")
-    assert component_order.index("structure-legend") < component_order.index("structure-viewer")
-    assert "legend-area-title" not in str(config)
-    dropdowns = {
-        component["props"].get("elem_id"): component["props"]
-        for component in config["components"]
-        if component["props"].get("elem_id") in {
-            "structure-run-selector", "structure-selector",
-        }
+        ("/api/proposal/chat", "POST"),
+        ("/api/runs", "GET"),
+        ("/api/runs/{run_id}/chat", "GET"),
+        ("/api/runs/{run_id}/chat", "POST"),
+        ("/api/runs/{run_id}/display-name", "PATCH"),
+        ("/api/runs/{run_id}/logs", "GET"),
+        ("/api/runs/{run_id}/stop", "POST"),
+        ("/api/runs/{run_id}/updates", "GET"),
+        ("/api/proposal/upload", "POST"),
+        ("/api/visualization", "GET"),
+    }.issubset(routes)
+
+
+def test_app2_lists_registered_local_task_directories_without_paths(tmp_path, monkeypatch):
+    older = "md__202608260001"
+    newer = "md__202608260002"
+    _record_run(tmp_path, older, state="aborted", step=5)
+    _record_run(tmp_path, newer, state="running", step=6)
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(app.frontend_api, "get_active_run_id", lambda: newer)
+
+    response = app.list_local_runs()
+
+    assert response["active_run_id"] == newer
+    assert {item["run_id"] for item in response["runs"]} == {older, newer}
+    assert all(set(item) == {"run_id", "display_name", "state", "updated_at"} for item in response["runs"])
+    assert str(tmp_path) not in str(response)
+
+
+def test_app2_display_name_is_frontend_only_and_preserves_run_state(tmp_path, monkeypatch):
+    _record_run(tmp_path, RUN_ID, state="aborted", step=5)
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+
+    run_dir = tmp_path / "md_run" / RUN_ID
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        manifest_path = run_dir / "manifest.json"
+    manifest_before = manifest_path.read_text(encoding="utf-8")
+    events_before = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+    status_before = (run_dir / "status.json").read_text(encoding="utf-8")
+    response = app.set_run_display_name(RUN_ID, {"display_name": "Li_eq_retry"})
+    mapping = json.loads((tmp_path / "md_run" / ".willy_display_names.json").read_text(encoding="utf-8"))
+    listed = app.list_local_runs()
+
+    assert response == {"run_id": RUN_ID, "display_name": "Li_eq_retry", "changed": True, "state": "aborted"}
+    assert run_dir.is_dir()
+    assert not (tmp_path / "md_run" / "Li_eq_retry").exists()
+    assert mapping == {"schema_version": 1, "names": {RUN_ID: "Li_eq_retry"}}
+    assert manifest_path.read_text(encoding="utf-8") == manifest_before
+    assert (run_dir / "events.jsonl").read_text(encoding="utf-8") == events_before
+    assert (run_dir / "status.json").read_text(encoding="utf-8") == status_before
+    assert RunRegistry(tmp_path).list_runs()[0]["display_name"] == ""
+    assert listed["runs"] == [{
+        "run_id": RUN_ID,
+        "display_name": "Li_eq_retry",
+        "state": "aborted",
+        "updated_at": RunRegistry(tmp_path).get_run_status(RUN_ID, reconcile=False)["updated_at"],
+    }]
+
+
+def test_app2_lists_status_snapshot_instead_of_a_stale_unknown_index(tmp_path, monkeypatch):
+    _record_run(tmp_path, RUN_ID, state="done", step=10)
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    index_path = tmp_path / "md_run" / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["runs"][0]["state"] = "unknown"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    response = app.list_local_runs()
+
+    assert response["runs"][0]["state"] == "done"
+
+
+def test_app2_display_name_rejects_non_ascii_label(tmp_path, monkeypatch):
+    _record_run(tmp_path, RUN_ID, state="aborted", step=5)
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+
+    try:
+        app.set_run_display_name(RUN_ID, {"display_name": "锂体系"})
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        raise AssertionError("non-ASCII display names must be rejected")
+
+
+def test_app2_logs_expose_only_the_selected_run_audit_records(tmp_path, monkeypatch):
+    _record_run(tmp_path, RUN_ID, state="aborted", step=5)
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+
+    response = app.run_logs(RUN_ID)
+
+    assert response["run_id"] == RUN_ID
+    assert response["manifest"]["filename"] == "run_manifest.json"
+    assert json.loads(response["manifest"]["content"])["run_id"] == RUN_ID
+    assert response["events"]["filename"] == "events.jsonl"
+    assert "status_updated" in response["events"]["content"]
+    assert response["manifest"]["truncated"] is False
+    assert response["events"]["truncated"] is False
+    assert str(tmp_path) not in str(response)
+
+
+def test_app2_proposal_upload_uses_the_existing_normalization_boundary(tmp_path, monkeypatch):
+    source = "! B3LYP 6-311+G(d,p) Opt\n\nLi source\n\n* xyz 1 1\nLi 0 0 0\n*\n"
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    app._threads.clear()
+    app._threads["proposal"] = {"pending_plan": {"id": "stale"}}
+
+    response = app.proposal_upload({
+        "filename": "Li+.inp",
+        "content_base64": base64.b64encode(source.encode("utf-8")).decode("ascii"),
+    })
+
+    assert response["text"] == "已上传Li+.inp，仅保留坐标、电荷、自旋。"
+    assert response["structure"] == {"name": "Li", "format": ".inp", "charge": 1, "spin": 1, "atom_count": 1}
+    assert (tmp_path / "struct" / "Li.inp").is_file()
+    assert app._threads["proposal"]["pending_plan"] is None
+
+
+def test_app2_stop_requires_the_selected_active_run(monkeypatch):
+    snapshot = {"run_id": RUN_ID, "state": "stopping"}
+    monkeypatch.setattr(app, "_safe_run_id", lambda run_id: RUN_ID)
+    monkeypatch.setattr(app.frontend_api, "get_active_run_id", lambda: RUN_ID)
+    monkeypatch.setattr(app.frontend_api, "stop_pipeline", lambda clean=False: "已请求安全停止。")
+    monkeypatch.setattr(app, "_public_snapshot", lambda run_id: dict(snapshot))
+
+    response = app.stop_run(RUN_ID)
+
+    assert response == {"run_id": RUN_ID, "message": "已请求安全停止。", "snapshot": snapshot}
+
+
+def test_app2_proposal_and_run_assistant_histories_are_isolated(monkeypatch):
+    app._threads.clear()
+    proposal_calls = []
+    run_calls = []
+    persisted = []
+    snapshot = {
+        "run_id": RUN_ID,
+        "state": "await",
+        "step": None,
+        "phase": "—",
+        "progress": "0/10",
+        "done_steps": [],
+        "status_event_id": f"{RUN_ID}:status:await:none:none:none",
+        "live_summary": "等待操作。",
     }
-    assert dropdowns["structure-run-selector"]["min_width"] == 0
-    assert dropdowns["structure-selector"]["min_width"] == 0
-    assert "flex-wrap: nowrap !important;" in app_module.APP_CSS
 
+    def fake_proposal_chat(message, history, pending_plan):
+        proposal_calls.append((message, history, pending_plan))
+        yield "", [*history, {"role": "assistant", "content": "方案回复"}], None, {"id": "plan"}, None, None
 
-def test_visualization_refresh_keeps_a_current_filename_or_uses_the_first_choice(monkeypatch):
-    rendered_choices = []
+    monkeypatch.setattr(app, "chat", fake_proposal_chat)
+    monkeypatch.setattr(app, "_safe_run_id", lambda run_id: RUN_ID)
+    monkeypatch.setattr(app, "_public_snapshot", lambda run_id: dict(snapshot, run_id=run_id))
+    monkeypatch.setattr(app.frontend_api, "get_run_assistant_history", lambda run_id: [])
     monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_visualization_choices",
-        lambda: ["Li.mol2", "model.pdb"],
+        app.frontend_api,
+        "save_run_assistant_history",
+        lambda run_id, history: persisted.append((run_id, history)) or True,
     )
+    monkeypatch.setattr(app.frontend_api, "run_assistant_control_command", lambda run_id, message: None)
+    monkeypatch.setattr(app.frontend_api, "chat_run_assistant", lambda run_id, message, history: run_calls.append((run_id, message, history)) or "运行回复")
+
+    proposal = app.proposal_chat({
+        "threadId": "proposal-thread",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "建立 Li 体系"}]}],
+    })
+    run = app.run_chat(RUN_ID, {"message": "当前进度？"})
+
+    assert proposal["text"] == "方案回复"
+    assert proposal_calls == [("建立 Li 体系", [], None)]
+    assert run["text"] == "运行回复"
+    assert run_calls[0][0:2] == (RUN_ID, "当前进度？")
+    assert all(message["content"] != "建立 Li 体系" for message in run_calls[0][2])
+    assert persisted[-1][0] == RUN_ID
+
+
+def test_app2_proposal_chat_switches_to_run_only_when_a_new_run_appears(monkeypatch):
+    app._threads.clear()
+
+    def fake_chat(message, history, pending_plan):
+        yield "", [*history, {"role": "assistant", "content": "方案回复"}], None, None, None, None
+
+    monkeypatch.setattr(app, "chat", fake_chat)
+    messages = [{"role": "user", "content": [{"type": "text", "text": "解释当前方案"}]}]
+
+    monkeypatch.setattr(app.frontend_api, "latest_run_id", lambda: RUN_ID)
+    unchanged = app.proposal_chat({"threadId": "unchanged-run", "messages": messages})
+
+    run_ids = iter((RUN_ID, "md__202608260003"))
+    monkeypatch.setattr(app.frontend_api, "latest_run_id", lambda: next(run_ids))
+    created = app.proposal_chat({"threadId": "new-run", "messages": messages})
+
+    assert "runId" not in unchanged
+    assert created["runId"] == "md__202608260003"
+
+
+def test_app2_run_updates_expose_one_completion_notice_per_completed_step(monkeypatch):
+    snapshot = {
+        "run_id": RUN_ID,
+        "state": "running",
+        "step": 4,
+        "phase": "拓扑参数生成",
+        "progress": "2/10",
+        "done_steps": [1, 3],
+        "status_event_id": f"{RUN_ID}:status:running:4:none:none",
+        "live_summary": "正在执行第 4 步。",
+    }
+    monkeypatch.setattr(app, "_safe_run_id", lambda run_id: RUN_ID)
+    monkeypatch.setattr(app, "_public_snapshot", lambda run_id: dict(snapshot, run_id=run_id))
+    monkeypatch.setattr(app.frontend_api, "get_run_assistant_history", lambda run_id: [])
+    monkeypatch.setattr(app.frontend_api, "save_run_assistant_history", lambda run_id, history: True)
+
+    update = app.run_updates(RUN_ID)
+    unchanged = app.run_updates(RUN_ID, after=update["cursor"])
+
+    assert update["run_id"] == RUN_ID
+    assert update["cursor"] == snapshot["status_event_id"]
+    assert [event["kind"] for event in update["events"]] == [
+        "step_completed", "step_completed", "status",
+    ]
+    assert [event["content"] for event in update["events"][:2]] == [
+        "第 1 步「结构优化」已完成。",
+        "第 3 步「RESP 电荷计算」已完成。",
+    ]
+    assert unchanged["events"] == []
+
+
+def test_app2_visualization_passes_validated_viewer_controls(monkeypatch):
+    render_calls = []
+    monkeypatch.setattr(app, "_selected_run_id", lambda run_id: RUN_ID)
+    monkeypatch.setattr(app.frontend_api, "get_run_visualization_run_choices", lambda: [RUN_ID])
+    monkeypatch.setattr(app.frontend_api, "get_run_visualization_file_choices", lambda run_id: ["prod.pdb"])
     monkeypatch.setattr(
-        app_module.frontend_api,
+        app.frontend_api,
         "render_run_visualization_html",
-        lambda choice: rendered_choices.append(choice) or f"viewer:{choice}",
-    )
-
-    update, viewer = app_module._refresh_current_run_structure_choices("model.pdb")
-
-    assert update["choices"] == ["Li.mol2", "model.pdb"]
-    assert update["value"] == "model.pdb"
-    assert update["interactive"] is True
-    assert viewer == "viewer:model.pdb"
-    assert rendered_choices == ["model.pdb"]
-
-    update, viewer = app_module._refresh_current_run_structure_choices("removed.pdb")
-
-    assert update["value"] == "Li.mol2"
-    assert viewer == "viewer:Li.mol2"
-
-
-def test_visualization_run_and_file_selectors_refresh_independently(monkeypatch):
-    rendered = []
-    legends = []
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_visualization_run_choices",
-        lambda: ["md__202608080002", "md__202608080001"],
+        lambda artifact, sphere_scale, stick_radius, background, *, run_id: render_calls.append(
+            (artifact, sphere_scale, stick_radius, background, run_id)
+        ) or "<iframe />",
     )
     monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_visualization_file_choices",
-        lambda run_id: {
-            "md__202608080002": ["prod.pdb"],
-            "md__202608080001": ["eq.pdb", "model.mol2"],
-        }.get(run_id, []),
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "render_run_visualization_html",
-        lambda choice, **kwargs: rendered.append((choice, kwargs.get("run_id"))) or f"viewer:{choice}",
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
+        app.frontend_api,
         "render_run_visualization_legend_html",
-        lambda choice, **kwargs: legends.append((choice, kwargs.get("run_id"))) or f"legend:{choice}",
+        lambda artifact, *, run_id: "<div>legend</div>",
     )
 
-    run_update, file_update, viewer, legend = app_module._refresh_visualization_run_choices(
-        "removed-run", "model.mol2"
+    response = app.visualization(
+        run_id=RUN_ID,
+        artifact="prod.pdb",
+        sphere_scale="0.45",
+        stick_radius="0.18",
+        background="silver",
     )
 
-    assert run_update["value"] == "md__202608080002"
-    assert file_update["choices"] == ["prod.pdb"]
-    assert file_update["value"] == "prod.pdb"
-    assert viewer == "viewer:prod.pdb"
-    assert legend == "legend:prod.pdb"
-    assert rendered == [("prod.pdb", "md__202608080002")]
-    assert legends == [("prod.pdb", "md__202608080002")]
-
-    file_update, viewer, legend = app_module._refresh_visualization_file_choices(
-        "md__202608080001", "model.mol2"
-    )
-    assert file_update["value"] == "model.mol2"
-    assert viewer == "viewer:model.mol2"
-    assert legend == "legend:model.mol2"
-
-
-def test_proposal_example_is_a_textbox_placeholder_only():
-    config = app_module.app.get_config_file()
-    proposal_input = next(
-        component for component in config["components"]
-        if component["type"] == "textbox"
-        and component["props"].get("placeholder") == app_module.PROPOSAL_EXAMPLE
-    )
-    assert proposal_input["props"]["lines"] == 3
-    assert "启动示例" not in str(config)
-
-
-def test_proposal_welcome_bubble_includes_execution_mode():
-    welcome = app_module._proposal_welcome_history(app_module._LOCAL_EXECUTION_CONTEXT)
-
-    assert len(welcome) == 1
-    assert welcome[0]["role"] == "assistant"
-    assert "你好！我是 **Willy-方案助理**" in welcome[0]["content"]
-    assert "**当前方案执行方式**：本版本仅支持本机 GROMACS" in welcome[0]["content"]
-    assert "G09 未经可靠全链路验证，使用时可能出现运行问题" in welcome[0]["content"]
-    assert "不会修改方案、配置或运行状态" in welcome[0]["content"]
-    assert "proposal-execution-summary" not in str(app_module.app.get_config_file())
-
-
-def test_assistant_chat_and_input_rows_share_bottom_alignment_contract():
-    config = app_module.app.get_config_file()
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
-    }
-
-    assert {
-        "proposal-header",
-        "run-header",
-        "proposal-chat",
-        "run-chat",
-        "proposal-input-row",
-        "run-input-row",
-    }.issubset(elem_ids)
-    assert "#proposal-chat,\n#run-chat {\n    flex: 0 0 auto;" in app_module.APP_CSS
-    assert "height: 650px !important;" in app_module.APP_CSS
-    assert "#proposal-header,\n#run-header {" in app_module.APP_CSS
-    assert "#proposal-input-row,\n#run-input-row {\n    margin-bottom: 0;\n    margin-top: auto;\n}" in app_module.APP_CSS
-    assert "#proposal-assistant { overflow: hidden; }" in app_module.APP_CSS
-    textboxes = [
-        component for component in config["components"]
-        if component["type"] == "textbox"
-    ]
-    assert all(component["props"]["lines"] == 3 for component in textboxes[:2])
-
-
-def test_run_assistant_disables_gradio_consecutive_message_grouping():
-    config = app_module.app.get_config_file()
-    run_chat = next(
-        component for component in config["components"]
-        if component["props"].get("elem_id") == "run-chat"
-    )
-
-    assert run_chat["props"]["group_consecutive_messages"] is False
-
-
-def test_run_assistant_filters_visual_events_from_llm_history():
-    history = app_module._run_assistant_welcome_history() + [
-        app_module._run_assistant_event(
-            "status", "md_current:status:running:1:none:none", "### 工程状态\n\n运行中"
-        ),
-        app_module._run_assistant_event(
-            "proposal", "md_current:pending_action:eq-1", "#### 待确认的模拟调整"
-        ),
-        {"role": "user", "content": "现在到哪一步了？"},
-        {"role": "assistant", "content": "当前正在运行。"},
-    ]
-
-    assert app_module._run_assistant_llm_history(history) == [
-        app_module._run_assistant_welcome_history()[0],
-        {"role": "user", "content": "现在到哪一步了？"},
-        {"role": "assistant", "content": "当前正在运行。"},
-    ]
-
-
-def test_stop_control_uses_server_side_confirmation_without_cleanup_choices():
-    config = app_module.app.get_config_file()
-
-    assert not hasattr(app_module, "STOP_CONFIRM_JS")
-    assert "清理产物并中止" not in str(config)
-    assert "仅中止(保留产物)" not in str(config)
-    assert "#stop-pipeline-button:disabled" in app_module.APP_CSS
-    assert "window.confirm" not in str(config["dependencies"])
-
-
-def test_stop_control_only_dispatches_after_second_server_side_confirmation(monkeypatch):
-    stop_calls = []
-    monkeypatch.setattr(
-        app_module,
-        "stop_pipeline",
-        lambda *, clean: stop_calls.append(clean) or "已请求安全停止：等待 checkpoint",
-    )
-
-    first_update, confirmation_pending, stop_requested = app_module._handle_stop_button_click(False, False)
-    assert stop_calls == []
-    assert first_update["value"] == "确认中止"
-    assert first_update["interactive"] is True
-    assert confirmation_pending is True
-    assert stop_requested is False
-
-    confirmed_update, confirmation_pending, stop_requested = app_module._handle_stop_button_click(True, False)
-    assert stop_calls == [False]
-    assert confirmed_update["value"] == "正在安全停止"
-    assert confirmed_update["interactive"] is False
-    assert confirmation_pending is False
-    assert stop_requested is True
-
-
-def test_stop_control_stays_interactive_when_backend_does_not_acknowledge(monkeypatch):
-    monkeypatch.setattr(app_module, "stop_pipeline", lambda *, clean: "当前没有运行中的流水线。")
-
-    update, confirmation_pending, stop_requested = app_module._handle_stop_button_click(True, False)
-
-    assert update["value"] == "中止请求未送达，请重试"
-    assert update["interactive"] is True
-    assert confirmation_pending is False
-    assert stop_requested is False
-
-
-def test_task_workspace_has_four_equal_height_panels_and_chart_placeholder():
-    config = app_module.app.get_config_file()
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
-    }
-    assert {
-        "assistant-row",
-        "workspace-row",
-        "proposal-assistant",
-        "run-assistant",
-        "visualization-panel",
-        "chart-panel",
-    }.issubset(elem_ids)
-    assert {"run-status", "pending-action-summary"}.isdisjoint(elem_ids)
-    assert "--workbench-panel-height: 63.4rem" in app_module.APP_CSS
-    assert ":root { --workbench-panel-height: 57.6rem; }" in app_module.APP_CSS
-    assert "height: var(--workbench-panel-height)" in app_module.APP_CSS
-    assert "min-height: var(--workbench-panel-height);" in app_module.APP_CSS
-    assert "height: min(43.2rem, calc(var(--workbench-panel-height) - 12rem));" in app_module.APP_CSS
-    assert ".structure-viewer-frame" in app_module.APP_CSS
-    assert ".structure-viewer-name" in app_module.APP_CSS
-    assert "#structure-legend" in app_module.APP_CSS
-    chatboxes = [
-        component for component in config["components"]
-        if component["type"] == "chatbot"
-    ]
-    assert app_module.ASSISTANT_CHAT_HEIGHT == 650
-    assert all(
-        component["props"]["height"] == app_module.ASSISTANT_CHAT_HEIGHT
-        for component in chatboxes
-    )
-
-
-def test_application_title_is_consistent_across_ui_surfaces():
-    title = "Willy : AI驱动的小分子Gromacs模拟工具"
-    config = app_module.app.get_config_file()
-
-    assert title in str(config)
-    assert "height=400" not in app_module.APP_CSS
-    assert "#run-chat .pipeline-status-indicator" in app_module.APP_CSS
-    assert ".gradio-container.willy-dark #run-assistant code" in app_module.APP_CSS
-    assert "color: #f0f5f1 !important;" in app_module.APP_CSS
-    assert "#structure-selector {" in app_module.APP_CSS
-    assert "#structure-viewer .structure-viewer-frame iframe" in app_module.APP_CSS
-    assert "图表绘制" in str(config)
-    assert "图表绘制栏" not in str(config)
-    assert "可视化栏" not in str(config)
-    assert "开发中..." in str(config)
-
-
-def test_about_tab_exposes_project_summary_and_official_account_qr_code():
-    config = app_module.app.get_config_file()
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
-    }
-
-    assert "关于" in str(config)
-    assert "Willy-方案助理" in str(config)
-    assert "架构、交付、质量：ChatGPT 5.6-terra" in str(config)
-    assert "重跑续跑计划" in str(config)
-    assert "服务器上的GROMACS软件远程控制功能" not in str(config)
-    assert {
-        "about-page",
-        "about-qr-section",
-        "official-account-code",
-        "third-party-notices",
-    }.issubset(elem_ids)
-    assert Path(app_module.OFFICIAL_ACCOUNT_QR).is_file()
-    assert "第三方组件引用与著作权" in str(config)
-    assert "10.1002/jcc.22885" in str(config)
-    assert "10.1002/jcc.21224" in str(config)
-    assert "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)" in app_module.APP_CSS
-    assert "font-size: 2.25rem" in app_module.APP_CSS
-    assert "border-top: 1px solid #aeb4b0" in app_module.APP_CSS
-    assert "#third-party-notices" in app_module.APP_CSS
-    assert "border-top: 1px dashed var(--input-border)" in app_module.APP_CSS
-
-
-def test_beginner_guide_sits_between_configuration_and_about_tabs():
-    config = app_module.app.get_config_file()
-    tab_labels = [
-        component["props"].get("label")
-        for component in config["components"]
-        if component["type"] == "tabitem"
-    ]
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
-    }
-
-    assert tab_labels.index("配置") < tab_labels.index("新手指南") < tab_labels.index("关于")
-    assert "beginner-guide-page" in elem_ids
-    for heading in (
-        "零、Agent 的概况",
-        "一、运行 Agent 最少需要的外置依赖",
-        "二、体系的初始确定",
-        "三、可供修改的参数",
-        "3.1 量子层",
-        "3.2 拓扑层",
-        "3.3 模拟层",
-        "四、LLM 的报错处理",
-        "五、获取结构",
-        "六、其他",
-    ):
-        assert heading in app_module.BEGINNER_GUIDE_HTML
-    for guide_text in (
-        "Willy 基于Linux/WSL2系统",
-        "二者功能、聊天记录不互通",
-        "结构优化-电荷设置-拓扑生成-模拟参数生成-进行模拟",
-        "GROMACS 2022.0 或更高版本",
-        "ORCA 6.x",
-        "https://orcaforum.kofo.mpg.de/",
-        "WILLY_ORCA_HOME",
-        "LigParGen（仅 OPLS-AA 路径）",
-        "完整 Open Babel 3",
-        "WILLY_BOSS_HOME",
-        "RDF、RMSD 等可视化图表",
-    ):
-        assert guide_text in app_module.BEGINNER_GUIDE_HTML
-    assert "#beginner-guide-page .guide-section" in app_module.APP_CSS
-    assert "border-top: 1px solid var(--input-border)" in app_module.APP_CSS
-
-
-def test_configuration_tab_exposes_generic_llm_fields():
-    config = app_module.app.get_config_file()
-    components = config["components"]
-    labels = {
-        component["props"].get("label")
-        for component in components
-        if component["type"] == "textbox"
-    }
-
-    assert {
-        "OpenAI-compatible API Key",
-        "Base URL",
-        "Model",
-    }.issubset(labels)
-    assert "Agent制作者不会以任何方式获取您的API-key" in str(config)
-    assert "支持 OpenAI、DeepSeek、阿里云百炼、智谱 AI、月之暗面（Kimi）等厂商。" in str(config)
-    assert "按服务提供商的URL文档填写。部分兼容/中转站服务不能使用网址直填，需在URL结尾添加 /v1。" in str(config)
-    assert "只能填写服务提供商支持的模型，请注意横线、下划线或大小写格式。" in str(config)
-    assert any(
-        component["props"].get("placeholder") == "sk-***你的API key***"
-        for component in components
-        if component["type"] == "textbox"
-    )
-    assert {"llm-configuration-notice", "llm-configuration-status"}.issubset({
-        component["props"].get("elem_id") for component in components
-    })
-    assert "DeepSeek API Key" not in labels
-    assert any(
-        component["props"].get("value") == "测试连接"
-        and component["props"].get("elem_id") == "test-llm-connection-button"
-        for component in config["components"]
-        if component["type"] == "button"
-    )
-    elem_ids = {component["props"].get("elem_id") for component in components}
-    assert {
-        "llm-configuration-heading",
-        "dependency-preflight-heading",
-        "dependency-preflight-notice",
-        "dependency-preflight-button",
-        "dependency-preflight-status",
-    }.issubset(elem_ids)
-    component_order = [component["props"].get("elem_id") for component in components]
-    assert component_order.index("llm-configuration-heading") < component_order.index("dependency-preflight-heading")
-    assert "不会阻止本地任务启动" in str(config)
-
-
-def test_dependency_preflight_action_only_locks_its_own_button(monkeypatch):
-    monkeypatch.setattr(
-        app_module,
-        "run_local_dependency_preflight",
-        lambda: {
-            "groups": [
-                {"alternatives": [
-                    {"items": [
-                        {"requirement_id": "g16", "status": "available", "source": "path"},
-                        {"requirement_id": "formchk", "status": "available", "source": "dotenv"},
-                        {"requirement_id": "multiwfn", "status": "available", "source": "bundled"},
-                    ]},
-                    {"items": [{"requirement_id": "multiwfn", "status": "available", "source": "bundled"}]},
-                ]},
-            ],
-        },
-    )
-
-    updates = list(app_module._run_dependency_preflight())
-
-    assert updates[0][0]["value"] == "正在检查本机软件与内置模组..."
-    assert updates[0][1]["interactive"] is False
-    assert "#### 量化结构" in updates[-1][0]["value"]
-    assert "1. G16：满足；来源：已检测到外置" in updates[-1][0]["value"]
-    assert "2. G16 formchk：满足；来源：已配置外置" in updates[-1][0]["value"]
-    assert "1. Multiwfn：满足；来源：内置" in updates[-1][0]["value"]
-    assert updates[-1][0]["value"].count("Multiwfn") == 1
-    assert "完整 MD" not in updates[-1][0]["value"]
-    assert updates[-1][1]["interactive"] is True
-
-
-def test_dependency_preflight_failure_reenables_its_button(monkeypatch):
-    monkeypatch.setattr(
-        app_module,
-        "run_local_dependency_preflight",
-        lambda: (_ for _ in ()).throw(RuntimeError("private failure detail")),
-    )
-
-    updates = list(app_module._run_dependency_preflight())
-
-    assert "依赖预检执行失败" in updates[-1][0]["value"]
-    assert "private failure detail" not in updates[-1][0]["value"]
-    assert updates[-1][1]["interactive"] is True
-
-
-def test_dependency_preflight_formatter_displays_cpu_capacity():
-    result = {
-        "resources": {"cpu_count": 4, "recommended_default_nproc": 4},
-        "groups": [{
-            "alternatives": [{
-                "items": [{
-                    "requirement_id": "gmx",
-                    "status": "available",
-                    "source": "path",
-                }],
-            }],
-        }],
-    }
-
-    markdown = app_module._format_dependency_preflight_result(result)
-
-    assert "检测到 4 个 CPU 核" in markdown
-    assert "未显式指定时使用 4 核" in markdown
-
-
-def test_llm_connection_action_shows_loading_and_public_success_or_failure(monkeypatch):
-    monkeypatch.setattr(
-        app_module,
-        "test_llm_connection",
-        lambda *_args: {
-            "ok": True,
-            "code": "ok",
-            "message": "连接与工具调用可用",
-            "suggestion": "测试仅使用当前表单值，未保存任何配置。",
-        },
-    )
-
-    updates = list(app_module._test_llm_connection("key", "https://example.test/v1", "model"))
-
-    assert updates[0][0]["value"] == "正在测试 LLM 连接..."
-    assert updates[0][1]["interactive"] is False
-    assert updates[0][2]["interactive"] is False
-    assert "连接与工具调用可用" in updates[-1][0]["value"]
-    assert updates[-1][1]["interactive"] is True
-    assert updates[-1][2]["interactive"] is True
-
-    monkeypatch.setattr(
-        app_module,
-        "test_llm_connection",
-        lambda *_args: {
-            "ok": False,
-            "code": "non_json",
-            "message": "服务未返回 OpenAI API 响应",
-            "suggestion": "检查 Base URL；常见修复是在末尾追加 /v1。",
-        },
-    )
-    failed_update = list(app_module._test_llm_connection("key", "https://example.test", "model"))[-1]
-    assert "服务未返回 OpenAI API 响应" in failed_update[0]["value"]
-    assert "追加 /v1" in failed_update[0]["value"]
-
-
-def test_saving_llm_config_does_not_trigger_connection_test(monkeypatch):
-    test_calls = []
-    monkeypatch.setattr(app_module, "test_llm_connection", lambda *_args: test_calls.append(True))
-    monkeypatch.setattr(app_module, "save_llm_config", lambda *_args: "配置已保存")
-
-    cleared_key, status = app_module._save_llm_config("key", "https://example.test/v1", "model")
-
-    assert cleared_key == ""
-    assert status == "配置已保存"
-    assert test_calls == []
-
-
-def test_llm_configuration_exposes_only_local_byok_controls():
-    config = app_module.app.get_config_file()
-    elem_ids = {component["props"].get("elem_id") for component in config["components"]}
-
-    assert {"llm-provider-notice", "test-llm-connection-button"}.issubset(elem_ids)
-    assert "本版本仅支持用户自配 OpenAI-compatible API Key" in str(config)
-    assert "托管网关配置入口已冻结" in str(config)
-    assert "一次性邀请码" not in str(config)
-    assert "托管网关（服务器）" not in str(config)
-    assert not {
-        "llm-provider-mode",
-        "managed-gateway-status",
-        "managed-gateway-register",
-        "managed-gateway-test",
-    }.intersection(elem_ids)
-    dependency_text = str(config["dependencies"])
-    assert "_select_llm_mode" not in dependency_text
-    assert "_request_managed_gateway_registration" not in dependency_text
-    assert "_test_managed_gateway_connection" not in dependency_text
-    assert "#llm-provider-mode" not in app_module.APP_CSS
-
-
-def test_theme_toggle_is_a_borderless_fixed_control_at_the_bottom_right():
-    assert "position: fixed !important" in app_module.APP_CSS
-    assert "bottom: 1rem" in app_module.APP_CSS
-    assert "right: 1rem" in app_module.APP_CSS
-    assert "#theme-toggle label" in app_module.APP_CSS
-    assert "box-shadow: none !important" in app_module.APP_CSS
-
-
-def test_ui_controls_use_one_cjk_capable_font_stack_for_chinese_and_latin_text():
-    assert '--willy-ui-font: "Noto Sans CJK SC"' in app_module.APP_CSS
-    assert "--font: var(--willy-ui-font)" in app_module.APP_CSS
-    assert "font-family: var(--willy-ui-font) !important" in app_module.APP_CSS
-    assert '[role="tab"]' in app_module.APP_CSS
-    assert ".gradio-container [role=\"tab\"]" in app_module.APP_CSS
-    assert "font-size: 1.1rem;" in app_module.APP_CSS
-    assert "font-weight: 700;" in app_module.APP_CSS
-
-
-def test_header_reserves_scrollbar_space_to_keep_its_title_fixed_across_tabs():
-    assert "overflow-y: scroll" in app_module.APP_CSS
-    assert "scrollbar-gutter: stable" in app_module.APP_CSS
-    assert "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)" in app_module.APP_CSS
-
-
-def test_proposal_chat_locks_controls_until_streaming_response_finishes(monkeypatch):
-    received_contexts = []
-
-    def fake_chat(message, history, pending_plan, *, execution_context=None):
-        received_contexts.append(execution_context)
-        user_history = list(history) + [{"role": "user", "content": message}]
-        yield "", user_history, user_history, pending_plan, "", {"visible": False}
-        completed = user_history + [{"role": "assistant", "content": "方案已生成。"}]
-        yield "", completed, completed, {"plan_id": "demo"}, "", {"visible": True}
-
-    monkeypatch.setattr(app_module, "chat", fake_chat)
-
-    execution_context = {
-        "execution_mode": "ssh",
-        "execution_profile_id": "Lab_GPU",
-        "available": True,
-        "summary": "已登记，尚未进行连接预检。",
-    }
-    updates = list(app_module._chat_wrapper("生成方案", [], None, execution_context))
-
-    assert updates[0][0]["interactive"] is False
-    assert updates[0][4]["interactive"] is False
-    assert updates[0][5]["interactive"] is False
-    assert updates[-1][0]["interactive"] is True
-    assert updates[-1][1][-1]["content"] == "方案已生成。"
-    assert updates[-1][3] == {"plan_id": "demo"}
-    assert updates[-1][5]["interactive"] is True
-    assert updates[-1][4]["interactive"] is True
-    assert received_contexts == [execution_context]
-
-
-def test_proposal_chat_is_text_only_and_does_not_mutate_history():
-    history = [
-        {"role": "assistant", "content": "旧方案"},
-        {"role": "user", "content": "调整温度"},
-        {"role": "assistant", "content": "新方案"},
-    ]
-
-    rendered = app_module._render_proposal_chat(history)
-
-    assert rendered == history
-    assert rendered is not history
-    assert rendered[-1] is not history[-1]
-
-
-def test_task_page_uses_text_confirmation_without_a_click_bridge():
-    config = app_module.app.get_config_file()
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
-    }
-
-    assert "proposal-confirm-trigger" not in elem_ids
-    assert not hasattr(app_module, "PIPELINE_LAUNCH_ACTION")
-    assert not hasattr(app_module, "PIPELINE_LAUNCH_ACTION_JS")
-
-
-def test_structure_upload_accepts_orca_input_files():
-    upload_props = next(
-        component["props"]
-        for component in app_module.app.get_config_file()["components"]
-        if component.get("type") == "uploadbutton"
-        and component.get("props", {}).get("label") == "上传结构"
-    )
-
-    assert ".inp" in upload_props["file_types"]
-
-
-def test_run_assistant_shows_message_before_waiting_for_reply(monkeypatch):
-    history = app_module._run_assistant_welcome_history()
-    assert "md_run/最新编号/" in history[0]["content"]
-    calls = []
-
-    def fake_answer(run_id, message, prior_history):
-        calls.append((run_id, message, prior_history))
-        return "当前正在运行 NPT 退火。"
-
-    monkeypatch.setattr(app_module, "chat_run_assistant", fake_answer)
-    monkeypatch.setattr(app_module.frontend_api, "latest_run_id", lambda: "md_current")
-
-    updates = list(app_module._ask_run_assistant("现在到哪一步了？", history))
-
-    pending_history = updates[0][1]
-    assert pending_history[-2] == {"role": "user", "content": "现在到哪一步了？"}
-    assert pending_history[-1] == {"role": "assistant", "content": "正在读取当前运行事实..."}
-    assert updates[0][0]["interactive"] is False
-    assert updates[0][3]["interactive"] is False
-    assert calls == [("md_current", "现在到哪一步了？", history)]
-    assert updates[-1][1][-1] == {"role": "assistant", "content": "当前正在运行 NPT 退火。"}
-    assert updates[-1][0]["interactive"] is True
-    assert updates[-1][3]["interactive"] is True
-    assert updates[-1][4] == "md_current"
-
-
-def test_run_assistant_restores_target_history_when_run_changes(monkeypatch):
-    old_history = [
-        {"role": "user", "content": "旧工程为什么失败？"},
-        {"role": "assistant", "content": "旧工程的调整方案。"},
-    ]
-    target_history = [
-        {"role": "user", "content": "新工程之前到哪一步？"},
-        {"role": "assistant", "content": "新工程已进入第 6 步。"},
-    ]
-    received_history = []
-    monkeypatch.setattr(app_module.frontend_api, "latest_run_id", lambda: "md_new")
-    monkeypatch.setattr(
-        app_module,
-        "_run_assistant_snapshot",
-        lambda _run_id=None: {
-            "run_id": "md_new",
-            "summary": "### 工程状态\n\n状态：运行中",
-            "live_summary": "### 工程状态\n\n状态：运行中",
-            "status_event_id": "md_new:status:running:1:none:none",
-        },
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_assistant_history",
-        lambda run_id: target_history if run_id == "md_new" else [],
-    )
-    monkeypatch.setattr(app_module.frontend_api, "save_run_assistant_history", lambda *_args: True)
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda _run_id, _message, history: received_history.append(history) or "新工程正在运行。",
-    )
-
-    updates = list(
-        app_module._ask_run_assistant("现在到哪一步了？", old_history, "md_old")
-    )
-
-    assert len(received_history) == 1
-    assert "新工程之前" in str(received_history[0])
-    assert "旧工程" not in str(received_history[0])
-    assert updates[-1][4] == "md_new"
-    assert "旧工程" not in str(updates[-1][1])
-    assert "新工程之前" in str(updates[-1][1])
-
-
-def test_switch_command_rebinds_chat_to_target_run_history(monkeypatch):
-    source_id = "md__202608150001"
-    target_id = "md__202608150002"
-    source_history = [{"role": "assistant", "content": "源工程历史"}]
-    target_history = [{"role": "assistant", "content": "目标工程历史"}]
-    saved = []
-
-    def snapshot(run_id=None):
-        selected = run_id or source_id
-        return {
-            "run_id": selected,
-            "summary": f"### 工程状态\n\n{selected}",
-            "live_summary": f"### 工程状态\n\n{selected}",
-            "status_event_id": f"{selected}:status:aborted:8:none:none",
-            "pending_action": None,
-            "pending_fork": None,
-            "error_event": None,
-            "timeline_events": True,
-        }
-
-    monkeypatch.setattr(app_module, "_run_assistant_snapshot", snapshot)
-    monkeypatch.setattr(
-        app_module, "run_assistant_control_command",
-        lambda run_id, message: f"已切换至工程 {target_id}。",
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api, "get_run_assistant_switch_target",
-        lambda message: target_id,
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api, "get_run_assistant_history",
-        lambda run_id: target_history if run_id == target_id else source_history,
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api, "save_run_assistant_history",
-        lambda run_id, history: saved.append((run_id, list(history))) or True,
-    )
-
-    update = list(app_module._handle_run_assistant_message(
-        f"/switch {target_id}", source_history, False, False, source_id,
-    ))[-1]
-
-    assert update[-1] == target_id
-    assert "目标工程历史" in str(update[1])
-    assert f"已切换至工程 {target_id}" in str(update[1])
-    assert any(run_id == source_id for run_id, _history in saved)
-    assert saved[-1][0] == target_id
-
-
-def test_run_assistant_refresh_updates_one_status_bubble_without_growing_history(monkeypatch):
-    first_snapshot = {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：运行中",
-        "live_summary": "### 工程状态\n\n状态：运行中",
-        "status_event_id": "md_current:status:running:8:none:none",
-    }
-    history = app_module._sync_run_assistant_history(
-        app_module._run_assistant_welcome_history(), first_snapshot
-    )
-    snapshot = {
-        **first_snapshot,
-        "live_summary": "### 工程状态\n\n状态：运行中\n\n当前工序预计结束：10:00",
-    }
-    monkeypatch.setattr(app_module.frontend_api, "get_run_panel_snapshot", lambda: snapshot)
-    monkeypatch.setattr(app_module, "_refresh_stop_button", lambda *_args: {"visible": True})
-
-    rendered, persisted, run_id, _button = app_module._refresh_run_assistant_view(
-        history, "md_current", False, False
-    )
-
-    assert run_id == "md_current"
-    assert len(rendered) == 2
-    assert rendered[0] == history[0]
-    assert rendered[1]["content"] == snapshot["live_summary"]
-    assert persisted[1]["_run_assistant_event_id"] == first_snapshot["status_event_id"]
-    assert persisted is not history
-
-
-def test_run_assistant_seals_status_and_appends_distinct_failure_events(monkeypatch):
-
-    def snapshot(revision, action_id, error):
-        return {
-            "run_id": "md_current",
-            "summary": f"### 工程状态\n\n×{error}",
-            "live_summary": "### 工程状态\n\n状态：等待用户确认调整方案",
-            "status_event_id": f"md_current:status:awaiting_confirmation:9:{action_id}:error:{revision}",
-            "error_event": {
-                "event_id": f"md_current:error:{revision}",
-                "content": f"#### 工程错误\n\n×{error}",
-            },
-            "timeline_events": True,
-            "pending_action": {
-                "run_id": "md_current",
-                "action_id": action_id,
-                "status": "awaiting_confirmation",
-                "summary": f"{error} 的调整方案",
-                "restart_step": 9,
-                "adjustments": [],
-            },
-        }
-
-    running = {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：运行中",
-        "live_summary": "### 工程状态\n\n状态：运行中",
-        "status_event_id": "md_current:status:running:9:none:none",
-    }
-    history = app_module._sync_run_assistant_history(
-        app_module._run_assistant_welcome_history(), running
-    )
-    current = snapshot(49, "eq-first", "第一次 EQ 失败")
-    monkeypatch.setattr(app_module.frontend_api, "get_run_panel_snapshot", lambda: current)
-    monkeypatch.setattr(app_module, "_refresh_stop_button", lambda *_args: {"visible": True})
-
-    rendered, persisted, run_id, _button = app_module._refresh_run_assistant_view(
-        history, "md_current", False, False
-    )
-
-    assert run_id == "md_current"
-    assert rendered[0] == history[0]
-    assert rendered[1]["content"] == running["live_summary"]
-    assert rendered[2]["content"] == current["live_summary"]
-    assert "第一次 EQ 失败" in rendered[3]["content"]
-    assert "待确认的模拟调整" in rendered[4]["content"]
-
-    current = snapshot(69, "eq-second", "第二次 EQ 失败")
-    rendered, persisted, run_id, _button = app_module._refresh_run_assistant_view(
-        persisted, run_id, False, False
-    )
-
-    status_cards = [
-        message for message in persisted
-        if message.get("_run_assistant_event_kind") == "status"
-    ]
-    assert len(status_cards) == 3
-    assert "第二次 EQ 失败" in rendered[-2]["content"]
-    assert "第二次 EQ 失败" in rendered[-1]["content"]
-    repeated = app_module._refresh_run_assistant_view(
-        persisted, run_id, False, False
-    )
-    assert repeated[1] == persisted
-
-
-def test_run_assistant_appends_a_new_status_after_confirmed_repair():
-    waiting = {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：等待确认",
-        "live_summary": "### 工程状态\n\n状态：等待确认",
-        "status_event_id": "md_current:status:awaiting_confirmation:9:eq-first:none",
-        "pending_action": {
-            "run_id": "md_current",
-            "action_id": "eq-first",
-            "status": "awaiting_confirmation",
-            "summary": "EQ 需要确认。",
-            "restart_step": 9,
-            "adjustments": [],
-        },
-    }
-    history = app_module._sync_run_assistant_history(
-        app_module._run_assistant_welcome_history(), waiting
-    )
-    confirmed = history + [
-        {"role": "user", "content": "确认重跑"},
-        {"role": "assistant", "content": "已确认，将从第 9 步重跑。"},
-    ]
-    retrying = {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：重跑中",
-        "live_summary": "### 工程状态\n\n状态：重跑中",
-        "status_event_id": "md_current:status:retrying:9:none:none",
-    }
-
-    persisted = app_module._sync_run_assistant_history(confirmed, retrying)
-    rendered = app_module._render_run_assistant_chat(persisted)
-
-    assert [
-        message["content"] for message in rendered
-        if message["content"].startswith("### 工程状态")
-    ] == [waiting["live_summary"], retrying["live_summary"]]
-    assert "待确认的模拟调整" in rendered[2]["content"]
-    assert rendered[-1]["content"] == retrying["live_summary"]
-
-
-def test_run_assistant_refresh_resets_old_dialogue_on_run_switch(monkeypatch):
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_panel_snapshot",
-        lambda: {
-            "run_id": "md_new",
-            "summary": "### 工程状态 · 运行 md_new\n\n状态：运行中",
-            "pending_action": None,
-        },
-    )
-    monkeypatch.setattr(app_module, "_refresh_stop_button", lambda *_args: {"visible": True})
-
-    rendered, persisted, run_id, _button = app_module._refresh_run_assistant_view(
-        [{"role": "assistant", "content": "旧工程的调整方案。"}],
-        "md_old",
-        False,
-        False,
-    )
-
-    assert run_id == "md_new"
-    assert persisted[0] == app_module._run_assistant_welcome_history()[0]
-    assert persisted[1]["_run_assistant_event_kind"] == "status"
-    assert "旧工程" not in str(rendered)
-
-
-def test_run_assistant_text_stop_and_pause_never_call_stop_pipeline_or_llm(monkeypatch):
-    history = [{"role": "assistant", "content": "欢迎"}]
-    stop_calls = []
-    monkeypatch.setattr(
-        app_module,
-        "stop_pipeline",
-        lambda *, clean: stop_calls.append(clean) or "已请求安全停止：等待 checkpoint",
-    )
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("reserved command must not reach LLM")),
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_pending_action",
-        lambda: None,
-        raising=False,
-    )
-
-    for message in ("中止流水线", "确认中止", "暂停", "稍后"):
-        update = list(
-            app_module._handle_run_assistant_message(message, history, False, False)
-        )[-1]
-        assert update[1][-1]["content"]
-        assert update[5] is False
-        assert update[6] is False
-
-    assert stop_calls == []
-
-
-def test_run_assistant_explicit_fork_resume_command_bypasses_read_only_llm(monkeypatch):
-    snapshot = {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：已中止",
-        "live_summary": "### 工程状态\n\n状态：已中止",
-        "status_event_id": "md_current:status:aborted:8:none:none",
-        "pending_action": None,
-    }
-    calls = []
-    monkeypatch.setattr(app_module.frontend_api, "get_run_panel_snapshot", lambda: snapshot)
-    monkeypatch.setattr(
-        app_module,
-        "run_assistant_control_command",
-        lambda run_id, message: calls.append((run_id, message)) or "已接受 /resume。",
-    )
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("control command must not reach LLM")),
-    )
-
-    update = list(
-        app_module._handle_run_assistant_message("/resume", [], False, False)
-    )[-1]
-
-    assert calls == [("md_current", "/resume")]
-    assert update[1][-1]["content"] == "已接受 /resume。"
-
-
-def test_run_assistant_confirms_pending_natural_language_fork(monkeypatch):
-    snapshot = {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：等待确认",
-        "live_summary": "### 工程状态\n\n状态：等待确认",
-        "status_event_id": "md_current:status:awaiting_confirmation:9:none:none",
-        "pending_action": None,
-        "pending_fork": {
-            "proposal_id": "fork-proposal-123",
-            "run_id": "md_current",
-            "status": "awaiting_confirmation",
-            "state_revision": 4,
-            "restart_step": 6,
-            "changes": [{"path": "md.eq.tau_p", "value": 1}],
-        },
-    }
-    calls = []
-    monkeypatch.setattr(app_module.frontend_api, "get_run_panel_snapshot", lambda: snapshot)
-    monkeypatch.setattr(app_module, "run_assistant_control_command", lambda *_args: None)
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "confirm_pending_fork",
-        lambda proposal_id, run_id, **kwargs: calls.append((proposal_id, run_id, kwargs)) or "已创建 fork md_child。",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("fork confirmation must not reach LLM")),
-    )
-
-    update = list(
-        app_module._handle_run_assistant_message("确认 fork", [], False, False)
-    )[-1]
-
-    assert calls == [("fork-proposal-123", "md_current", {"state_revision": 4})]
-    assert update[1][-1]["content"] == "已创建 fork md_child。"
-
-
-def test_run_assistant_slash_menu_uses_document_events_across_gradio_shadow_dom():
-    config = app_module.app.get_config_file()
-    run_input = next(
-        component["props"] for component in config["components"]
-        if component["props"].get("elem_id") == "run-message"
-    )
-
-    assert run_input["placeholder"] == "询问当前运行的状态、工序进度或错误"
-    script = app_module.RUN_ASSISTANT_SLASH_MENU_JS
-    assert "query.startsWith(\"/\")" in script
-    assert "menu.hidden = true" in script
-    assert "menu.hidden = false" in script
-    assert 'command: "/resume"' in script
-    assert 'command: "/fork"' in script
-    assert 'command: "/switch"' in script
-    assert "setInputValue" in script
-    assert "chooseActive" in script
-    assert "event.composedPath()" in script
-    assert 'path.some((node) => node?.id === "run-message")' in script
-    assert 'document.addEventListener("input"' in script
-    assert 'document.addEventListener("keydown"' in script
-    assert "document.body.appendChild(menu)" in script
-    assert "MutationObserver" not in script
-    assert "run-slash-menu" in app_module.APP_CSS
-    assert "position: fixed" in app_module.APP_CSS
-    assert sum(
-        dependency.get("js") == script
-        for dependency in config["dependencies"]
-    ) == 1
-
-
-def test_run_assistant_renders_status_and_adjustment_as_separate_safe_bubbles():
-    action = {
-        "action_id": "eq-repair-1",
-        "state": "pending",
-        "summary": "EQ 验收未通过",
-        "restart_step": 9,
-        "adjustments": [{
-            "name": "时间步长",
-            "before": "0.001 ps",
-            "after": "0.0005 ps",
-            "reason": "降低数值不稳定风险",
-            "raw_log": "must never render",
-        }],
-        "raw_log": "must never render",
-    }
-    history = app_module._run_assistant_welcome_history()
-    history = app_module._sync_run_assistant_history(history, {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：运行中",
-        "live_summary": "### 工程状态\n\n状态：运行中",
-        "status_event_id": "md_current:status:running:8:none:none",
-    })
-    history.append({"role": "assistant", "content": "运行助理的普通回答。"})
-    history = app_module._sync_run_assistant_history(history, {
-        "run_id": "md_current",
-        "summary": "### 工程状态\n\n状态：等待确认",
-        "live_summary": "### 工程状态\n\n状态：等待确认",
-        "status_event_id": "md_current:status:awaiting_confirmation:9:eq-repair-1:none",
-        "pending_action": action,
-    })
-    rendered = app_module._render_run_assistant_chat(history)
-
-    assert rendered[0] == history[0]
-    assert rendered[1] == {
-        "role": "assistant", "content": "### 工程状态\n\n状态：运行中",
-    }
-    assert rendered[2]["content"] == "运行助理的普通回答。"
-    assert rendered[3]["content"] == "### 工程状态\n\n状态：等待确认"
-    assert "EQ 验收未通过" in rendered[4]["content"]
-    assert "第 9 步" in rendered[4]["content"]
-    assert "时间步长：0.001 ps -> 0.0005 ps" in rendered[4]["content"]
-    assert "降低数值不稳定风险" in rendered[4]["content"]
-    assert "must never render" not in rendered[4]["content"]
-
-
-def test_pending_action_approval_uses_adapter_without_llm(monkeypatch):
-    history = [{"role": "assistant", "content": "欢迎"}]
-    action = {
-        "run_id": "md_current",
-        "action_id": "eq-repair-1",
-        "state_revision": 4,
-        "config_fingerprint": "a" * 64,
-        "status": "awaiting_confirmation",
-        "summary": "EQ 验收未通过",
-        "restart_step": 9,
-        "adjustments": [],
-    }
-    confirmed_actions = []
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_panel_snapshot",
-        lambda: {
-            "run_id": "md_current",
-            "summary": "### 工程状态\n\n状态：等待确认",
-            "pending_action": action,
-        },
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "confirm_pending_action",
-        lambda action_id, run_id, **kwargs: confirmed_actions.append((action_id, run_id, kwargs)) or "已确认，将从第 9 步重跑。",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("approval must not reach LLM")),
-    )
-
-    update = list(
-        app_module._handle_run_assistant_message("确认重跑", history, False, False)
-    )[-1]
-
-    assert confirmed_actions == [(
-        "eq-repair-1",
-        "md_current",
-        {"state_revision": 4, "config_fingerprint": "a" * 64},
-    )]
-    assert update[1][-1]["content"] == "已确认，将从第 9 步重跑。"
-    assert update[5] is False
-    assert update[6] is False
-
-
-def test_pending_action_natural_approval_uses_adapter_without_llm(monkeypatch):
-    history = [{"role": "assistant", "content": "欢迎"}]
-    action = {
-        "run_id": "md_current",
-        "action_id": "eq-repair-1",
-        "status": "awaiting_confirmation",
-        "summary": "EQ 验收未通过",
-        "restart_step": 9,
-        "adjustments": [],
-    }
-    confirmed_actions = []
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_panel_snapshot",
-        lambda: {"run_id": "md_current", "summary": "状态：等待确认", "pending_action": action},
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "confirm_pending_action",
-        lambda action_id, run_id: confirmed_actions.append((action_id, run_id)) or "已确认，正在重跑。",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("approval must not reach LLM")),
-    )
-
-    list(app_module._handle_run_assistant_message("我同意该方案并重跑", history, False, False))
-
-    assert confirmed_actions == [("eq-repair-1", "md_current")]
-
-
-def test_pending_action_controls_require_awaiting_confirmation(monkeypatch):
-    history = [{"role": "assistant", "content": "欢迎"}]
-    stale_action = {
-        "run_id": "md_current",
-        "action_id": "eq-repair-1",
-        "status": "pending",
-        "summary": "过期方案",
-        "restart_step": 9,
-        "adjustments": [],
-    }
-    confirmed_actions = []
-    revisions = []
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_panel_snapshot",
-        lambda: {"run_id": "md_current", "summary": "状态：运行中", "pending_action": stale_action},
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "confirm_pending_action",
-        lambda *args: confirmed_actions.append(args),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "revise_pending_action",
-        lambda *args: revisions.append(args),
-        raising=False,
-    )
-    monkeypatch.setattr(app_module, "chat_run_assistant", lambda *_args: "只读运行回答")
-
-    approval_updates = list(
-        app_module._handle_run_assistant_message("确认", history, False, False)
-    )
-    revision_updates = list(
-        app_module._handle_run_assistant_message("将保温段改为 3 ns", history, False, False)
-    )
-
-    assert confirmed_actions == []
-    assert revisions == []
-    assert approval_updates[-1][2][-1]["content"] == "只读运行回答"
-    assert revision_updates[-1][2][-1]["content"] == "只读运行回答"
-
-
-def test_pending_action_revision_uses_backend_and_remains_pending(monkeypatch):
-    history = [{"role": "assistant", "content": "欢迎"}]
-    action = {
-        "run_id": "md_current",
-        "action_id": "eq-repair-1",
-        "status": "awaiting_confirmation",
-        "summary": "EQ 验收未通过",
-        "restart_step": 9,
-        "adjustments": [],
-    }
-    revisions = []
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "get_run_panel_snapshot",
-        lambda: {
-            "run_id": "md_current",
-            "summary": "### 工程状态\n\n状态：等待确认",
-            "pending_action": action,
-        },
-    )
-    monkeypatch.setattr(
-        app_module.frontend_api,
-        "revise_pending_action",
-        lambda action_id, request, run_id: revisions.append((action_id, request, run_id))
-        or "已按你的要求更新待确认方案；请审阅新方案后再明确确认。",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "chat_run_assistant",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("revision must not use read-only chat")),
-    )
-
-    updates = list(
-        app_module._handle_run_assistant_message("将最终保温段改为 8 ns", history, False, False)
-    )
-
-    assert len(updates) == 2
-    assert revisions == [("eq-repair-1", "将最终保温段改为 8 ns", "md_current")]
-    assert updates[-1][2][-1]["content"].startswith("已按你的要求更新")
-    assert updates[-1][5] is False
-    assert updates[-1][6] is False
-
-
-def test_parameter_shorthand_is_revision_request_but_question_is_not():
-    assert app_module._requests_pending_action_revision("请把 tau_t 调到 0.5 ps") is True
-    assert app_module._requests_pending_action_revision("为什么要调整 tau_t？") is False
-
-
-def test_current_ui_exposes_local_task_only():
-    config = app_module.app.get_config_file()
-    tab_labels = [
-        component["props"].get("label")
-        for component in config["components"]
-        if component["type"] == "tabitem"
-    ]
-    elem_ids = {
-        component["props"].get("elem_id")
-        for component in config["components"]
-    }
-    assert tab_labels.index("本地任务") < tab_labels.index("配置")
-    assert "远程任务" not in tab_labels
-    assert not any(elem_id and elem_id.startswith("remote-") for elem_id in elem_ids)
-    assert "主机地址" not in str(config)
-    assert "私钥路径" not in str(config)
-    assert "远程命令" not in str(config)
-    assert "#remote-task-page" not in app_module.APP_CSS
-    assert "refresh-remote-status-button" not in elem_ids
-    assert app_module._LOCAL_EXECUTION_CONTEXT["execution_mode"] == "local"
-    assert "远程" not in app_module._LOCAL_EXECUTION_CONTEXT["summary"]
+    assert response["sphere_scale"] == 0.45
+    assert response["stick_radius"] == 0.18
+    assert response["background"] == "silver"
+    assert render_calls == [("prod.pdb", 0.45, 0.18, "silver", RUN_ID)]
+
+
+def test_app2_visualization_rejects_invalid_viewer_controls():
+    for parameter, value in (("球体大小", "nan"), ("球体大小", "0.70"), ("棍宽度", "invalid"), ("棍宽度", "0.41")):
+        try:
+            app._viewer_control_value(
+                value,
+                name=parameter,
+                default=0.35 if parameter == "球体大小" else 0.22,
+                value_range=(0.15, 0.65) if parameter == "球体大小" else (0.08, 0.40),
+            )
+        except Exception as exc:
+            assert getattr(exc, "status_code", None) == 422
+        else:
+            raise AssertionError(f"{parameter} must reject {value}")
+
+    for value in ("blue", "#ffffff", ""):
+        try:
+            app._viewer_background_value(value)
+        except Exception as exc:
+            assert getattr(exc, "status_code", None) == 422
+        else:
+            raise AssertionError(f"background must reject {value}")

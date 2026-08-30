@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 import json
+import os
+import time
 import pytest
 
 from willy.errors import ErrorKind, StepError, StepResult
@@ -384,6 +386,26 @@ class TestSobtopExecutor:
         assert result.success is True
         assert result.extra["accepted_rc24"] is True
         assert (tmp_path / "run" / "MOL.itp").is_file()
+
+    def test_rc24_accepts_current_outputs_with_coarse_mtime_resolution(self, tmp_path, monkeypatch):
+        topo_gaff, vendor = self._patch_vendor(tmp_path, monkeypatch)
+        inp = self._input(tmp_path)
+
+        def create_valid(*args, **kwargs):
+            outputs = [vendor / "MOL.itp", vendor / "MOL.gro", vendor / "MOL.top"]
+            _write_itp(outputs[0])
+            _write_gro(outputs[1])
+            outputs[2].write_text("top")
+            rounded_mtime = time.time_ns() - 1_000_000_000
+            for path in outputs:
+                os.utime(path, ns=(rounded_mtime, rounded_mtime))
+            return SimpleNamespace(returncode=24, stdout="fortran cleanup", stderr="")
+
+        monkeypatch.setattr(topo_gaff, "run_managed_command", create_valid)
+        result = make_itp_gro(inp, str(tmp_path / "run"))
+
+        assert result.success is True
+        assert result.extra["accepted_rc24"] is True
 
     def test_rc24_with_invalid_outputs_fails_and_cleans_vendor(self, tmp_path, monkeypatch):
         topo_gaff, vendor = self._patch_vendor(tmp_path, monkeypatch)

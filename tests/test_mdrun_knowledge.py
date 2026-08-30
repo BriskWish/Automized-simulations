@@ -6,7 +6,6 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import app
 from willy.agent_simulation import SimulationAgent
 from willy.simulation.mdrun_knowledge import lookup_mdrun_knowledge, public_entry_index
 from willy.simulation.pending_action import create_eq_pending_action, public_pending_action
@@ -98,18 +97,3 @@ def test_pending_action_exposes_verified_or_unverified_source(tmp_path):
     public = public_pending_action(action)
     assert public["advice_source"] == "knowledge_base"
     assert public["knowledge_entries"] == [index[9]]
-
-
-def test_ui_labels_unverified_advice_source():
-    text = app._pending_action_text({
-        "action_id": "act-1",
-        "status": "awaiting_confirmation",
-        "summary": "等待确认",
-        "restart_step": 9,
-        "adjustments": [{"name": "时间步长", "before": "0.001 ps", "after": "0.0005 ps"}],
-        "knowledge_status": "not_matched",
-        "advice_source": "llm_unverified",
-        "compatibility_notice": "请核对本机版本",
-    })
-    assert "LLM 未经知识库验证的推断" in text
-    assert "兼容性提醒" in text

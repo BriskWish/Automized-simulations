@@ -1,7 +1,7 @@
 """
 toolist_global.py
 =================
-Layer 0 — Config Agent 的 11 个工具定义与处理函数 + TF-IDF 向量检索。
+Layer 0 — Config Agent 的工具定义与处理函数 + TF-IDF 向量检索。
 
 工具:
   tools_lookup_molecule, tools_resolve_compound, tools_lookup_md_defaults,
@@ -108,7 +108,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tools_refresh_structs",
-            "description": "重新扫描 struct/ 目录和 knowledge.md，刷新可用分子列表。用户上传新结构后调用此工具更新。返回当前所有可用分子。",
+            "description": "重新扫描 struct/ 目录和 knowledge_molecules.md，刷新可用分子列表。用户上传新结构后调用此工具更新。返回当前所有可用分子。",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -243,22 +243,42 @@ TOOL_META = {
 }
 
 # ============================================================
-# 向量检索器 —— 从 knowledge.md 自动提取分子库
+# 向量检索器 —— 从 knowledge_molecules.md 自动提取分子库
 # ============================================================
 
 import re as _re
+import unicodedata as _unicodedata
+from difflib import SequenceMatcher
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from willy.structure_uploads import load_uploaded_structures
 
-# 硬编码兜底（knowledge.md 不可用时的最小集合）
+# 硬编码兜底（knowledge_molecules.md 不可用时的最小集合）
 _FALLBACK_MOLECULES = {
     "Li":   {"charge": 1,  "spin": 1, "atom_count": 1,  "basis": "b3lyp/6-311+g(d,p)", "forcefield": "UFF"},
     "TFSI": {"charge": -1, "spin": 1, "atom_count": 15, "basis": "b3lyp/6-311+g(d,p)", "forcefield": "GAFF"},
     "NO3":  {"charge": -1, "spin": 1, "atom_count": 4,  "basis": "b3lyp/6-311+g(d,p)", "forcefield": "GAFF"},
 }
 
+
+def _normalized_molecule_label(value: object) -> str:
+    """Normalize charge typography without changing the actual molecule key."""
+    text = _unicodedata.normalize("NFKC", str(value or "")).strip()
+    text = text.translate(str.maketrans({"−": "-", "＋": "+"}))
+    return _re.sub(r"\s+", "", text).replace("^", "").casefold()
+
+
+def _uploaded_charge_aliases(name: str, charge: int) -> list[str]:
+    """Expose familiar ion notation while preserving the core filename key."""
+    if charge == 0:
+        return [name]
+    sign = "+" if charge > 0 else "-"
+    magnitude = abs(charge)
+    suffix = sign if magnitude == 1 else f"{magnitude}{sign}"
+    return [name, f"{name}{suffix}"]
+
 class _MoleculeRegistry:
-    """从 knowledge.md 自动解析分子库，TF-IDF 语义检索。"""
+    """从 knowledge_molecules.md 自动解析分子库，TF-IDF 语义检索。"""
 
     def __init__(self):
         self._names = []
@@ -273,31 +293,48 @@ class _MoleculeRegistry:
         self._names = []
         self._data = {}
         self._matrix = None
-        path = get_project_root() / "docs" / "knowledge.md"
-        if not path.exists():
-            self._data = dict(_FALLBACK_MOLECULES)
-            self._names = list(self._data.keys())
-            return
+        path = get_project_root() / "docs" / "knowledge_molecules.md"
+        if path.exists():
+            text = path.read_text()
+            # 匹配 knowledge_molecules.md 中的分子表格行: | Li | +1 | 1 | 1 | ... | 锂离子、锂盐 |
+            rows = _re.findall(
+                r'\|\s*(\w+)\s*\|\s*([+-]?\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([\w/+\(\)\-,]+)\s*\|\s*(\w+)\s*\|\s*([^|]*)\|',
+                text
+            )
+            for name, charge, spin, atom_count, basis, forcefield, aliases_raw in rows:
+                aliases = [a.strip() for a in aliases_raw.replace('、', ',').split(',') if a.strip()]
+                aliases.append(name)  # 自身名也加入检索
+                self._data[name] = {
+                    "charge": int(charge), "spin": int(spin),
+                    "atom_count": int(atom_count), "basis": basis.strip(),
+                    "forcefield": forcefield.strip(), "aliases": aliases,
+                }
+                self._names.append(name)
 
-        text = path.read_text()
-        # 匹配 knowledge.md 中的分子表格行: | Li | +1 | 1 | 1 | ... | 锂离子、锂盐 |
-        rows = _re.findall(
-            r'\|\s*(\w+)\s*\|\s*([+-]?\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([\w/+\(\)\-,]+)\s*\|\s*(\w+)\s*\|\s*([^|]*)\|',
-            text
-        )
-        for name, charge, spin, atom_count, basis, forcefield, aliases_raw in rows:
-            aliases = [a.strip() for a in aliases_raw.replace('、', ',').split(',') if a.strip()]
-            aliases.append(name)  # 自身名也加入检索
-            self._data[name] = {
-                "charge": int(charge), "spin": int(spin),
-                "atom_count": int(atom_count), "basis": basis.strip(),
-                "forcefield": forcefield.strip(), "aliases": aliases,
+        struct_dir = get_project_root() / "struct"
+        # Uploaded entries are backed by their normalized original input and
+        # use only the safe core filename as their primary molecule key.
+        for entry in load_uploaded_structures(get_project_root()):
+            if not (struct_dir / f"{entry.name}{entry.format}").is_file():
+                continue
+            aliases = _uploaded_charge_aliases(entry.name, entry.charge)
+            existing = self._data.get(entry.name)
+            if existing is not None:
+                existing_aliases = list(existing.get("aliases", []))
+                existing["aliases"] = list(dict.fromkeys([*existing_aliases, *aliases]))
+                continue
+            self._data[entry.name] = {
+                "charge": entry.charge,
+                "spin": entry.spin,
+                "atom_count": entry.atom_count,
+                "basis": "b3lyp/6-311+g(d,p)",
+                "forcefield": "GAFF",
+                "aliases": aliases,
             }
-            self._names.append(name)
+            self._names.append(entry.name)
 
         # 补充 struct/ 下的原始输入。未登记分子不能默认中性；最终电荷和
         # 多重度只能由 tools_inspect_quantum_inputs 的后端特异审计提供。
-        struct_dir = get_project_root() / "struct"
         if struct_dir.exists():
             for input_path in sorted([*struct_dir.glob("*.gjf"), *struct_dir.glob("*.inp")]):
                 name = input_path.stem
@@ -325,12 +362,12 @@ class _MoleculeRegistry:
     def lookup(self, query: str, threshold: float = 0.55) -> dict | None:
         """检索分子信息：先精确匹配，失败再语义检索。返回 None 表示未找到。"""
         q = query.strip()
+        normalized_query = _normalized_molecule_label(q)
+        if not normalized_query:
+            return None
         # ① 精确匹配：名称本身
         if q in self._data:
-            info = self._data[q]
-            return {"name": q, "charge": info["charge"], "spin": info["spin"],
-                    "atom_count": info["atom_count"], "basis": info["basis"],
-                    "forcefield": info["forcefield"], "aliases": info["aliases"]}
+            return self._result(q)
         # ② 名称或别名匹配。ASCII 分子名按大小写无关处理。
         for name, info in self._data.items():
             aliases = info.get("aliases", [])
@@ -338,10 +375,10 @@ class _MoleculeRegistry:
                 q in aliases
                 or q.casefold() == name.casefold()
                 or any(q.casefold() == alias.casefold() for alias in aliases)
+                or normalized_query == _normalized_molecule_label(name)
+                or any(normalized_query == _normalized_molecule_label(alias) for alias in aliases)
             ):
-                return {"name": name, "charge": info["charge"], "spin": info["spin"],
-                    "atom_count": info["atom_count"], "basis": info["basis"],
-                    "forcefield": info["forcefield"], "aliases": info["aliases"]}
+                return self._result(name)
         # ③ 向量语义检索（兜底，提高阈值防误匹配）
         if self._matrix is None or self._matrix.shape[0] == 0:
             return None
@@ -350,17 +387,57 @@ class _MoleculeRegistry:
         best_idx = sims.argmax()
         if sims[best_idx] < threshold:
             return None
-        name = self._names[best_idx]
+        return self._result(self._names[best_idx])
+
+    def _result(self, name: str) -> dict:
         info = self._data[name]
-        return {"name": name, "charge": info["charge"], "spin": info["spin"],
-                "atom_count": info["atom_count"], "basis": info["basis"],
-                "forcefield": info["forcefield"], "aliases": info["aliases"]}
+        return {
+            "name": name,
+            "charge": info["charge"],
+            "spin": info["spin"],
+            "atom_count": info["atom_count"],
+            "basis": info["basis"],
+            "forcefield": info["forcefield"],
+            "aliases": list(info["aliases"]),
+        }
+
+    def suggest(self, query: str, limit: int = 5) -> list[str]:
+        """Return deterministic nearest core names for a non-exact lookup."""
+        normalized_query = _normalized_molecule_label(query)
+        if not normalized_query or limit < 1:
+            return []
+        ranked: list[tuple[float, str]] = []
+        for name in self._names:
+            aliases = self._data[name].get("aliases", [name])
+            score = max(
+                SequenceMatcher(None, normalized_query, _normalized_molecule_label(alias)).ratio()
+                for alias in [name, *aliases]
+            )
+            if score > 0:
+                ranked.append((score, name))
+        ranked.sort(key=lambda item: (-item[0], item[1].casefold()))
+        return [name for _score, name in ranked[:limit]]
 
     def get_all_names(self) -> list[str]:
         return list(self._names)
 
 _registry = _MoleculeRegistry()
 _MOLECULES = _registry  # 兼容旧名字
+
+
+def list_registered_molecules() -> list[str]:
+    """Return core filenames only, suitable for the proposal assistant UI."""
+    return _registry.get_all_names()
+
+
+def lookup_registered_molecule(query: str) -> dict | None:
+    """Resolve one name or alias through the current molecule registry."""
+    return _registry.lookup(query)
+
+
+def suggest_registered_molecules(query: str, limit: int = 5) -> list[str]:
+    """Return nearest registered core filenames without invoking an LLM."""
+    return _registry.suggest(query, limit)
 
 _COMPOUNDS = {
     "LiTFSI":       [("Li", 1), ("TFSI", 1)],
@@ -505,7 +582,7 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
 
     elif tool_name == "tools_diagnose_error_config":
         sym = args.get("symptom", "")
-        fix = _ERRORS.get(sym, "查看 knowledge.md §九 获取详细诊断")
+        fix = _ERRORS.get(sym, "查看 knowledge_molecules.md §九 获取详细诊断")
         from willy.errors import DiagnosisResult
         dr = DiagnosisResult(
             source="config",

@@ -46,6 +46,68 @@ def test_text_confirmation_without_a_pending_plan_does_not_start(monkeypatch):
     assert "当前没有待确认的模拟方案" in updates[-1][1][-1]["content"]
 
 
+def test_structure_upload_success_message_is_concise(monkeypatch, tmp_path):
+    import willy.toolist_global as toolist_global
+
+    source = tmp_path / "Li.gjf"
+    monkeypatch.setattr(
+        agent_config,
+        "normalize_uploaded_structure",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(toolist_global._registry, "_load", lambda: None)
+
+    _file, history, state = agent_config.handle_upload(source, [])
+
+    assert _file is None
+    assert history == state == [
+        {"role": "user", "content": "已上传Li.gjf，仅保留坐标、电荷、自旋。"}
+    ]
+
+
+def test_structure_upload_failure_keeps_one_line_reason(monkeypatch, tmp_path):
+    source = tmp_path / "Li.gjf"
+    monkeypatch.setattr(
+        agent_config,
+        "normalize_uploaded_structure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            agent_config.StructureUploadError("文件名 Li.gjf 已存在。相关核心文件名：Li")
+        ),
+    )
+
+    _file, history, state = agent_config.handle_upload(source, [])
+
+    assert _file is None
+    assert history == state == [
+        {"role": "user", "content": "上传失败：文件名 Li.gjf 已存在。相关核心文件名：Li"}
+    ]
+
+
+def test_molecule_catalog_list_is_read_only_and_does_not_call_llm(monkeypatch):
+    plan = _plan({"backend": "g16", "residues": {"Li": 1}})
+    monkeypatch.setattr(agent_config, "_DS", None)
+
+    updates = list(agent_config.chat("查询当前有哪些分子", _pending_plan(), plan))
+
+    assert updates[-1][3] is plan
+    assert "当前可用分子" in updates[-1][1][-1]["content"]
+    assert "Li" in updates[-1][1][-1]["content"]
+
+
+def test_molecule_catalog_lookup_returns_nearby_core_names_without_llm(monkeypatch):
+    import willy.toolist_global as toolist_global
+
+    plan = _plan({"backend": "g16", "residues": {"Li": 1}})
+    monkeypatch.setattr(agent_config, "_DS", None)
+    monkeypatch.setattr(toolist_global, "lookup_registered_molecule", lambda _query: None)
+    monkeypatch.setattr(toolist_global, "suggest_registered_molecules", lambda _query: ["Ca", "Li"])
+
+    updates = list(agent_config.chat("分子库中有 Ca2+ 吗", _pending_plan(), plan))
+
+    assert updates[-1][3] is plan
+    assert "Ca、Li" in updates[-1][1][-1]["content"]
+
+
 def test_start_pipeline_rejects_validation_issues_before_reserving_a_run(monkeypatch):
     reserved = []
     monkeypatch.setattr(agent_config, "write_startup_audit", lambda *_args: None)

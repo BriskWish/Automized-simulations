@@ -2,9 +2,9 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **版本 0.5.0**：当前发布能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。远程执行与托管网关已从产品入口移除并冻结为后续版本参考；本版加入受控 `/resume`、`/fork`、`/switch`、按工程持久化运行助理历史、CPU 资源预检写回和 G-01 最小 GROMACS 验收 fixture。可溯源工作记录、测试基线和预检核数见 [`docs/release_notes_v0.5.0.md`](docs/release_notes_v0.5.0.md)。
+> 当前公开能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理支持受控 `/resume`、`/fork`、`/switch` 与按工程保存的对话记录；CPU 资源预检会规范化 `nproc`。远程执行与托管网关不属于当前产品入口。
 
-> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。四条 G16/ORCA + Sobtop/LigParGen 历史完整 run 的脱敏核心证据已归档，并与后续版本的确定性回归共同构成验收并集；新目标机只需任选一条受支持 profile 完成十步，另行完成真实 LLM 错误处理验收即可。
+> 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。成熟方案必须在目标机以受支持 profile 完成十步，并通过受控 LLM 错误处理验收。
 
 本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测和后处理/分析不属于本版本公开能力。
 
@@ -24,9 +24,8 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                   Gradio Web UI                   │
-│         聊天输入 → LLM 解析 → 方案确认 → 启动       │
-│         3D 分子查看器 | 运行助理                    │
+│          FastAPI + React Assistant UI              │
+│    方案助理 | 运行助理 | 可视化 | 审计日志            │
 └────────────────────┬─────────────────────────────┘
                      │
 ┌────────────────────▼─────────────────────────────┐
@@ -57,11 +56,12 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 | 依赖 | 当前项目版本基线 | 用途 | 获取方式与许可状态 |
 |------|------|------|------|
 | Python | 3.10--3.12 | 运行环境 | 系统、conda/mamba 或受控环境提供；系统 Python 3.8 不受支持 |
+| Node.js | 20 LTS 或更高 | 构建 React 前端 | 仅在源码检出中执行一次 `npm ci && npm run build`；运行时由 `app.py` 提供已构建静态资源 |
 | Gaussian 16 | 合法安装，Revision 不自动探测 | 默认量子化学后端 | 用户自行安装；Gaussian 的签署许可软件，不随 Willy 提供或再分发 |
 | Gaussian 09 | 合法安装，Revision 不自动探测 | 保留后端接口 | 用户自行安装；同样属于 Gaussian 许可软件，且本版本不作可靠全链路验收 |
 | formchk | 与所选 G16/G09 同一安装 | Gaussian checkpoint 转换 | 使用同一 Gaussian 合法安装中的程序，不可混用版本 |
 | ORCA | 6.1.1；兼容目标 6.x | 可选量子化学后端 | 用户按 [ORCA EULA](https://orcaforum.kofo.mpg.de/app.php/privacypolicy) 下载并安装；不随 Willy 提供或再分发 |
-| Multiwfn（内置） | 3.8(dev)，2025-02-14 | RESP 电荷拟合、Molden/FCHK 转换 | `vendor/` 最小 Linux x86_64 负载；随附许可证和引用要求 |
+| Multiwfn（内置） | 项目 Vendor 负载 | RESP 电荷拟合、Molden/FCHK 转换 | `vendor/` 最小 Linux x86_64 负载；随附许可证和引用要求 |
 | GROMACS | 开发/真实证据 2025.0；兼容目标 2023--2025 | MD 模拟引擎 | 用户通过系统包或官方构建安装；GROMACS 为 LGPL-2.1-or-later，不随 Willy 提供 |
 | Packmol（内置） | 21.2.3，glibc >= 2.29 | 初始盒子构建 | `vendor/` 的 Linux x86_64 通用构建；MIT，保留 `PACKMOL_LICENSE.txt` |
 | Sobtop | 仓内 Linux x86_64 负载 | GAFF/UFF 拓扑生成 | 上游来源为 [Sobtop](http://sobereva.com/soft/sobtop/)；本项目不声明其著作权或代替上游条款，使用者须自行核实使用条件 |
@@ -85,6 +85,10 @@ python3.11 -m venv .venv  # 或任何 Python 3.10--3.12 解释器
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
+cd frontend
+npm ci
+npm run build
+cd ..
 python -V  # 必须为 Python 3.10--3.12
 ```
 
@@ -110,7 +114,7 @@ cp .env.example .env
 外部软件可使用 `WILLY_G16_BIN`、`WILLY_G09_BIN`、`WILLY_G09_FORMCHK_BIN`、`WILLY_ORCA_HOME`、`WILLY_GMX_BIN`、
 `WILLY_LIGPARGEN_BIN`、`WILLY_BOSS_HOME`、`WILLY_OBABEL_BIN`、`WILLY_CSH_BIN`
 等白名单变量覆盖发现结果；详细优先级和旧变量兼容规则见
-[`docs/environment_registry_design.md`](docs/environment_registry_design.md)。在完整源码检出中，Sobtop 与 Packmol 由项目路径解析；OPLS-AA 的 Open Babel/C shell/BOSS 必须通过预检。公开发行包的 Sobtop 路径尚未确定，不能假定普通安装包中存在它。
+[`docs/environment_registry.md`](docs/environment_registry.md)。在完整源码检出中，Sobtop 与 Packmol 由项目路径解析；OPLS-AA 的 Open Babel/C shell/BOSS 必须通过预检。公开发行包的 Sobtop 路径尚未确定，不能假定普通安装包中存在它。
 
 ### 命令行检查环境
 
@@ -135,7 +139,7 @@ Li 80, TFSI 80, FEC 300, 350K, 20ns
 
 Agent 会给出方案确认；紧随方案回复“运行”“开始运行”或“确认运行”后，自动执行当前的 10 步 MD 流程。确认前可在配置中开启可选的全精度 `.trr` 轨迹；`.gro`、`.xtc`、`.edr` 是固定产物。
 Agent默认的MD路径为梯度退火模拟，暂不支持核心更改。当前为298K -> 500K -> 500K -> 400K -> 400K -> 298K -> 298K 各步骤分别为2 1 2 1 2 2 ns.可以在方案配置时修改温度点和退火步骤时长。
-界面提供“任务”“配置”和“关于”页签；“关于”页说明项目定位、构建参与者、运行模型、Willy 的职责与后续规划，并展示项目公众号二维码。
+界面提供本地任务、配置、新手指南和关于页；任务工作区包含方案助理、运行助理、可视化和日志。日志按当前工程展示公开 manifest registry 投影及 `events.jsonl`，不展示私有记录、命令、绝对路径或密钥。
 
 ## 内置分子
 
@@ -155,17 +159,20 @@ Agent默认的MD路径为梯度退火模拟，暂不支持核心更改。当前�
 
 LLM 支持中文别名映射：输入"锂离子"自动识别为 Li，"硝酸根"→NO3，依此类推。
 
-上表是 Config Agent 的可识别分子元数据，不等同于当前工作区已具备可执行的量子输入。启动某个组分前，`struct/<分子>.gjf`（或可复用的对应后端中间产物）必须存在；当前实际可用文件以 `struct/` 目录为准，缺失输入会在分配 run 后被前置校验拒绝。
+上表是 Config Agent 的可识别分子元数据，不等同于当前工作区已具备可执行的量子输入。启动某个组分前，`struct/<分子>.gjf` 或 `struct/<分子>.inp`（或可复用的对应后端中间产物）必须存在；当前实际可用文件以 `struct/` 目录为准，缺失输入会在分配 run 后被前置校验拒绝。
 
-## 扩展分子
+## 上传结构
 
-将 `.gjf` 文件放入 `struct/` 目录，系统自动识别为新分子，Willy只会修订分配核数和保存路径，但不会修改已有的基组和电荷数等。新分子可被后续方案识别。
+在方案助理中上传可审计的 `.gjf` 或 `.inp` 原始量子输入。上传时会验证有限坐标、文件内电荷和自旋，并以核心文件名登记；`Li+`、`Ca2+` 等离子文件名会分别规范为 `Li`、`Ca`，而 `NO3-` 保留为 `NO3`。同一核心文件名已存在时拒绝覆盖，并提示相关结构名称。
+
+Willy 只保留坐标、电荷和自旋，生成规范化输入。原文件的计算方法、基组、`mem`、`nproc` 和其他执行指令不会继承；基组与资源配置由候选方案、启动前审计和 CPU 容量规则统一决定。成功后，核心文件名会进入分子知识库，供后续方案查询。用户上传文件及其本地登记属于运行数据，不随 GitHub 源码版本发布。
 
 ## 目录结构
 
 ```
 Willy/
-├── app.py                  ← Gradio Web UI
+├── app.py                  ← FastAPI 入口，提供 React 工作台与受限 API
+├── frontend/               ← React/assistant-ui 源码与生产构建配置
 ├── run_pipeline.py         ← 全流程编排 (10 步)
 ├── config.json             ← 体系配置
 ├── src/willy/             ← 核心 Python 包
@@ -193,27 +200,27 @@ Willy/
 │   ├── topology/           ← 拓扑生成 (Sobtop)
 │   └── simulation/         ← MD 模拟 (GROMACS)
 ├── vendor/                 ← 内置依赖 (Packmol, Open Babel, Sobtop, Multiwfn)
-├── struct/                 ← 分子结构文件 (.gjf)
+├── struct/                 ← 内置与本地上传的量子原始输入（.gjf/.inp）
 ├── md_run/<run_id>/         ← 隔离运行产物与审计记录
 ├── docs/                   ← 文档 (详见 docs/README.md 索引)
 │   ├── README.md          ← 文档导航
 │   ├── document_registry.md ← 文档状态与维护规范
 │   ├── Willy.md           ← 架构文档
-│   ├── knowledge.md        ← 分子知识库
+│   ├── knowledge_molecules.md        ← 分子知识库
 │   ├── knowledge_mdrun.md  ← GROMACS 诊断知识库
 │   ├── ERR_WARN_Build.md   ← Error/Warning 协议
 │   ├── naming_convention.md ← 命名规范
-│   ├── quantum_design.md   ← 量子层设计
-│   ├── topology_design.md  ← 拓扑层设计
+│   ├── quantum.md   ← 量子层设计
+│   ├── topology.md  ← 拓扑层设计
 │   ├── status_api.md       ← 前端接口
 │   ├── employees.md        ← 团队分工与共识
-│   ├── simulation_design.md ← 模拟设计
-│   ├── environment_registry_design.md ← 外部环境设计
-│   ├── remote_execution_design.md ← 后续版本远程执行参考
+│   ├── simulation.md ← 模拟设计
+│   ├── environment_registry.md ← 外部环境设计
+│   ├── remote_execution.md ← 后续版本远程执行参考
 │   ├── gateway.md           ← 后续版本网关参考
-│   ├── revision_strategy.md ← 修订路线与重构清单
-│   ├── testing_strategy.md ← 测试与发布门禁
-│   ├── run_assistant_design.md ← 运行助理计划
+│   ├── revision.md ← 修订路线与重构清单
+│   ├── testing.md ← 测试与发布门禁
+│   ├── run_assistant.md ← 运行助理计划
 │   └── project_gap_analysis.md ← 问题台账
 └── benchmarks/             ← LLM 评分测试
 ```
@@ -222,9 +229,7 @@ Willy/
 
 → **[docs/README.md](docs/README.md)** — 文档导航与分类；**[文档台账](docs/document_registry.md)** — 用途、状态、责任人与维护规范。
 
-## 贡献与协作
-
-GitHub 的 Contributors 图由默认分支上的提交作者自动统计。项目记录了以下协作角色：
+## 协作
 
 - **Codex（OpenAI AI 协作工程助手）**：参与架构设计、代码实现、测试、文档与发布质量检查。
 
@@ -247,4 +252,4 @@ Willy 集成并编排第三方科学软件，但 Willy 作者不拥有其原始�
 
 Willy 的原创源代码以公开源码形式免费提供，可用于任何合法用途，包括研究、学习、评估和内部工作流。任何对 Willy 原创代码的**再分发**，包括重新发布源码或修改版、制作安装包/镜像、或将其并入其他产品，须事先取得项目作者授权。完整条款见 [`LICENSE.md`](LICENSE.md)。本声明不向使用者授予 `vendor/`、外部软件、其文档或学术成果的任何权利；各第三方组件仍完全适用其上游许可证、下载条件和引用要求。
 
-该条款是项目作者的自定义源码使用声明，并非 OSI 定义的标准开源许可证：标准开源许可证要求允许自由再分发。GitHub 公开仓库仅使其他 GitHub 用户可以查看和在 GitHub 服务内 fork；它不替代第三方软件的再分发许可。第三方许可证、版本来源与待核实项见 [`docs/environment_registry_design.md`](docs/environment_registry_design.md)。
+该条款是项目作者的自定义源码使用声明，并非 OSI 定义的标准开源许可证：标准开源许可证要求允许自由再分发。GitHub 公开仓库仅使其他 GitHub 用户可以查看和在 GitHub 服务内 fork；它不替代第三方软件的再分发许可。第三方许可证、版本来源与待核实项见 [`docs/environment_registry.md`](docs/environment_registry.md)。

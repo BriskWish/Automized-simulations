@@ -1,6 +1,6 @@
 # Willy 项目总览：面向可信分子模拟的 Agent 工作流
 
-> 当前版本：`0.5.0`。本版本支持本机 MD 执行和用户自配 OpenAI-compatible LLM；远程执行与托管网关已从产品入口移除并冻结为后续版本参考。本版加入受控 `/resume`、`/fork`、`/switch`、按工程持久化运行助理历史、CPU 资源预检写回和 G-01 最小 GROMACS 验收 fixture；可溯源记录见 [`docs/release_notes_v0.5.0.md`](docs/release_notes_v0.5.0.md)。
+> 当前范围：本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理提供受控 `/resume`、`/fork`、`/switch`、按工程保存的对话记录和 CPU 资源预检。远程执行与托管网关不属于当前产品入口。
 
 > 定位：Willy 将自然语言需求转化为可审计的分子动力学工作流。LLM 不直接执行科学计算，而是在受限工具、结构化配置、确定性编排和人工授权的边界内参与决策。
 >
@@ -36,7 +36,7 @@ Willy 的核心选择是：**LLM 负责语言理解、诊断候选和用户沟�
 ## 3. 真实执行链路
 
 ```text
-Gradio 前端
+FastAPI + React 前端
   -> Config Agent
   -> config.json 结构校验与用户确认
   -> Pipeline Launch 预占启动锁、分配 run_id
@@ -62,7 +62,7 @@ Gradio 前端
 
 模拟阶段严格为 `EM -> EQ -> PROD`。默认 EQ 是高温、过渡温度和目标温度组成的三点式退火，含六段可定义时长；初始体积默认按 `0.7 g/cm3` 估算，实际盒矢量、体积和质量密度在 run 内记录。PROD 必须消费通过验收的 EQ 许可与匹配 checkpoint，不能仅以 `eq.gro` 的存在作为依据。
 
-已实现 Sobtop 的 GAFF/UFF 和 LigParGen/BOSS 的 OPLS-AA 两条独立拓扑路径；它们不可在同一 run 中混用。2026-08-11 的四 profile 真实验收均完成 10/10，核心脱敏证据已归档；历史证据与后续版本确定性回归按验收并集使用，新目标机只需任选一条受支持链路完成十步。中性 OPLS 组合的单一 Ewald 净电荷 warning 按 `0.15e` 受控容差放行并已回归。AMBER、离子 OPLS 参数化和其他力场混用尚未作为公开能力。
+Sobtop 的 GAFF/UFF 与 LigParGen/BOSS 的 OPLS-AA 是两条独立拓扑路径，不能在同一 run 中混用。中性 OPLS 组合的单一 Ewald 净电荷 warning 仅在总电荷绝对值不超过 `0.15e` 时按受控规则放行。AMBER、离子 OPLS 参数化和其他力场混用不属于公开能力。
 
 ## 4. 文字到配置：轻量 RAG 与结构化校验
 
@@ -84,7 +84,7 @@ Config Agent 将输入路由为“单次查询/操作”或“新体系配置”
 
 ### 4.2 面向分子实体识别的轻量 RAG
 
-`_MoleculeRegistry` 解析 `docs/knowledge.md` 的分子表，并结合 `struct/` 中真实可用的输入。它使用字符边界 n-gram 的 TF-IDF 向量化和余弦相似度，为中文别名、英文名称、离子写法与轻微拼写差异做近似匹配：
+`_MoleculeRegistry` 解析 `docs/knowledge_molecules.md` 的分子表，并结合 `struct/` 中真实可用的输入。它使用字符边界 n-gram 的 TF-IDF 向量化和余弦相似度，为中文别名、英文名称、离子写法与轻微拼写差异做近似匹配：
 
 ```text
 用户文本 -> TF-IDF 字符向量 -> 候选分子/别名匹配
@@ -179,7 +179,7 @@ EQ 失败是该机制的代表：模型只生成脱敏修复方案；用户确�
 | 工具越权或重试失控 | Action catalog + `RecoveryPolicy` | 风险、白名单、次数和确认要求代码化 |
 | 上游修复导致下游越级 | 阶段许可 + artifact contract | 工具成功不等于步骤成功；PROD 需要真正验收的 EQ |
 | 多运行目录混用 | `RunRegistry` + run-local workspace | 隔离、历史索引和受限查询 |
-| 前端泄露底层细节 | 公共状态/事件与私有 manifest 分层 | 显示工序级进度，不泄露敏感实现细节 |
+| 前端泄露底层细节 | 公共状态/事件与私有 manifest 分层 | 日志页仅显示 registry 投影与公开事件，不泄露敏感实现细节 |
 | 进程失控 | 受管进程组和停止升级 | checkpoint-first 停止与生命周期审计 |
 | mock 被误当真实验收 | 分层 marker + external evidence | 区分单测、契约、集成、真实工具与真实 LLM 证据 |
 
@@ -211,7 +211,7 @@ run-local 状态、事件、写前日志、provenance、决策追踪和进程生
 
 ## 11. 当前能力边界
 
-当前代码和确定性测试已验证配置、编排、状态、恢复与多层契约；四条真实 profile 均已有归档的 10/10 证据。当前成熟方案以“任一受支持 profile 的目标机十步完成”加“真实 LLM 对受控错误的正确处理”为验收核心；G09 仅作未验证提示，科学体系预测、后处理/分析和离子 OPLS 不属于本版本公开能力。其他实验性组件不纳入本版本验收。
+当前成熟方案以“任一受支持 profile 在目标机完成十步”加“真实 LLM 对受控错误的正确处理”为验收核心。G09 仅保留接口；科学体系预测、后处理/分析和离子 OPLS 不属于当前公开能力。其他实验性组件不纳入验收。
 
 因此，Willy 当前最合适的定位是：**具有完整工程约束与可扩展架构的研究型内部 MD 自动化平台**。它显著降低跨软件工作流和排错成本，但只对已登记 profile 的十步无错误执行作出承诺，不对 G09、科学体系性质、后处理/分析或其他实验性组件作出本版本承诺。
 
@@ -220,7 +220,7 @@ run-local 状态、事件、写前日志、provenance、决策追踪和进程生
 - `README.md`：安装、运行和公开主流程。
 - `docs/Willy.md`：项目结构与模块关系。
 - `docs/status_api.md`：状态、事件和公开/私有边界。
-- `docs/simulation_design.md`：MD 协议、阶段许可和回滚。
-- `docs/run_assistant_design.md`：运行助理权限和演进计划。
-- `docs/testing_strategy.md`：测试分层、external smoke 和发布门禁。
+- `docs/simulation.md`：MD 协议、阶段许可和回滚。
+- `docs/run_assistant.md`：运行助理权限和演进计划。
+- `docs/testing.md`：测试分层、external smoke 和发布门禁。
 - `docs/project_gap_analysis.md`：真实外部验收、安全和产品化的未关闭事项。

@@ -9,7 +9,6 @@ import hashlib
 import json
 import re
 import secrets
-import shutil
 import signal
 import subprocess
 import threading
@@ -23,6 +22,7 @@ from willy.llm_config import DEFAULT_LLM_MODEL, LLMConfigError, configured_llm_c
 from willy.workflow_config import _available_residues, validate_config, apply_config
 from willy.remote_registry import RemoteRegistryError, parse_execution_md
 from willy.toolist_global import TOOLS, handle_tool_call
+from willy.structure_uploads import StructureUploadError, normalize_uploaded_structure
 from willy.quantum.input_audit import (
     QuantumInputAuditError,
     apply_audited_quantum_properties,
@@ -69,7 +69,7 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案
 }}
 ```
 - backend: 量子化学后端，默认 g16。用户说"用 G09""gaussian09" 时设为 g09；说"用 ORCA""orca" 时设为 orca。后端只能写入候选 JSON，不能调用写入型工具。
-- molecules/residues 的 key 必须用 struct/ 下的精确文件名: {molecules}。用户写 Li+/Li⁺/锂离子 都映射到 Li，NO3-/NO₃⁻/硝酸根 都映射到 NO3
+- molecules/residues 的 key 必须用 struct/ 下的核心文件名: {molecules}。带电写法由注册表统一归一化，例如 Li+/Li⁺/锂离子 映射到 Li，上传的 Ca2+/Ca²⁺ 映射到 Ca，NO3-/NO₃⁻/硝酸根 映射到 NO3；最终 key 不含电荷符号。
 - **电荷和自旋不是默认值，也不能从知识库猜测。** 在输出任何完整候选 config 前，必须完成一次 `tools_inspect_quantum_inputs` 审计；g16/g09 只接受同名 `.gjf`，orca 只接受同名 `.inp`。工具返回的每个 `charge` 和 `spin` 是唯一可写入最终 JSON 的数值。语义草案阶段只能给出 backend 和 residues，服务端会在本轮审计上下文中固定其 backend/name/count 后进入强制审计阶段；这不是用户确认前的最终运行配置冻结。
 - 审计返回 `ok=false` 时返回阻塞 Error，不得输出可确认 config。`charge_balance=imbalanced` 时，除非用户已明确要求并在 JSON 中写入 `ion_compensation` 或 `non_neutral_confirmed=true`，否则返回 `charge_imbalance` Error，说明净电荷和缺失的配平信息；绝不能把任意分子改写为中性来绕过。
 - md 必须使用 schema_version=2；EQ 采用六段退火，PROD 只接受独立 duration_ns，PROD 温度必须等于 EQ target_temperature
@@ -186,11 +186,20 @@ _FRAMEWORK_SOURCE_WHITELIST = (
     ("README.md", "README"),
     ("docs/Willy.md", "Willy"),
     ("docs/status_api.md", "status_api"),
-    ("docs/run_assistant_design.md", "run_assistant_design"),
+    ("docs/run_assistant.md", "run_assistant"),
     ("docs/document_registry.md", "document_registry"),
 )
 _FRAMEWORK_SOURCE_MAX_SECTION_CHARS = 1_200
 _FRAMEWORK_SOURCE_MAX_SECTIONS = 6
+_MOLECULE_CATALOG_LIST_MARKERS = (
+    "当前有哪些分子", "有哪些分子", "有些什么分子", "可用分子", "分子列表",
+    "列出分子库", "查看分子库", "显示分子库", "有哪些结构", "可用结构",
+)
+_MOLECULE_CATALOG_QUERY_PATTERNS = (
+    re.compile(r"^\s*(?:查询|查找|搜索|找一下)\s*(?:分子库(?:中)?(?:的)?)?\s*(?P<name>[^，。！？?]+?)\s*$"),
+    re.compile(r"^\s*(?:分子库(?:中|里)?(?:有|是否有)|有没有|是否有)\s*(?P<name>[^，。！？?]+?)(?:吗|么|嘛)?\s*$"),
+    re.compile(r"^\s*(?P<name>[^，。！？?]+?)\s*(?:在|是否在)\s*分子库(?:中|里)?(?:有|吗)?\s*$"),
+)
 
 
 @dataclass(frozen=True)
@@ -1134,6 +1143,54 @@ def _answer_framework_design_question(message: str) -> str:
     return answer.strip()
 
 
+def _molecule_catalog_intent(message: str) -> tuple[str, str | None] | None:
+    """Classify explicit molecule-library questions without an LLM call."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text)
+    if any(marker in compact for marker in _MOLECULE_CATALOG_LIST_MARKERS):
+        return "list", None
+    for pattern in _MOLECULE_CATALOG_QUERY_PATTERNS:
+        match = pattern.fullmatch(text)
+        if match:
+            name = match.group("name").strip()
+            if name:
+                return "lookup", name
+    return None
+
+
+def _answer_molecule_catalog_intent(intent: tuple[str, str | None]) -> str:
+    """Return core filenames only and keep the proposal state read-only."""
+    from willy.toolist_global import (
+        list_registered_molecules,
+        lookup_registered_molecule,
+        suggest_registered_molecules,
+    )
+
+    mode, query = intent
+    if mode == "list":
+        names = list_registered_molecules()
+        if not names:
+            return "当前分子库为空。"
+        rows = ["、".join(names[index:index + 10]) for index in range(0, len(names), 10)]
+        return f"当前可用分子（{len(names)}）：\n" + "\n".join(rows)
+
+    assert query is not None
+    matched = lookup_registered_molecule(query)
+    suggestions = suggest_registered_molecules(query)
+    if matched is not None:
+        name = str(matched["name"])
+        nearby = [candidate for candidate in suggestions if candidate != name]
+        detail = f"精确匹配：{name}"
+        if nearby:
+            detail += f"\n相近核心文件名：{'、'.join(nearby)}"
+        return detail
+    if suggestions:
+        return f"未找到“{query}”的精确结构。最接近的核心文件名：{'、'.join(suggestions)}"
+    return f"未找到“{query}”的匹配或相近结构。"
+
+
 def _execution_md_from_config(config: Mapping[str, object]) -> dict[str, object]:
     """Return the validated execution choice, retaining the legacy local default."""
     execution = config.get("execution")
@@ -1212,15 +1269,12 @@ def handle_upload(file, chat_history):
         return None, chat_history, chat_history
     try:
         src = Path(file.name) if hasattr(file, 'name') else Path(str(file))
-        if not src.exists():
-            msg = f"上传失败：文件 {src.name} 不存在"
-        else:
-            dst = ROOT / "struct" / src.name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            msg = f"已上传 {src.name} 到 struct/"
-            from willy.toolist_global import _registry
-            _registry._load()
+        normalize_uploaded_structure(src, project_root=ROOT)
+        msg = f"已上传{src.name}，仅保留坐标、电荷、自旋。"
+        from willy.toolist_global import _registry
+        _registry._load()
+    except StructureUploadError as exc:
+        msg = f"上传失败：{exc}"
     except Exception as e:
         msg = f"上传失败：{e}"
     h = list(chat_history) + [{"role": "user", "content": msg}]
@@ -1283,6 +1337,15 @@ def chat(
             launch_message = receipt.message
         h = user_h + [{"role": "assistant", "content": launch_message}]
         yield _emit(h, None if receipt.state == "started" else pending_plan)
+        return
+
+    catalog_intent = _molecule_catalog_intent(message)
+    if catalog_intent is not None:
+        h = user_h + [{
+            "role": "assistant",
+            "content": _answer_molecule_catalog_intent(catalog_intent),
+        }]
+        yield _emit(h, pending_plan)
         return
 
     # Project/framework questions stay inside the existing proposal assistant,

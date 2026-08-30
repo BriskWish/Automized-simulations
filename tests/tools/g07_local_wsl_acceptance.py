@@ -152,7 +152,7 @@ def _scenario(
     decisions = _read_jsonl(run_dir / "decision_trace.jsonl")
     structured = _read_jsonl(run_dir / "logs" / "structured.jsonl")
 
-    # The panel snapshot is the same projection consumed by the Gradio UI.
+    # The panel snapshot is the same projection consumed by the web workbench.
     import willy.frontend_api as frontend_api
     old_root = frontend_api.ROOT
     frontend_api.ROOT = root
