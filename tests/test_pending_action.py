@@ -168,3 +168,49 @@ def test_public_pending_action_exposes_only_bounded_editable_parameters(tmp_path
         "purpose": "重新评估恒温耦合",
     }]
     assert "field" not in json.dumps(public, ensure_ascii=False)
+
+
+def test_public_pending_action_contains_problem_two_paths_evidence_and_high_risk_gate(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    config = json.loads((run_dir / "config.json").read_text())
+    config["box"] = {"packing_number_density_nm3": 6.0}
+    (run_dir / "config.json").write_text(json.dumps(config))
+
+    action = create_eq_pending_action(run_dir, proposal={
+        "problem": "EQ 末态温度与密度统计异常。",
+        "evidence": ["末态温度未通过验收", "冻结配置的 dt 为 0.001 ps"],
+        "options": [
+            {
+                "summary": "减小时间步长后在当前 EQ 步重试。",
+                "adjustments": [{"field": "dt", "after": 0.0005, "purpose": "降低积分不稳定风险"}],
+                "evidence_points": ["温度统计未通过验收"],
+            },
+            {
+                "summary": "提高建盒数密度后从 Packmol 重新开始。",
+                "adjustments": [{"field": "box_density", "after": 6.5, "purpose": "复核初始体积"}],
+                "evidence_points": ["当前证据指向初始盒体积问题"],
+            },
+        ],
+    })
+
+    public = public_pending_action(action)
+    report = public["recovery_plan"]
+
+    assert report["problem"] == "EQ 末态温度与密度统计异常。"
+    assert report["current_step_retry"]["applicable"] is True
+    assert report["upstream_retry"]["applicable"] is True
+    assert report["evidence"][:2] == ["末态温度未通过验收", "冻结配置的 dt 为 0.001 ps"]
+    assert "温度统计未通过验收" in report["evidence"]
+    assert report["risk_level"] == "high"
+    assert report["manual_review_required"] is True
+    assert "value" not in json.dumps(public, ensure_ascii=False)
+
+
+def test_unknown_error_cannot_be_converted_to_a_fallback_eq_retry(tmp_path):
+    run_dir = _run_dir(tmp_path)
+
+    with pytest.raises(PendingActionError, match="不能生成猜测性"):
+        create_eq_pending_action(run_dir, proposal={
+            "unknown_error": True,
+            "research_request": {"status": "approval_required"},
+        })

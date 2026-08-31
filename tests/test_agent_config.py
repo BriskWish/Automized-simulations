@@ -36,6 +36,29 @@ def test_text_confirmation_starts_the_pending_plan_without_an_llm(monkeypatch):
     ]
 
 
+def test_text_confirmation_binds_the_durable_plan_workspace(monkeypatch):
+    config = {"backend": "g16", "residues": {"Li": 1}}
+    calls = []
+    monkeypatch.setattr(
+        agent_config,
+        "start_pipeline",
+        lambda launch_config, *, proposal_workspace_id: calls.append(
+            (launch_config, proposal_workspace_id)
+        ) or SimpleNamespace(message="流水线已启动。", run_id="md_demo", state="started"),
+    )
+    monkeypatch.setattr(agent_config, "_DS", None)
+
+    updates = list(agent_config.chat(
+        "开始运行",
+        _pending_plan(),
+        _plan(config),
+        proposal_workspace_id="plan__202608310001",
+    ))
+
+    assert calls == [(config, "plan__202608310001")]
+    assert updates[-1][3] is None
+
+
 def test_text_confirmation_without_a_pending_plan_does_not_start(monkeypatch):
     calls = []
     monkeypatch.setattr(agent_config, "start_pipeline", lambda config: calls.append(config))

@@ -335,6 +335,13 @@ class PipelineOrchestrator:
             total_steps=self._sm.total_steps,
             parent_run_id=self._parent_run_id or None,
         )
+        # A proposal workspace is not a run until this point.  Once the
+        # directory has been registered, retain the non-sensitive promotion
+        # fact in the ordinary run event stream for later audit.
+        from willy.proposal_workspace import formalized_plan_id
+        plan_id = formalized_plan_id(run_dir)
+        if plan_id is not None:
+            self._run_registry.record_proposal_origin(run_dir, plan_id)
         from willy.env_registry import public_capabilities
         capabilities = public_capabilities()
         self._sm.bind_status_path(run_dir / "status.json")
@@ -1427,6 +1434,8 @@ class PipelineOrchestrator:
             result,
             str(self._run_config_path or (run_dir / "config.json")),
         )
+        if result.error is None or result.error.kind is ErrorKind.UNKNOWN:
+            return self._escalate_unknown_eq_research(result, label, run_dir, proposal)
         try:
             from willy.simulation.pending_action import (
                 PendingActionError,
@@ -1465,6 +1474,62 @@ class PipelineOrchestrator:
             print(f"[{label}] ❌ 无法生成待确认方案: {exc}")
             return False
         print(f"[{label}] ⏸ 已生成待确认 EQ 方案，等待用户回复")
+        return False
+
+    def _escalate_unknown_eq_research(
+        self,
+        result: StepResult,
+        label: str,
+        run_dir: Path,
+        proposal: object,
+    ) -> bool:
+        """Refuse to convert an unclassified failure into a protocol guess."""
+        evidence = []
+        if isinstance(proposal, dict):
+            for item in proposal.get("evidence", []) if isinstance(proposal.get("evidence"), list) else []:
+                text = " ".join(str(item or "").split())[:160]
+                if text and text not in evidence:
+                    evidence.append(text)
+        escalation = {
+            "layer": "simulation",
+            "step": EQ_STEP,
+            "error_kind": "unknown",
+            "attempts_made": 0,
+            "actions_tried": ["未对未知错误猜测参数或回退步骤"],
+            "recommendation": "错误未能归类；可申请联网检索权威资料。检索结论只有能映射到当前步调参或打回第 7 步两种受控路径时，才可重新生成待确认方案。",
+            "backup_plan": "当前未修改配置、未启动重跑；等待人工审核或经批准的检索结论。",
+        }
+        append_structured_event(
+            run_dir,
+            "recovery.research_requested",
+            step=EQ_STEP,
+            step_name="GROMACS 三点式退火平衡",
+            layer="simulation",
+            source="simulation_agent",
+            outcome="escalated",
+            error_kind="unknown",
+            policy_id="simulation.eq.unknown_research_required",
+            message_code="research_approval_required",
+            parameter_fields=evidence[:4],
+        )
+        if self._run_registry is not None:
+            try:
+                self._record_agent_decision({
+                    "decision_id": f"research-{secrets.token_urlsafe(8)}",
+                    "layer": "simulation",
+                    "step": EQ_STEP,
+                    "error_kind": "unknown",
+                    "policy_id": "simulation.eq.unknown_research_required",
+                    "selected_tool": "",
+                    "tool_effect": "none",
+                    "requires_confirmation": True,
+                    "result": "research_requested",
+                    "success": False,
+                })
+            except (OSError, ValueError):
+                pass
+        self._sm.set_escalated(escalation)
+        print(f"[{label}] 🆘 未知 EQ 错误未生成猜测性重试；已升级为联网检索申请/人工审核")
         return False
 
     def _schedule_simulation_rollback(

@@ -40,6 +40,10 @@ from willy.pipeline_launch import (
     reserve_pipeline_launch,
     write_startup_audit,
 )
+from willy.proposal_workspace import (
+    formalize_plan_directory,
+    rollback_formalized_plan,
+)
 # ── Config Agent System Prompt ──
 
 CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案：
@@ -308,7 +312,11 @@ def _audit_candidate_config(config: Mapping[str, object]) -> tuple[dict[str, obj
         return None, [str(exc)]
 
 
-def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt:
+def start_pipeline(
+    config: Mapping[str, object] | None,
+    *,
+    proposal_workspace_id: str | None = None,
+) -> PipelineLaunchReceipt:
     """Freeze and start a session-bound configuration after explicit confirmation.
 
     This is the only proposal-assistant boundary that writes the active
@@ -354,7 +362,16 @@ def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt
         write_startup_audit(ROOT, "lock_conflict")
         return PipelineLaunchReceipt("已有任务运行，未启动第二个子进程。", exc.run_id, "lock_conflict")
 
+    formalized_plan = False
     try:
+        if proposal_workspace_id is not None:
+            formalize_plan_directory(
+                ROOT,
+                plan_id=proposal_workspace_id,
+                run_dir=reservation.run_dir,
+                expected_config=config,
+            )
+            formalized_plan = True
         # The pending candidate becomes the active run configuration only
         # after confirmation, repeat validation, and launch-lock reservation.
         apply_config(launch_config)
@@ -375,7 +392,15 @@ def start_pipeline(config: Mapping[str, object] | None) -> PipelineLaunchReceipt
         reservation.detach_parent()
     except Exception:
         write_startup_audit(ROOT, "failed")
+        if formalized_plan and proposal_workspace_id is not None:
+            rollback_formalized_plan(
+                ROOT,
+                plan_id=proposal_workspace_id,
+                run_dir=reservation.run_dir,
+            )
         reservation.release()
+        if formalized_plan:
+            return PipelineLaunchReceipt("启动失败，待确认方案已保留，可修正后重新确认。", None, "failed")
         return PipelineLaunchReceipt("启动失败，请检查配置后重试。", None, "failed")
 
     def _wait_then_cleanup():
@@ -1290,6 +1315,7 @@ def chat(
     history,
     pending_plan: Mapping[str, object] | None = None,
     execution_context: Mapping[str, object] | None = None,
+    proposal_workspace_id: str | None = None,
 ):
     """Generate or confirm a plan without sharing it across browser sessions."""
 
@@ -1330,7 +1356,17 @@ def chat(
                 yield _emit(h, pending_plan)
                 return
         try:
-            receipt = start_pipeline(launch_config)
+            # Preserve the established direct-call contract for non-browser
+            # callers.  The durable workspace token is supplied only by the
+            # proposal API that owns a persisted ``plan__`` directory.
+            receipt = (
+                start_pipeline(launch_config)
+                if proposal_workspace_id is None
+                else start_pipeline(
+                    launch_config,
+                    proposal_workspace_id=proposal_workspace_id,
+                )
+            )
             launch_message = receipt.message
         except Exception:
             receipt = PipelineLaunchReceipt("流水线未能启动，请检查模拟方案后重试。", None, "failed")

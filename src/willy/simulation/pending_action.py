@@ -175,6 +175,25 @@ def _clean_text(value: object, limit: int) -> str:
 
 _KNOWLEDGE_STATUSES = {"retrieved", "not_matched", "unavailable"}
 _ADVICE_SOURCES = {"knowledge_base", "llm_unverified"}
+_RECOVERY_RISK = "high"
+
+
+def _evidence_points(value: object, *, fallback: str = "") -> list[str]:
+    """Keep a short, factual evidence list for the public recovery contract."""
+    candidates = value if isinstance(value, list) else [value]
+    points: list[str] = []
+    for item in candidates[:6]:
+        text = _clean_text(item, 240)
+        if text and text not in points:
+            points.append(text)
+    fallback_text = _clean_text(fallback, 240)
+    if not points and fallback_text:
+        points.append(fallback_text)
+    return points[:6]
+
+
+def _recovery_problem(value: object) -> str:
+    return _clean_text(value, 240) or "EQ 阶段失败，需要在冻结配置边界内审阅恢复路径。"
 
 
 def _knowledge_name(value: object) -> str:
@@ -584,13 +603,22 @@ def _normalize_option(
         )
         return None
 
+    restart_step = PACKMOL_STEP if any(item["field"] == "box_density" for item in adjustments) else EQ_STEP
+    option_evidence = _evidence_points(
+        proposed.get("evidence_points"),
+        fallback=_clean_text(proposed.get("evidence"), 300),
+    )
     normalized = {
         "option_id": f"option_{ordinal}",
+        # The restart step, not model prose, determines whether this is a
+        # current-EQ retry or a controlled upstream Packmol rebuild.
+        "plan_kind": "upstream_retry" if restart_step < EQ_STEP else "current_step_retry",
         "title": _clean_text(proposed.get("title"), 120) or f"方案{_chinese_ordinal(ordinal)}",
         "cause": _clean_text(proposed.get("cause"), 240) or "根据当前公开错误证据提出的可能原因",
         "evidence": _clean_text(proposed.get("evidence"), 300) or "当前公开证据不足以排除其他原因",
+        "evidence_points": option_evidence or ["当前公开错误与阶段验收结果需要人工复核。"],
         "summary": _clean_text(proposed.get("summary"), 240) or "调整 EQ 参数后重新验收。",
-        "restart_step": PACKMOL_STEP if any(item["field"] == "box_density" for item in adjustments) else EQ_STEP,
+        "restart_step": restart_step,
         "fallback": fallback,
         "adjustments": adjustments,
         "editable_parameters": editable_parameters,
@@ -673,6 +701,10 @@ def create_eq_pending_action(
     config_path = directory / "config.json"
     config = _load_config(config_path)
     proposed = proposal if isinstance(proposal, Mapping) else {}
+    if proposed.get("unknown_error") is True:
+        raise PendingActionError(
+            "错误未能归类；需要申请联网检索或人工审核，不能生成猜测性的 EQ 重试方案"
+        )
     knowledge_context = proposed.get("_retrieved_entries")
     knowledge_lookup_status = proposed.get("_knowledge_lookup_status")
     raw_options = proposed.get("options")
@@ -709,10 +741,20 @@ def create_eq_pending_action(
             raise PendingActionError(detail or "未生成可执行的 EQ 修复修改项")
     selected_option_id = options[0]["option_id"] if len(options) == 1 else None
     selected = options[0] if selected_option_id else {}
-    summary = _clean_text(proposed.get("problem_summary") or proposed.get("summary"), 240)
+    summary = _clean_text(
+        proposed.get("problem") or proposed.get("problem_summary") or proposed.get("summary"),
+        240,
+    )
     if not summary:
         summary = "EQ 失败可能由多个因素造成，请选择一个独立修复方案后确认。" if len(options) > 1 else options[0]["summary"]
     restart_step = int(selected.get("restart_step", EQ_STEP)) if selected else min(int(item["restart_step"]) for item in options)
+    evidence = _evidence_points(proposed.get("evidence"))
+    for option in options:
+        for point in _evidence_points(option.get("evidence_points"), fallback=str(option.get("evidence") or "")):
+            if point not in evidence and len(evidence) < 6:
+                evidence.append(point)
+    if not evidence:
+        evidence = ["当前公开错误、阶段验收结果和冻结运行配置是本方案的证据边界。"]
     action = {
         "schema_version": _SCHEMA_VERSION,
         "action_id": f"eq-{secrets.token_urlsafe(12)}",
@@ -723,6 +765,15 @@ def create_eq_pending_action(
         "restart_step": restart_step,
         "config_sha256": _config_fingerprint(config_path),
         "summary": summary,
+        # EQ protocol changes and a Packmol rollback both alter scientific
+        # inputs.  This classification is server-owned and must never depend
+        # on a model's self-assessed risk level.
+        "risk_level": _RECOVERY_RISK,
+        "manual_review_required": True,
+        "problem": _recovery_problem(
+            proposed.get("problem") or proposed.get("problem_summary") or proposed.get("summary")
+        ),
+        "evidence": evidence,
         "fallback": all(bool(item.get("fallback")) for item in options),
         "options": options,
         "selected_option_id": selected_option_id,
@@ -874,6 +925,50 @@ def public_pending_action(action: Mapping[str, Any]) -> dict[str, Any]:
             "compatibility_notice": _clean_text(option.get("compatibility_notice"), 300),
         }
 
+    def public_option(option: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
+        option_public = {
+            "option_id": str(option.get("option_id", f"option_{ordinal}")),
+            "ordinal": ordinal,
+            "title": _clean_text(option.get("title"), 120) or f"方案{_chinese_ordinal(ordinal)}",
+            "cause": _clean_text(option.get("cause"), 240),
+            "evidence": _clean_text(option.get("evidence"), 300),
+            "evidence_points": _evidence_points(
+                option.get("evidence_points"),
+                fallback=_clean_text(option.get("evidence"), 300),
+            ) or ["当前公开错误与阶段验收结果需要人工复核。"],
+            "summary": _clean_text(option.get("summary"), 240),
+            "restart_step": int(option.get("restart_step", EQ_STEP)),
+            "adjustments": public_adjustments(option.get("adjustments")),
+            "editable_parameters": public_editables(option.get("editable_parameters")),
+        }
+        option_public.update(public_knowledge_source(option))
+        return option_public
+
+    options_public = [
+        public_option(option, ordinal)
+        for ordinal, option in enumerate(action.get("options", []), start=1)
+        if isinstance(option, Mapping)
+    ][: _OPTION_LIMIT]
+
+    def recovery_path(*, upstream: bool) -> dict[str, Any]:
+        candidates = [
+            option for option in options_public
+            if (option["restart_step"] < EQ_STEP) is upstream
+        ]
+        if candidates:
+            return {"applicable": True, "options": candidates}
+        if upstream:
+            return {
+                "applicable": False,
+                "summary": "当前证据不支持打回前序流程重试。",
+                "evidence": ["没有经校验的建盒或前序阶段问题证据。"],
+            }
+        return {
+            "applicable": False,
+            "summary": "当前证据不足以给出当前步调参重试。",
+            "evidence": ["未形成通过白名单与配置契约校验的当前步修改。"],
+        }
+
     public: dict[str, Any] = {
         "action_id": str(action.get("action_id", "")),
         "state": "pending",
@@ -881,29 +976,23 @@ def public_pending_action(action: Mapping[str, Any]) -> dict[str, Any]:
         "restart_step": int(selected.get("restart_step", action.get("restart_step", 0))),
         "summary": _clean_text(action.get("summary"), 240),
         "adjustments": public_adjustments(selected.get("adjustments", action.get("adjustments", []))),
+        "recovery_plan": {
+            "problem": _recovery_problem(action.get("problem") or action.get("summary")),
+            "current_step_retry": recovery_path(upstream=False),
+            "upstream_retry": recovery_path(upstream=True),
+            "evidence": _evidence_points(
+                action.get("evidence"),
+                fallback="当前公开错误、阶段验收结果和冻结运行配置是本方案的证据边界。",
+            ),
+            "risk_level": _RECOVERY_RISK,
+            "manual_review_required": True,
+        },
     }
     editable = public_editables(selected.get("editable_parameters", action.get("editable_parameters", [])))
     if editable:
         public["editable_parameters"] = editable
     if selected:
         public.update(public_knowledge_source(selected))
-    options_public = []
-    for ordinal, option in enumerate(action.get("options", []), start=1):
-        if not isinstance(option, Mapping) or len(options_public) >= _OPTION_LIMIT:
-            continue
-        option_public = {
-            "option_id": str(option.get("option_id", f"option_{ordinal}")),
-            "ordinal": ordinal,
-            "title": _clean_text(option.get("title"), 120) or f"方案{_chinese_ordinal(ordinal)}",
-            "cause": _clean_text(option.get("cause"), 240),
-            "evidence": _clean_text(option.get("evidence"), 300),
-            "summary": _clean_text(option.get("summary"), 240),
-            "restart_step": int(option.get("restart_step", EQ_STEP)),
-            "adjustments": public_adjustments(option.get("adjustments")),
-            "editable_parameters": public_editables(option.get("editable_parameters")),
-        }
-        option_public.update(public_knowledge_source(option))
-        options_public.append(option_public)
     if len(options_public) > 1:
         public["options"] = options_public
         public["selected_option_id"] = action.get("selected_option_id")

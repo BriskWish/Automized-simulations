@@ -595,6 +595,88 @@ def _safe_knowledge_source(value: object) -> dict:
     }
 
 
+def _safe_recovery_plan(value: object) -> dict:
+    """Keep the mandatory EQ recovery explanation bounded for status.json."""
+    if not isinstance(value, dict):
+        return {}
+
+    def points(raw: object, *, limit: int = 6) -> list[str]:
+        items = raw if isinstance(raw, list) else []
+        result: list[str] = []
+        for item in items[:limit]:
+            text = _safe_adjustment_text(item)
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    def adjustments(raw: object) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict) or len(result) >= 8:
+                continue
+            candidate = {
+                key: _safe_adjustment_text(item.get(key))
+                for key in ("name", "before", "after")
+            }
+            purpose = _safe_adjustment_text(item.get("purpose"))
+            if all(candidate.values()):
+                if purpose:
+                    candidate["purpose"] = purpose
+                result.append(candidate)
+        return result
+
+    def path(raw: object) -> dict:
+        if not isinstance(raw, dict) or raw.get("applicable") is not True:
+            summary = _safe_adjustment_text(raw.get("summary")) if isinstance(raw, dict) else ""
+            return {
+                "applicable": False,
+                "summary": summary or "当前证据不足以提供可执行方案。",
+                "evidence": points(raw.get("evidence")) if isinstance(raw, dict) else [],
+            }
+        options = []
+        entries = raw.get("options", []) if isinstance(raw.get("options"), list) else []
+        for item in entries[:3]:
+            if not isinstance(item, dict):
+                continue
+            restart = item.get("restart_step")
+            summary = _safe_adjustment_text(item.get("summary"))
+            if (
+                isinstance(restart, bool)
+                or not isinstance(restart, int)
+                or not STEP_REGISTRY.controlled_restart_allowed(EQ_STEP, restart)
+                or not summary
+            ):
+                continue
+            options.append({
+                "title": _safe_adjustment_text(item.get("title")) or "恢复方案",
+                "summary": summary,
+                "restart_step": restart,
+                "adjustments": adjustments(item.get("adjustments")),
+                "evidence": points(item.get("evidence")),
+            })
+        if not options:
+            return {
+                "applicable": False,
+                "summary": "当前证据不足以提供可执行方案。",
+                "evidence": [],
+            }
+        return {"applicable": True, "options": options}
+
+    problem = _safe_adjustment_text(value.get("problem"))
+    if not problem:
+        return {}
+    return {
+        "problem": problem,
+        "current_step_retry": path(value.get("current_step_retry")),
+        "upstream_retry": path(value.get("upstream_retry")),
+        "evidence": points(value.get("evidence")),
+        # EQ recovery always crosses the scientific-protocol confirmation
+        # boundary, regardless of the text returned by a model.
+        "risk_level": "high",
+        "manual_review_required": True,
+    }
+
+
 def _safe_completion_scope(value: object) -> dict[str, object]:
     """Expose only the fixed, non-executable EQ-only acceptance scope."""
     if not isinstance(value, dict):
@@ -651,6 +733,9 @@ def _safe_pending_action(value: object) -> dict:
         "adjustments": adjustments,
     }
     public.update(_safe_knowledge_source(value))
+    recovery_plan = _safe_recovery_plan(value.get("recovery_plan"))
+    if recovery_plan:
+        public["recovery_plan"] = recovery_plan
     if isinstance(value.get("selected_option_id"), str):
         public["selected_option_id"] = value["selected_option_id"]
     public["selection_required"] = bool(value.get("selection_required", False))

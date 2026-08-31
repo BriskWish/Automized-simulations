@@ -284,6 +284,8 @@ def test_get_pending_action_reads_only_the_waiting_public_summary(tmp_path, monk
     }, "run_awaiting_confirmation")
 
     pending = frontend_api.get_pending_action()
+    assert pending is not None
+    recovery_plan = pending.pop("recovery_plan")
 
     assert pending == {
         "run_id": run_id,
@@ -299,6 +301,10 @@ def test_get_pending_action_reads_only_the_waiting_public_summary(tmp_path, monk
             "purpose": "稳定积分",
         }],
     }
+    assert recovery_plan["current_step_retry"]["applicable"] is True
+    assert recovery_plan["upstream_retry"]["applicable"] is False
+    assert recovery_plan["risk_level"] == "high"
+    assert recovery_plan["manual_review_required"] is True
     assert "must-not-leak" not in json.dumps(pending, ensure_ascii=False)
 
 
@@ -1374,6 +1380,37 @@ def test_run_summary_uses_compact_current_stage_eta_label(tmp_path, monkeypatch)
     assert "预测）" not in markdown
 
 
+def test_run_panel_snapshot_refreshes_cursor_when_gromacs_eta_becomes_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_id = "md_demo_202608020008"
+    run_dir = _record_run_status(tmp_path, run_id, {
+        "state": "running", "step": 9, "layer": "simulation", "error": "",
+        "activity": {
+            "tool": "GROMACS", "operation": "运行模拟",
+            "target_type": "stage", "target": "eq", "current": 2, "total": 2,
+        },
+    })
+    (run_dir / "mdrun_eta.json").write_text(json.dumps({
+        "schema_version": 2, "stage": "eq", "status": "waiting",
+        "observed_at": "2026-08-02T13:37:00+00:00",
+        "process_alive": True, "source": "startup",
+    }))
+    waiting = frontend_api.get_run_panel_snapshot(run_id)
+    (run_dir / "mdrun_eta.json").write_text(json.dumps({
+        "schema_version": 2, "stage": "eq", "status": "available",
+        "observed_at": "2026-08-02T13:38:00+00:00",
+        "eta_observed_at": "2026-08-02T13:38:00+00:00",
+        "estimated_end_at": "2026-08-02T13:53:56+00:00",
+        "step": 100, "remaining_seconds": 120,
+        "process_alive": True, "source": "gmx_verbose",
+    }))
+    available = frontend_api.get_run_panel_snapshot(run_id)
+
+    assert waiting["status_event_id"] != available["status_event_id"]
+    assert "暂未获得 ETA" in waiting["live_summary"]
+    assert "当前步骤预计结束：" in available["live_summary"]
+
+
 def test_run_assistant_status_animates_completion_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     run_id = "md_demo_202608010002"
@@ -1392,6 +1429,23 @@ def test_run_assistant_status_animates_completion_marker(tmp_path, monkeypatch):
     assert "pipeline-status-spinner" in markdown
     assert "pipeline-status-check" in markdown
     assert "全流程完成" in markdown
+
+
+def test_run_panel_snapshot_projects_legacy_status_markup_to_plain_chinese(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_id = "md_demo_202608010006"
+    _record_run_status(tmp_path, run_id, {
+        "state": "done",
+        "activity": {},
+        "error": "",
+    })
+
+    snapshot = frontend_api.get_run_panel_snapshot(run_id)
+
+    assert "全流程完成" in snapshot["live_summary"]
+    assert "<span" not in snapshot["live_summary"]
+    assert "**" not in snapshot["live_summary"]
+    assert "✓" not in snapshot["live_summary"]
 
 
 def test_run_assistant_status_shows_public_repair_attempt_and_adjustments(tmp_path, monkeypatch):

@@ -2,6 +2,8 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
+> **0.6.0 前端工作台更新**：采用 assistant-ui 工作台，按工程保留方案、运行和审计上下文，提供本地任务、方案助理、运行助理、可视化与日志视图。
+
 > 当前公开能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理支持受控 `/resume`、`/fork`、`/switch` 与按工程保存的对话记录；CPU 资源预检会规范化 `nproc`。远程执行与托管网关不属于当前产品入口。
 
 > 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。成熟方案必须在目标机以受支持 profile 完成十步，并通过受控 LLM 错误处理验收。
@@ -56,7 +58,7 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 | 依赖 | 当前项目版本基线 | 用途 | 获取方式与许可状态 |
 |------|------|------|------|
 | Python | 3.10--3.12 | 运行环境 | 系统、conda/mamba 或受控环境提供；系统 Python 3.8 不受支持 |
-| Node.js | 20 LTS 或更高 | 构建 React 前端 | 仅在源码检出中执行一次 `npm ci && npm run build`；运行时由 `app.py` 提供已构建静态资源 |
+| Node.js | 项目私有 Node 22.16.0（或自定版本） | 构建 React 前端 | `scripts/bootstrap.py` 下载到 `.willy/toolchains/` 并在该项目内运行 `npm ci && npm run build`；运行时由 `app.py` 提供已构建静态资源 |
 | Gaussian 16 | 合法安装，Revision 不自动探测 | 默认量子化学后端 | 用户自行安装；Gaussian 的签署许可软件，不随 Willy 提供或再分发 |
 | Gaussian 09 | 合法安装，Revision 不自动探测 | 保留后端接口 | 用户自行安装；同样属于 Gaussian 许可软件，且本版本不作可靠全链路验收 |
 | formchk | 与所选 G16/G09 同一安装 | Gaussian checkpoint 转换 | 使用同一 Gaussian 合法安装中的程序，不可混用版本 |
@@ -77,26 +79,28 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 ### 下载与安装
 
 ```bash
-sudo apt update
-sudo apt install -y libgfortran5 libxm4     #内置Packmol Multiwfn所必需的依赖组件
 git clone https://github.com/BriskWish/Automized-simulations.git Willy
 cd Willy
-python3.11 -m venv .venv  # 或任何 Python 3.10--3.12 解释器
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-cd frontend
-npm ci
-npm run build
-cd ..
-python -V  # 必须为 Python 3.10--3.12
+python3.11 scripts/bootstrap.py
+.venv/bin/python app.py
 ```
 
-Ubuntu 20.04 的系统 `python3` 通常是 3.8，不能直接安装本项目。请先通过系统包、机构模块、
-conda/mamba 或其他受控方式取得 Python 3.10--3.12，再以上述解释器创建独立虚拟环境；不要以
-`--ignore-requires-python` 强行安装，也不要修改项目的 Python 下限。
+引导脚本只在当前源码检出中创建 `.venv/`、`.willy/`、`frontend/node_modules/` 和
+`frontend/dist/`：Python 依赖通过 `.venv` 可编辑安装，Node 22 运行时、npm 缓存和 pip 缓存均位于
+`.willy/`。它不会激活或升级调用者的 Python/Node 环境，不写入 shell 配置，不执行 `sudo`，也不安装或替换
+系统 `libc`。Node 下载首次需要网络；缓存后可使用 `--offline` 重建。需要指定解释器时使用
+`python3 scripts/bootstrap.py --python /path/to/python3.11`，仅检查内置科学程序的动态库时使用
+`python3 scripts/bootstrap.py --check-system-libs`。若目标环境需要指定受支持的私有 Node 版本，可在首次
+引导前设置 `WILLY_BOOTSTRAP_NODE_VERSION=22.16.0`；该值只影响 `.willy/toolchains/` 内的运行时。
 
-安装完成后无需设置`WILLY_*` 变量，也无需将 Packmol 或 Multiwfn 加入 `PATH`。应先完成系统依赖安装再启动相应工作流。
+内置 Packmol/Multiwfn 仍依赖宿主机的动态库。脚本会以 `ldd` 只读检查并在缺少
+`libgfortran.so.5` 或 `libXm.so.4` 时给出提示；Ubuntu/Debian 使用者须自行明确执行
+`sudo apt install -y libgfortran5 libxm4`，其他发行版按其包管理器安装对应 ABI 包。动态库缺失时脚本会完成
+Python/前端构建但返回非零状态，表示科学运行环境尚不可用。Ubuntu 20.04 的系统 `python3` 通常是 3.8，
+不能直接安装本项目；请先通过系统包、机构模块、conda/mamba 或其他受控方式取得 Python 3.10--3.12，
+不要以 `--ignore-requires-python` 强行安装，也不要修改项目的 Python 下限。
+
+安装完成后无需设置`WILLY_*` 变量，也无需将 Packmol 或 Multiwfn 加入 `PATH`。应在实际科学任务开始前完成脚本报告的系统库修复。
 
 ### 配置 LLM
 
@@ -165,13 +169,14 @@ LLM 支持中文别名映射：输入"锂离子"自动识别为 Li，"硝酸根"
 
 在方案助理中上传可审计的 `.gjf` 或 `.inp` 原始量子输入。上传时会验证有限坐标、文件内电荷和自旋，并以核心文件名登记；`Li+`、`Ca2+` 等离子文件名会分别规范为 `Li`、`Ca`，而 `NO3-` 保留为 `NO3`。同一核心文件名已存在时拒绝覆盖，并提示相关结构名称。
 
-Willy 只保留坐标、电荷和自旋，生成规范化输入。原文件的计算方法、基组、`mem`、`nproc` 和其他执行指令不会继承；基组与资源配置由候选方案、启动前审计和 CPU 容量规则统一决定。成功后，核心文件名会进入分子知识库，供后续方案查询。用户上传文件及其本地登记属于运行数据，不随 GitHub 源码版本发布。
+Willy 只保留坐标、电荷和自旋，生成规范化输入。原文件的计算方法、基组、`mem`、`nproc` 和其他执行指令不会继承；基组与资源配置由候选方案、启动前审计和 CPU 容量规则统一决定。成功后，核心文件名会进入分子知识库，供后续方案查询，并以当前方案工作区或工程的用户会话气泡持久化。用户上传文件及其本地登记属于运行数据，不随 GitHub 源码版本发布。
 
 ## 目录结构
 
 ```
 Willy/
 ├── app.py                  ← FastAPI 入口，提供 React 工作台与受限 API
+├── scripts/bootstrap.py     ← 项目隔离安装与前端构建（不修改宿主环境）
 ├── frontend/               ← React/assistant-ui 源码与生产构建配置
 ├── run_pipeline.py         ← 全流程编排 (10 步)
 ├── config.json             ← 体系配置

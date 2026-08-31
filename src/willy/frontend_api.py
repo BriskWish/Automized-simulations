@@ -14,6 +14,7 @@ app.py 只通过此模块访问后端，不再直接触碰路径/shell/文件系
 
 from __future__ import annotations
 from collections.abc import Mapping
+import hashlib
 import importlib
 import json, math, os, re, secrets, shutil, subprocess, signal, tempfile, threading, time
 from datetime import datetime, timezone
@@ -1659,6 +1660,18 @@ def _status_indicator(kind: str) -> str:
     return '<span class="pipeline-status-indicator pipeline-status-indicator--stopped" aria-hidden="true">■</span>'
 
 
+def _plain_status_summary(markdown: str) -> str:
+    """Project legacy status markup to the Chinese text used by app.py.
+
+    The legacy summary API intentionally retains compact HTML markers for its
+    own renderer.  The React status panel is a plain-text surface, so it must
+    never expose those tags or Markdown delimiters to users.
+    """
+    plain = re.sub(r"<[^>]+>", "", markdown)
+    plain = re.sub(r"\*\*(.*?)\*\*", r"\1", plain)
+    return re.sub(r"(?m)^\s*[✓×■]\s*", "", plain).strip()
+
+
 def _activity_lines(activity: dict | None, *, running: bool) -> list[str]:
     """Render the six-field public activity contract in Chinese."""
     if not isinstance(activity, dict) or not activity:
@@ -1818,13 +1831,14 @@ def get_pending_action(run_id: str | None = None) -> dict[str, object] | None:
     ):
         return None
     try:
-        from willy.simulation.pending_action import load_pending_action
+        from willy.simulation.pending_action import load_pending_action, public_pending_action
         private_action = load_pending_action(registry.resolve_run_id(selected_run_id))
     except (OSError, ValueError, RunRegistryError):
         return None
     config_fingerprint = private_action.get("config_sha256")
     if private_action.get("action_id") != action_id or not isinstance(config_fingerprint, str):
         return None
+    private_public = public_pending_action(private_action)
     public = {
         "run_id": selected_run_id,
         "action_id": action_id,
@@ -1836,6 +1850,9 @@ def get_pending_action(run_id: str | None = None) -> dict[str, object] | None:
         "summary": summary,
         "adjustments": action.get("adjustments", []) if isinstance(action.get("adjustments"), list) else [],
     }
+    recovery_plan = private_public.get("recovery_plan")
+    if isinstance(recovery_plan, Mapping):
+        public["recovery_plan"] = recovery_plan
     if action.get("knowledge_status") in {"retrieved", "not_matched", "unavailable"} and action.get("advice_source") in {"knowledge_base", "llm_unverified"}:
         public["knowledge_status"] = action["knowledge_status"]
         public["knowledge_entries"] = action.get("knowledge_entries", [])[:3] if isinstance(action.get("knowledge_entries"), list) else []
@@ -2311,8 +2328,9 @@ def _run_status_event_id(
     status: Mapping[str, object] | None,
     pending_action: Mapping[str, object] | None,
     error_event: Mapping[str, object] | None,
+    mdrun_eta: Mapping[str, object] | None = None,
 ) -> str:
-    """Identify a user-visible status transition without tracking heartbeats."""
+    """Identify a user-visible status or ETA transition for the run assistant."""
     state = status.get("state") if isinstance(status, Mapping) else "unavailable"
     step = status.get("step") if isinstance(status, Mapping) else None
     action_id = pending_action.get("action_id") if isinstance(pending_action, Mapping) else None
@@ -2321,7 +2339,32 @@ def _run_status_event_id(
     safe_step = str(step) if isinstance(step, int) and not isinstance(step, bool) else "none"
     safe_action = action_id if isinstance(action_id, str) and action_id else "none"
     safe_error = error_id if isinstance(error_id, str) and error_id else "none"
-    return f"{run_id or 'none'}:status:{safe_state}:{safe_step}:{safe_action}:{safe_error}"
+    eta_payload: dict[str, object] = {}
+    if isinstance(mdrun_eta, Mapping):
+        eta_status = mdrun_eta.get("status")
+        eta_stage = mdrun_eta.get("stage")
+        if isinstance(eta_status, str):
+            eta_payload["status"] = eta_status[:32]
+        if isinstance(eta_stage, str):
+            eta_payload["stage"] = eta_stage[:32]
+        if eta_status == "waiting":
+            observed_at = mdrun_eta.get("observed_at")
+            if isinstance(observed_at, str):
+                eta_payload["observed_at"] = observed_at[:96]
+        elif eta_status == "available":
+            for key in ("eta_observed_at", "estimated_end_at"):
+                value = mdrun_eta.get(key)
+                if isinstance(value, str):
+                    eta_payload[key] = value[:96]
+        elif eta_status == "finished":
+            finished_at = mdrun_eta.get("finished_at")
+            if isinstance(finished_at, str):
+                eta_payload["finished_at"] = finished_at[:96]
+    eta_token = hashlib.sha256(
+        json.dumps(eta_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    eta_suffix = f":{eta_token}" if eta_payload else ""
+    return f"{run_id or 'none'}:status:{safe_state}:{safe_step}:{safe_action}:{safe_error}{eta_suffix}"
 
 
 def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
@@ -2332,12 +2375,21 @@ def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
     historical run's awaiting-confirmation action.
     """
     selected_run_id = run_id or latest_run_id()
-    summary = get_run_summary_markdown(selected_run_id)
-    live_summary = get_run_summary_markdown(selected_run_id, include_error=False)
+    summary = _plain_status_summary(get_run_summary_markdown(selected_run_id))
+    live_summary = _plain_status_summary(
+        get_run_summary_markdown(selected_run_id, include_error=False)
+    )
     status: Mapping[str, object] | None = None
+    mdrun_eta: Mapping[str, object] | None = None
     if isinstance(selected_run_id, str):
         try:
-            status = RunRegistry(ROOT).get_run_status(selected_run_id, reconcile=False)
+            registry = RunRegistry(ROOT)
+            status = registry.get_run_status(selected_run_id, reconcile=False)
+            if (
+                status.get("state") in {"running", "retrying"}
+                and status.get("layer") == "simulation"
+            ):
+                mdrun_eta = registry.get_mdrun_eta(selected_run_id)
         except RunRegistryError:
             status = None
     pending_action = get_pending_action(selected_run_id)
@@ -2355,7 +2407,7 @@ def get_run_panel_snapshot(run_id: str | None = None) -> dict[str, object]:
         "pending_fork": pending_fork,
         "error_event": error_event,
         "status_event_id": _run_status_event_id(
-            selected_run_id, status, pending_action, error_event
+            selected_run_id, status, pending_action, error_event, mdrun_eta
         ),
         # App-owned visual event history is enabled only for this richer snapshot.
         "timeline_events": True,
@@ -2442,6 +2494,8 @@ def _sanitize_run_assistant_history(history: object) -> list[dict[str, str]]:
             value = raw.get(key)
             if isinstance(value, str) and value:
                 message[key] = value[:256]
+        if raw.get("_run_assistant_event_active") is True:
+            message["_run_assistant_event_active"] = True
         cleaned.append(message)
     return cleaned
 

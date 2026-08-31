@@ -20,6 +20,21 @@
 
 第三方组件的授权、下载、再分发和引用要求由上游决定；Willy 不拥有也不授予这些组件的权利。当前唯一支持的交付方式是完整源码检出后可编辑安装。
 
+## 项目隔离安装
+
+完整源码检出使用 `python3 scripts/bootstrap.py` 建立项目私有运行时。该脚本仅写入检出根目录的
+`.venv/`、`.willy/`、`frontend/node_modules/` 与 `frontend/dist/`：Python 包通过 `.venv` 中的
+`pip install --editable` 安装；Node 22 运行时下载并校验后位于 `.willy/toolchains/`；pip/npm 缓存、
+临时 HOME 和 npm prefix 同样受限于 `.willy/`。脚本不修改调用者的 Python、Node、PATH、shell 配置、
+用户级包缓存或系统包管理器。默认 Node 版本可由 `WILLY_BOOTSTRAP_NODE_VERSION` 覆盖，覆盖值只作用于
+该检出中的 `.willy/toolchains/`。
+
+内置 Packmol 与 Multiwfn 不是静态链接负载，仍由宿主动态加载器提供 ABI 库。脚本以 `ldd` 只读检查二者；
+发现 `libgfortran.so.5` 或 `libXm.so.4` 缺失时，Ubuntu/Debian 的人工修复建议为
+`sudo apt install -y libgfortran5 libxm4`。该建议不是脚本行为：不得由 Willy 自动调用 `sudo`、
+`apt` 或其他系统包管理器，也不得自动替换 `libc`。缺库会使标准引导以非零状态结束，虽然项目内 Python
+环境与前端构建已完成；执行科学步骤前必须由宿主所有者完成相应系统修复。
+
 ## 发现优先级
 
 外部二进制按以下顺序解析：

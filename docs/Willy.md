@@ -5,7 +5,7 @@ Willy 是本机部署的受限分子动力学工作流编排器。LLM 负责解�
 ## 主流程
 
 ```text
-自然语言需求 -> 待确认 config.json -> run 分配与预检
+自然语言需求 -> temp__/plan__ 方案工作区 -> 待确认 config.json -> run 分配与预检
   -> 量子结构优化
   -> 单点与 MOL2
   -> RESP 电荷
@@ -16,7 +16,7 @@ Willy 是本机部署的受限分子动力学工作流编排器。LLM 负责解�
   -> GROMACS EM -> EQ -> PROD
 ```
 
-每个 run 使用独立 `md_run/<run_id>/` 工作区。阶段只能消费已验证并登记的上游产物：EM、EQ、PROD 的许可分别由已验收的阶段结果控制，文件存在不构成跨阶段许可。
+每个 run 使用独立 `md_run/<run_id>/` 工作区。`temp__` 和 `plan__` 是运行前的方案目录，不被登记为 run；只有确认后才随启动锁正式化为 `md__`。阶段只能消费已验证并登记的上游产物：EM、EQ、PROD 的许可分别由已验收的阶段结果控制，文件存在不构成跨阶段许可。
 
 ## 分层
 
@@ -33,7 +33,7 @@ Agent 只能调用所属层的白名单 function-calling 工具。运行助理�
 
 ## 运行事实
 
-`run_manifest.json` 保存公开 registry 与私有 provenance、topology、simulation、protocol sections。`status.json` 是当前公开状态快照；`events.jsonl` 提供脱敏事件；`run_assistant_history.json` 只保存所属 run 的有界对话记录。日志工作区仅显示 manifest 的公开 registry 投影和 `events.jsonl`；私有 sections、原始日志、命令、路径和密钥不得进入前端、LLM 上下文或公开报告。
+`run_manifest.json` 保存公开 registry 与私有 provenance、topology、simulation、protocol sections；正式化方案会在 registry 中留下不含参数值的 `proposal_workspace_id`。`status.json` 是当前公开状态快照；`events.jsonl` 提供脱敏事件；`run_assistant_history.json` 只保存所属 run 的有界运行助理对话；`proposal.json` 留存每个 `temp__`、`plan__` 与正式 run 的有界方案助理对话，计划才含候选配置。日志工作区和运行助理仅显示 manifest 的公开 registry 投影和 `events.jsonl`；私有 sections、原始日志、命令、路径、候选配置和密钥不得进入这些公开界面或报告。
 
 ## 产品边界
 

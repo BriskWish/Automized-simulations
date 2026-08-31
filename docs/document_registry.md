@@ -21,7 +21,7 @@
 | [`revision.md`](revision.md) | 工程原则、同步清单和完成定义 | 架构 | 工程边界、优先级或完成定义变化。 |
 | [`testing.md`](testing.md) | 测试分层、命令和发布门禁 | 6 号 | 测试范围、marker、外部验收或发布规则变化。 |
 | [`project_gap_analysis.md`](project_gap_analysis.md) | 当前验收缺口和关闭条件 | 0 号、5 号 | 缺口、责任、验收范围或关闭条件变化。 |
-| [`../tests/reports/test_case_catalog.md`](../tests/reports/test_case_catalog.md) | 当前测试用例台账 | 6 号 | pytest 收集结果或 LLM 场景变化；当前生成台账（937 条 pytest、18 条 LLM 场景，共 955 条记录）。 |
+| [`../tests/reports/test_case_catalog.md`](../tests/reports/test_case_catalog.md) | 当前测试用例台账 | 6 号 | pytest 收集结果或 LLM 场景变化；当前生成台账（969 条 pytest、18 条 LLM 场景，共 987 条记录）。 |
 | [`gateway.md`](gateway.md) | 未来托管网关的安全边界 | 网关 | 重新纳入产品范围时。 |
 | [`remote_execution.md`](remote_execution.md) | 未来远程执行的安全边界 | 模拟与前端 | 重新纳入产品范围时。 |
 

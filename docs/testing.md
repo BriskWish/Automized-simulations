@@ -4,14 +4,14 @@
 
 测试分为确定性代码契约、受控 LLM 行为、真实外部工具和人工浏览器验收。低层通过不替代高层证据；真实工具可启动也不替代受管十步流程。
 
-当前测试台账为 `937 pytest + 18 LLM = 955`。
+当前测试台账为 `969 pytest + 18 LLM = 987`。
 
 ## 测试层级
 
 | 层级 | 范围 | 通过标准 |
 |---|---|---|
 | 单元与契约 | schema、状态机、文件契约、权限、脱敏、资源边界 | 断言可重复，且不依赖本机科学软件。 |
-| 前端与浏览器 | 方案确认、运行状态、停止、`/resume`、`/fork`、`/switch` | 用户可见状态与服务端 run 事实一致，不触发越权操作。 |
+| 前端与浏览器 | `temp__`/`plan__` 方案恢复、方案确认、运行状态、停止、`/resume`、`/fork`、`/switch` | 用户可见状态与服务端 run 事实一致，不触发越权操作。 |
 | LLM | 工具调用、字段校验、错误分类和受控恢复 | 模型只能调用白名单工具；高影响动作必须取得明确确认。 |
 | 外部工具 | GROMACS、量子、拓扑、Packmol | 必须通过 Willy 的预检、受管子进程和产物校验。 |
 | 人工验收 | 目标机、真实浏览器和真实凭据环境 | 保存脱敏结论，不以截图或裸命令替代受管证据。 |
@@ -21,6 +21,12 @@
 ```bash
 # 默认离线回归
 python3 -m pytest -q
+
+# 项目隔离安装与前端构建（首次下载项目私有 Node 22）
+python3 scripts/bootstrap.py
+
+# 只读检查内置 Packmol/Multiwfn 的宿主动态库，不安装系统包
+python3 scripts/bootstrap.py --check-system-libs
 
 # 文档和测试台账一致性
 python3 -m pytest tests/test_documentation_consistency.py -q

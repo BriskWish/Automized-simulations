@@ -11,7 +11,7 @@
 | 当前分子、参数与默认规则 | [`knowledge_molecules.md`](knowledge_molecules.md) |
 | GROMACS 诊断条目 | [`knowledge_mdrun.md`](knowledge_mdrun.md) |
 | 量子、拓扑、模拟和运行环境契约 | [`quantum.md`](quantum.md)、[`topology.md`](topology.md)、[`simulation.md`](simulation.md)、[`environment_registry.md`](environment_registry.md) |
-| 状态接口、运行助理与 Error/Warning 规则 | [`status_api.md`](status_api.md)、[`run_assistant.md`](run_assistant.md)、[`ERR_WARN_Build.md`](ERR_WARN_Build.md) |
+| 方案工作区、状态接口、运行助理与 Error/Warning 规则 | [`status_api.md`](status_api.md)、[`run_assistant.md`](run_assistant.md)、[`ERR_WARN_Build.md`](ERR_WARN_Build.md) |
 | 命名、工程路线和测试门禁 | [`naming_convention.md`](naming_convention.md)、[`revision.md`](revision.md)、[`testing.md`](testing.md) |
 | 当前验收缺口 | [`project_gap_analysis.md`](project_gap_analysis.md) |
 | 文档责任和同步规则 | [`document_registry.md`](document_registry.md) |

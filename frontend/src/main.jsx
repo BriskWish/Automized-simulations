@@ -17,6 +17,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleHelp,
+  CircleCheck,
   ClipboardList,
   FileCog,
   FolderKanban,
@@ -30,6 +31,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Play,
+  Plus,
   RefreshCw,
   Send,
   Settings2,
@@ -37,6 +39,7 @@ import {
   Sparkles,
   Square,
   ScrollText,
+  Trash2,
   Upload,
   Workflow,
   X,
@@ -105,11 +108,14 @@ function assistantMessageText(message) {
     .join("\n");
 }
 
-function createChatAdapter(kind, runId, onPipelineStarted) {
+function createChatAdapter(kind, runId, proposalId, onPipelineStarted, onProposalWorkspaceChanged) {
   return {
     async run({ messages, abortSignal, unstable_threadId }) {
       if (kind === "run" && !runId) {
         return { content: [{ type: "text", text: "当前没有可读取的运行。请先在方案助理中确认并启动流水线。" }] };
+      }
+      if (kind === "proposal" && !proposalId) {
+        return { content: [{ type: "text", text: "方案工作区正在准备，请稍后重试。" }] };
       }
       const endpoint = kind === "proposal"
         ? "/api/proposal/chat"
@@ -118,12 +124,15 @@ function createChatAdapter(kind, runId, onPipelineStarted) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(kind === "proposal"
-          ? { messages, threadId: unstable_threadId }
+          ? { messages, proposalId, threadId: unstable_threadId }
           : { message: assistantMessageText([...messages].reverse().find((item) => item.role === "user")) }),
         signal: abortSignal,
       });
       if (!response.ok) throw new Error(await readResponseError(response));
       const data = await response.json();
+      if (kind === "proposal" && typeof data.proposalId === "string" && data.proposalId !== proposalId) {
+        onProposalWorkspaceChanged(data.proposalId);
+      }
       const launchedRunId = data.run_id || data.runId;
       if (typeof launchedRunId === "string" && (kind === "proposal" || launchedRunId !== runId)) {
         onPipelineStarted(launchedRunId);
@@ -135,13 +144,15 @@ function createChatAdapter(kind, runId, onPipelineStarted) {
 
 function AssistantMessage() {
   const eventKind = useAuiState((state) => state.message.metadata?.custom?.runActivityKind);
+  const eventActive = useAuiState((state) => state.message.metadata?.custom?.runActivityActive === true);
   const messageText = useAuiState((state) => (state.message.content || [])
     .filter((part) => part?.type === "text")
     .map((part) => part.text || "")
     .join("\n"));
-  const runningStep = eventKind === "status" && /正在|运行|执行|处理中|重试/.test(messageText);
-  return <MessagePrimitive.Root className={`message assistant-message ${runningStep ? "running-step" : ""}`} data-role="assistant">
-    <div className="message-mark">{runningStep ? <span className="step-spinner" aria-label="当前步骤进行中" /> : <Sparkles size={15} />}</div>
+  const runningStep = eventKind === "status" && eventActive;
+  const completedStep = eventKind === "step_completed" || eventKind === "completion_artifacts" || (eventKind === "status" && !eventActive && /已完成|全流程完成/.test(messageText));
+  return <MessagePrimitive.Root className={`message assistant-message ${runningStep ? "running-step" : ""} ${completedStep ? "completed-step" : ""}`} data-role="assistant">
+    <div className="message-mark">{runningStep ? <span className="step-spinner" aria-label="当前步骤进行中" /> : completedStep ? <CircleCheck size={16} aria-label="步骤已完成" /> : <Sparkles size={15} />}</div>
     <div className="message-copy"><MessagePrimitive.Parts /></div>
   </MessagePrimitive.Root>;
 }
@@ -149,6 +160,7 @@ function AssistantMessage() {
 function UserMessage() {
   return <MessagePrimitive.Root className="message user-message" data-role="user">
     <div className="message-copy"><MessagePrimitive.Parts /></div>
+    <div className="avatar message-user-avatar" aria-label="用户 ZL">ZL</div>
   </MessagePrimitive.Root>;
 }
 
@@ -164,6 +176,12 @@ function ThreadWelcome({ kind }) {
       <p>{run ? "每个完成步骤会作为新的运行消息出现。" : "从分子名称、数量或项目目标开始。"}</p>
     </div>
   </div>;
+}
+
+function ProposalThinkingIndicator() {
+  const isRunning = useAuiState((state) => state.thread.isRunning);
+  if (!isRunning) return null;
+  return <div className="proposal-thinking" role="status" aria-live="polite"><span className="step-spinner" aria-hidden="true" />正在思考...</div>;
 }
 
 function SlashMenu({ inputId, onClose }) {
@@ -184,7 +202,7 @@ function SlashMenu({ inputId, onClose }) {
   </div>;
 }
 
-function StructureUploadButton({ onNotice }) {
+function StructureUploadButton({ proposalId, onResult, onFailure }) {
   const fileInput = useRef(null);
   const [uploading, setUploading] = useState(false);
   const upload = async (event) => {
@@ -202,13 +220,13 @@ function StructureUploadButton({ onNotice }) {
       const response = await fetch("/api/proposal/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: file.name, content_base64: contentBase64 }),
+        body: JSON.stringify({ proposalId, filename: file.name, content_base64: contentBase64 }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "上传失败");
-      onNotice(payload.text || "结构已上传。");
+      onResult(payload);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "上传失败");
+      onFailure(error instanceof Error ? error.message : "上传失败");
     } finally {
       setUploading(false);
     }
@@ -216,15 +234,38 @@ function StructureUploadButton({ onNotice }) {
   return <><input ref={fileInput} className="visually-hidden" type="file" accept=".gjf,.inp" onChange={upload} /><button type="button" className="upload-button" disabled={uploading} onClick={() => fileInput.current?.click()} title="上传结构"><Upload className={uploading ? "spin" : ""} size={15} /><span>{uploading ? "上传中" : "上传结构"}</span></button></>;
 }
 
-function WorkbenchThread({ kind, active, onUploadNotice }) {
+function WorkbenchThread({ kind, active, proposalId }) {
+  const aui = useAui();
   const [slashOpen, setSlashOpen] = useState(false);
+  const tailId = useAuiState((state) => state.thread.messages.at(-1)?.id || null);
   const inputId = `${kind}-composer-input`;
   const isRun = kind === "run";
+  const appendUploadFailure = useCallback((text) => {
+    void aui.thread.append({
+      parentId: tailId,
+      sourceId: null,
+      runConfig: {},
+      startRun: false,
+      role: "user",
+      content: [{ type: "text", text }],
+      attachments: [],
+      metadata: { custom: {} },
+      createdAt: new Date(),
+    }).catch(() => undefined);
+  }, [aui, tailId]);
+  const applyUploadResult = useCallback((payload) => {
+    if (Array.isArray(payload?.messages)) {
+      aui.thread.reset(threadHistoryMessages(payload.messages));
+      return;
+    }
+    appendUploadFailure(payload?.text || "结构已上传。");
+  }, [appendUploadFailure, aui]);
   return <ThreadPrimitive.Root className="thread-root">
     <ThreadPrimitive.Viewport className="thread-viewport">
       <div className="thread-content">
         <ThreadWelcome kind={kind} />
         <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+        {!isRun && <ProposalThinkingIndicator />}
         <ThreadPrimitive.ViewportFooter className="thread-footer">
           <ComposerPrimitive.Root className="composer">
             <ComposerPrimitive.Input
@@ -237,7 +278,7 @@ function WorkbenchThread({ kind, active, onUploadNotice }) {
             />
             {slashOpen && <SlashMenu inputId={inputId} onClose={() => setSlashOpen(false)} />}
             <div className="composer-actions">
-              {!isRun && <StructureUploadButton onNotice={onUploadNotice} />}
+              {!isRun && <StructureUploadButton proposalId={proposalId} onResult={applyUploadResult} onFailure={appendUploadFailure} />}
               <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
               <ComposerPrimitive.Send asChild>
                 <button type="button" className="send-button" title="发送" aria-label="发送"><Send size={17} /></button>
@@ -272,11 +313,31 @@ function RunHistoryLoader({ runId, onSnapshot }) {
   return null;
 }
 
+function ProposalHistoryLoader({ proposalId }) {
+  const aui = useAui();
+  useEffect(() => {
+    let cancelled = false;
+    if (!proposalId) {
+      aui.thread.reset([]);
+      return undefined;
+    }
+    fetch(`/api/proposals/${encodeURIComponent(proposalId)}`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => {
+        if (cancelled || payload?.workspace?.workspace_id !== proposalId) return;
+        aui.thread.reset(threadHistoryMessages(Array.isArray(payload.messages) ? payload.messages : []));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [aui, proposalId]);
+  return null;
+}
+
 function threadHistoryMessages(messages) {
   return messages.map((message) => ({
     role: message.role,
     content: [{ type: "text", text: message.content }],
-    metadata: { custom: { runActivityKind: message._run_assistant_event_kind || "" } },
+    metadata: { custom: { runActivityKind: message._run_assistant_event_kind || "", runActivityActive: message._run_assistant_event_active === true } },
   }));
 }
 
@@ -340,20 +401,59 @@ function RunStopControl({ runId, snapshot, onStop }) {
   return <div className="run-stop-control"><button type="button" className={`stop-button ${confirming ? "confirming" : ""}`} onClick={requestStop}><Square size={13} />{confirming ? "确认中止" : "中止流水线"}</button>{message && <span aria-live="polite">{message}</span>}</div>;
 }
 
-function AssistantSurface({ kind, active, runId, snapshot, onPipelineStarted, onSnapshot, onStop }) {
+function PendingActionConfirmation({ runId, snapshot, onSnapshot }) {
+  const aui = useAui();
+  const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const state = String(snapshot?.state || "").toLowerCase();
+  const action = snapshot?.pending_action;
+  const waiting = state === "awaiting_confirmation" && Boolean(runId)
+    && action && typeof action.action_id === "string"
+    && Number.isInteger(action.state_revision)
+    && typeof action.config_fingerprint === "string";
+  useEffect(() => { setMessage(""); setSubmitting(false); }, [runId, action?.action_id, action?.state_revision, state]);
+  if (!waiting) return null;
+  const confirm = async () => {
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/pending-action/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action_id: action.action_id,
+          state_revision: action.state_revision,
+          config_fingerprint: action.config_fingerprint,
+        }),
+      });
+      if (!response.ok) throw new Error(await readResponseError(response));
+      const payload = await response.json();
+      if (Array.isArray(payload.messages)) aui.thread.reset(threadHistoryMessages(payload.messages));
+      if (payload.snapshot) onSnapshot(payload.snapshot);
+      setMessage(payload.text || "已提交确认请求。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "确认请求未送达，请刷新后重试。");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return <div className="pending-action-confirmation"><div><ShieldCheck size={15} /><span>待确认调参</span></div><button type="button" disabled={submitting} onClick={confirm}><Play size={13} />{submitting ? "正在确认" : "确认调参并重跑"}</button>{message && <span className="pending-action-confirmation-message" aria-live="polite">{message}</span>}</div>;
+}
+
+function AssistantSurface({ kind, active, runId, proposalId, snapshot, onPipelineStarted, onProposalWorkspaceChanged, onSnapshot, onStop }) {
   const adapter = useMemo(
-    () => createChatAdapter(kind, runId, onPipelineStarted),
-    [kind, runId, onPipelineStarted],
+    () => createChatAdapter(kind, runId, proposalId, onPipelineStarted, onProposalWorkspaceChanged),
+    [kind, runId, proposalId, onPipelineStarted, onProposalWorkspaceChanged],
   );
   const runtime = useLocalRuntime(adapter, { unstable_enableMessageQueue: true });
-  const [uploadNotice, setUploadNotice] = useState("");
   return <AssistantRuntimeProvider runtime={runtime}>
     <section className={`assistant-surface ${active ? "active" : ""}`} aria-hidden={!active}>
+      {kind === "proposal" && <ProposalHistoryLoader proposalId={proposalId} />}
       {kind === "run" && <RunHistoryLoader runId={runId} onSnapshot={onSnapshot} />}
       {kind === "run" && <RunHistorySync runId={runId} active={active} onSnapshot={onSnapshot} />}
+      {kind === "run" && <PendingActionConfirmation runId={runId} snapshot={snapshot} onSnapshot={onSnapshot} />}
       {kind === "run" && <RunStopControl runId={runId} snapshot={snapshot} onStop={onStop} />}
-      {kind === "proposal" && uploadNotice && <p className="upload-notice" aria-live="polite">{uploadNotice}</p>}
-      <WorkbenchThread kind={kind} active={active} onUploadNotice={setUploadNotice} />
+      <WorkbenchThread kind={kind} active={active} proposalId={proposalId} />
     </section>
   </AssistantRuntimeProvider>;
 }
@@ -455,12 +555,14 @@ function statusData(snapshot) {
 
 function StatusPanel({ collapsed, onToggle, snapshot, onRefresh, refreshState }) {
   const data = statusData(snapshot);
+  const preparing = String(data.state).toLowerCase() === "preparing";
   const running = ["running", "started", "executing", "retrying"].includes(String(data.state).toLowerCase());
+  const active = preparing || running;
   const refreshLabel = refreshState === "refreshing" ? "正在刷新" : refreshState === "done" ? "已刷新" : refreshState === "failed" ? "刷新失败" : "刷新状态";
   return <aside className={`status-panel ${collapsed ? "collapsed" : ""}`}>
     <div className="panel-heading"><span className="panel-heading-text">运行检查器</span><button type="button" className="icon-button" title={collapsed ? "展开运行检查器" : "收起运行检查器"} aria-label={collapsed ? "展开运行检查器" : "收起运行检查器"} aria-expanded={!collapsed} onClick={onToggle}>{collapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}</button></div>
     {!collapsed && <>
-      <div className={`status-banner ${running ? "is-running" : ""}`}><span className="status-dot" /><div><strong>{running ? "运行中" : "等待操作"}</strong><small>{data.runId}</small></div></div>
+      <div className={`status-banner ${active ? "is-running" : ""}`}><span className="status-dot" /><div><strong>{preparing ? "准备中" : running ? "运行中" : "等待操作"}</strong><small>{data.runId}</small></div></div>
       <div className="metric-grid"><div><span>阶段</span><b>{data.phase}</b></div><div><span>进度</span><b>{data.progress}</b></div></div>
       <div className="inspector-section status-summary-section"><div className="section-label"><Activity size={14} /> 当前状态</div><p className="status-summary">{data.summary.replace(/^#+\s*/, "")}</p></div>
       <div className="inspector-section"><div className="section-label"><ShieldCheck size={14} /> 受控边界</div><div className="check-row"><span>输入契约</span><b className="ok">已检查</b></div><div className="check-row"><span>资源预检</span><b className="ok">已登记</b></div><div className="check-row"><span>记录文件</span><b className="ok">manifest / events</b></div></div>
@@ -504,11 +606,15 @@ function OfficialAccountDialog({ onClose }) {
   </Dialog>;
 }
 
-function LocalTaskContent({ runs, selectedRunId, onSelectRun, onRefresh, onRename, refreshState }) {
+function LocalTaskContent({ runs, plans, temps, selectedRunId, selectedProposalId, onSelectRun, onSelectPlan, onCreateTemp, onRefresh, onRename, onDelete, refreshState }) {
   const [editing, setEditing] = useState(null);
   const [displayName, setDisplayName] = useState("");
   const [renameError, setRenameError] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteStage, setDeleteStage] = useState(0);
+  const [deleteError, setDeleteError] = useState("");
   const openRename = (run) => { setEditing(run); setDisplayName(run.display_name || run.run_id); setRenameError(""); };
+  const openDelete = (item) => { setDeleteTarget(item); setDeleteStage(0); setDeleteError(""); };
   const submitRename = async (event) => {
     event.preventDefault();
     if (!editing) return;
@@ -519,13 +625,32 @@ function LocalTaskContent({ runs, selectedRunId, onSelectRun, onRefresh, onRenam
       setRenameError(error instanceof Error ? error.message : "重命名失败");
     }
   };
+  const submitDelete = async () => {
+    if (!deleteTarget) return;
+    if (deleteTarget.kind === "plan" && deleteStage === 0) {
+      setDeleteStage(1);
+      return;
+    }
+    try {
+      await onDelete(deleteTarget.itemId, deleteTarget.kind, deleteTarget.kind === "plan");
+      setDeleteTarget(null);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "删除失败");
+    }
+  };
   const refreshLabel = refreshState === "refreshing" ? "正在刷新" : refreshState === "done" ? "已刷新" : refreshState === "failed" ? "刷新失败" : "";
-  return <section className="drawer-content"><div className="drawer-title"><div><span className="eyebrow">LOCAL WORKSPACE</span><h2>本地任务</h2></div><div className="drawer-refresh"><button type="button" className="icon-button" title="刷新工程目录" aria-label="刷新工程目录" disabled={refreshState === "refreshing"} onClick={() => onRefresh("tasks")}><RefreshCw className={refreshState === "refreshing" ? "spin" : ""} size={16} /></button>{refreshLabel && <span aria-live="polite">{refreshLabel}</span>}</div></div>
+  const itemRow = (item, label, selected, select) => <div className={`run-directory-row proposal-directory-row ${selected ? "selected" : ""}`} key={item.workspace_id}><button type="button" className="run-directory" onClick={() => select(item.workspace_id)}><span className={`run-state-dot ${item.state === "awaiting_confirmation" ? "await" : "idle"}`} /><span><b>{item.workspace_id}</b><small>{label}{item.updated_at ? ` · ${item.updated_at}` : ""}</small></span><ChevronRight size={15} /></button><button type="button" className="run-menu-button destructive-action" title="删除目录" aria-label={`删除 ${item.workspace_id}`} onClick={() => openDelete({ itemId: item.workspace_id, kind: item.kind })}><Trash2 size={15} /></button></div>;
+  return <><section className="drawer-content"><div className="drawer-title"><div><span className="eyebrow">LOCAL WORKSPACE</span><h2>本地任务</h2></div><div className="drawer-refresh"><button type="button" className="icon-button" title="刷新工程目录" aria-label="刷新工程目录" disabled={refreshState === "refreshing"} onClick={() => onRefresh("tasks")}><RefreshCw className={refreshState === "refreshing" ? "spin" : ""} size={16} /></button>{refreshLabel && <span aria-live="polite">{refreshLabel}</span>}</div></div>
     <p className="drawer-lead">Willy/md_run/目录下的已有工程。</p>
     <div className="run-directory-list" aria-label="当前工程目录">
-      {runs.length ? runs.map((run) => <div className={`run-directory-row ${selectedRunId === run.run_id ? "selected" : ""}`} key={run.run_id} onContextMenu={(event) => { event.preventDefault(); openRename(run); }}><button type="button" className="run-directory" onClick={() => onSelectRun(run.run_id)}><span className={`run-state-dot ${run.state || "await"}`} /><span><b>{run.display_name || run.run_id}</b><small>{run.display_name ? `${run.run_id} · ` : ""}{run.state || "await"}{run.updated_at ? ` · ${run.updated_at}` : ""}</small></span><ChevronRight size={15} /></button><button type="button" className="run-menu-button" title="工程操作" aria-label={`${run.run_id} 工程操作`} onClick={() => openRename(run)}><MoreHorizontal size={16} /></button>{editing?.run_id === run.run_id && <form className="rename-popover" onSubmit={submitRename}><label>工程名称<input aria-label="工程名称" value={displayName} maxLength={64} pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" onChange={(event) => setDisplayName(event.target.value)} autoFocus /></label>{renameError && <p>{renameError}</p>}<div><button type="button" onClick={() => setEditing(null)}>取消</button><button type="submit">重命名</button></div></form>}</div>) : <div className="empty-run-list"><FolderKanban size={20} /><span>尚无工程目录</span></div>}
+      <div className="proposal-workspace-heading"><span>历史工程 Previous Process</span></div>
+      {runs.length ? runs.map((run) => <div className={`run-directory-row run-directory-row--managed ${selectedRunId === run.run_id ? "selected" : ""}`} key={run.run_id} onContextMenu={(event) => { event.preventDefault(); openRename(run); }}><button type="button" className="run-directory" onClick={() => onSelectRun(run.run_id)}><span className={`run-state-dot ${run.state || "await"}`} /><span><b>{run.display_name || run.run_id}</b><small>{run.display_name ? `${run.run_id} · ` : ""}{run.state || "await"}{run.updated_at ? ` · ${run.updated_at}` : ""}</small></span><ChevronRight size={15} /></button><div className="directory-actions"><button type="button" className="run-menu-button" title="重命名工程" aria-label={`${run.run_id} 重命名工程`} onClick={() => openRename(run)}><MoreHorizontal size={16} /></button><button type="button" className="run-menu-button destructive-action" title="删除工程" aria-label={`删除 ${run.run_id}`} onClick={() => openDelete({ itemId: run.run_id, kind: "run" })}><Trash2 size={15} /></button></div>{editing?.run_id === run.run_id && <form className="rename-popover" onSubmit={submitRename}><label>工程名称<input aria-label="工程名称" value={displayName} maxLength={64} pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" onChange={(event) => setDisplayName(event.target.value)} autoFocus /></label>{renameError && <p>{renameError}</p>}<div><button type="button" onClick={() => setEditing(null)}>取消</button><button type="submit">重命名</button></div></form>}</div>) : <div className="empty-run-list"><FolderKanban size={20} /><span>尚无历史工程</span></div>}
+      <div className="proposal-workspace-heading"><span>方案 Plan</span></div>
+      {plans.length ? plans.map((plan) => itemRow(plan, "待确认方案", selectedProposalId === plan.workspace_id, onSelectPlan)) : <div className="directory-empty">尚无待确认方案</div>}
+      <div className="proposal-workspace-heading"><span>临时目录 Temporary List</span><button type="button" className="icon-button" title="新建临时方案" aria-label="新建临时方案" onClick={onCreateTemp}><Plus size={15} /></button></div>
+      {temps.length ? temps.map((temp) => itemRow(temp, "临时方案", selectedProposalId === temp.workspace_id, onSelectPlan)) : <div className="directory-empty">尚无临时目录</div>}
     </div>
-  </section>;
+  </section>{deleteTarget && <Dialog label="删除本地任务" onClose={() => setDeleteTarget(null)} className="delete-directory-dialog"><span className="eyebrow">REMOVE LOCAL DIRECTORY</span><h2>{deleteStage === 0 ? "删除此目录？" : "再次确认删除方案"}</h2><p>{deleteTarget.kind === "plan" ? deleteStage === 0 ? "方案目录将被删除。继续后还需要再次确认。" : "该方案及其中的会话和待确认配置将永久删除，无法恢复。" : "该目录及其本地记录将被永久删除，无法恢复。"}</p>{deleteError && <p className="delete-error">{deleteError}</p>}<div className="dialog-actions"><button type="button" onClick={() => setDeleteTarget(null)}>取消</button><button type="button" className="danger-button" onClick={submitDelete}>{deleteTarget.kind === "plan" && deleteStage === 0 ? "继续" : "删除"}</button></div></Dialog>}</>;
 }
 
 function ConfigurationContent() {
@@ -564,11 +689,11 @@ function AboutContent() {
   return <><section className="drawer-content about-content"><div className="drawer-title"><div><span className="eyebrow">ABOUT</span><h2>{ABOUT_WILLY.title}</h2></div><Info size={18} /></div><h3 className="about-heading">{ABOUT_WILLY.introduction.title}</h3>{ABOUT_WILLY.introduction.paragraphs.map((paragraph, index) => <p key={index}><RichText parts={paragraph} /></p>)}{ABOUT_WILLY.sections.map((section) => <details className="detail-accordion" key={section.id}><summary>{section.title}<ChevronDown size={15} /></summary><div className="detail-accordion-body"><ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul></div></details>)}<button type="button" className="official-account" title="放大查看公众号二维码" onClick={() => setQrOpen(true)}><img src="/app-assets/qrcode_for_gh_7df1329939c6_258.jpg" alt={ABOUT_WILLY.officialAccount.label} /><span>{ABOUT_WILLY.officialAccount.label}</span></button><details className="detail-accordion"><summary>{ABOUT_WILLY.thirdPartyNotices.title}<ChevronDown size={15} /></summary><div className="detail-accordion-body">{ABOUT_WILLY.thirdPartyNotices.paragraphs.map((paragraph, index) => <p key={index}><RichText parts={paragraph} /></p>)}{ABOUT_WILLY.thirdPartyNotices.citationGroups.map((group) => <div className="citation-group" key={group.label}><h3>{group.label}</h3>{group.introduction && <p><RichText parts={group.introduction} /></p>}<ol>{group.citations.map((citation, index) => <li key={index}><RichText parts={citation} /></li>)}</ol></div>)}<p><RichText parts={ABOUT_WILLY.thirdPartyNotices.closing} /></p></div></details></section>{qrOpen && <OfficialAccountDialog onClose={() => setQrOpen(false)} />}</>;
 }
 
-function DrawerContent({ section, runs, selectedRunId, onSelectRun, onRefresh, onRename, refreshState }) {
+function DrawerContent({ section, runs, plans, temps, selectedRunId, selectedProposalId, onSelectRun, onSelectPlan, onCreateTemp, onRefresh, onRename, onDelete, refreshState }) {
   if (section === "config") return <ConfigurationContent />;
   if (section === "guide") return <GuideContent />;
   if (section === "about") return <AboutContent />;
-  return <LocalTaskContent runs={runs} selectedRunId={selectedRunId} onSelectRun={onSelectRun} onRefresh={onRefresh} onRename={onRename} refreshState={refreshState} />;
+  return <LocalTaskContent runs={runs} plans={plans} temps={temps} selectedRunId={selectedRunId} selectedProposalId={selectedProposalId} onSelectRun={onSelectRun} onSelectPlan={onSelectPlan} onCreateTemp={onCreateTemp} onRefresh={onRefresh} onRename={onRename} onDelete={onDelete} refreshState={refreshState} />;
 }
 
 function App() {
@@ -581,7 +706,11 @@ function App() {
   const [assistantMode, setAssistantMode] = useState("proposal");
   const [snapshot, setSnapshot] = useState(null);
   const [runs, setRuns] = useState([]);
+  const [plans, setPlans] = useState([]);
+  const [temps, setTemps] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState(null);
+  const [proposalId, setProposalId] = useState(null);
+  const [selectedProjectKind, setSelectedProjectKind] = useState("proposal");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [refreshStates, setRefreshStates] = useState({ tasks: "idle", status: "idle" });
   const refreshTimers = useRef({});
@@ -601,6 +730,8 @@ function App() {
       if (runsResponse.ok) {
         const payload = await runsResponse.json();
         setRuns(payload.runs || payload || []);
+        setPlans(payload.plans || []);
+        setTemps(payload.temps || []);
       }
       if (source) {
         setRefreshStates((current) => ({ ...current, [source]: "done" }));
@@ -612,20 +743,57 @@ function App() {
     }
   }, []);
 
+  const ensureProposalWorkspace = useCallback(async () => {
+    try {
+      const response = await fetch("/api/proposals/default", { method: "POST" });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const workspaceId = payload?.workspace?.workspace_id;
+      if (typeof workspaceId === "string" && workspaceId) {
+        setProposalId((current) => current || workspaceId);
+        refreshWorkspace();
+      }
+    } catch {
+      // The run assistant remains usable when the proposal workspace is unavailable.
+    }
+  }, [refreshWorkspace]);
+
   useEffect(() => {
     refreshWorkspace();
+    ensureProposalWorkspace();
     const timer = window.setInterval(refreshWorkspace, 5000);
     return () => {
       window.clearInterval(timer);
       Object.values(refreshTimers.current).forEach((timeout) => window.clearTimeout(timeout));
     };
-  }, [refreshWorkspace]);
+  }, [ensureProposalWorkspace, refreshWorkspace]);
   const selectNav = (id) => { setSection(id); setDrawerOpen(true); };
-  // Selecting a project changes its context only. The active assistant remains
+  // Selecting a run also binds its proposal trace. The active assistant stays
   // stable until the user switches it, or a new pipeline explicitly starts.
-  const selectRun = (runId) => { setSelectedRunId(runId); };
-  const pipelineStarted = useCallback((runId) => { setSelectedRunId(runId); setAssistantMode("run"); refreshWorkspace(); }, [refreshWorkspace]);
-  const applySnapshot = useCallback((nextSnapshot) => { setSnapshot(nextSnapshot); if (nextSnapshot?.run_id) setSelectedRunId(nextSnapshot.run_id); }, []);
+  const selectRun = (runId) => { setSelectedRunId(runId); setProposalId(runId); setSelectedProjectKind("run"); };
+  const selectProposal = useCallback((workspaceId) => {
+    setProposalId(workspaceId);
+    setSelectedProjectKind("proposal");
+    setAssistantMode("proposal");
+  }, []);
+  const createTempProposal = useCallback(async () => {
+    const response = await fetch("/api/proposals", { method: "POST" });
+    if (!response.ok) throw new Error(await readResponseError(response));
+    const payload = await response.json();
+    const workspaceId = payload?.workspace?.workspace_id;
+    if (typeof workspaceId !== "string" || !workspaceId) throw new Error("新建方案工作区失败");
+    setProposalId(workspaceId);
+    setSelectedProjectKind("proposal");
+    setAssistantMode("proposal");
+    await refreshWorkspace();
+  }, [refreshWorkspace]);
+  const proposalWorkspaceChanged = useCallback((workspaceId) => {
+    setProposalId(workspaceId);
+    setSelectedProjectKind("proposal");
+    refreshWorkspace();
+  }, [refreshWorkspace]);
+  const pipelineStarted = useCallback((runId) => { setSelectedRunId(runId); setProposalId(runId); setSelectedProjectKind("run"); setAssistantMode("run"); refreshWorkspace(); }, [refreshWorkspace]);
+  const applySnapshot = useCallback((nextSnapshot) => { setSnapshot(nextSnapshot); if (nextSnapshot?.run_id) { setSelectedRunId(nextSnapshot.run_id); setProposalId(nextSnapshot.run_id); setSelectedProjectKind("run"); } }, []);
   const renameRun = useCallback(async (runId, displayName) => {
     const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/display-name`, {
       method: "PATCH",
@@ -635,6 +803,20 @@ function App() {
     if (!response.ok) throw new Error(await readResponseError(response));
     await refreshWorkspace();
   }, [refreshWorkspace]);
+  const deleteLocalItem = useCallback(async (itemId, kind, confirmPlan) => {
+    const response = await fetch(`/api/local-items/${encodeURIComponent(itemId)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm_plan: confirmPlan }),
+    });
+    if (!response.ok) throw new Error(await readResponseError(response));
+    if (kind === "run") {
+      setSelectedRunId((current) => current === itemId ? null : current);
+    }
+    setProposalId((current) => current === itemId ? null : current);
+    await refreshWorkspace();
+    await ensureProposalWorkspace();
+  }, [ensureProposalWorkspace, refreshWorkspace]);
   const stopRun = useCallback(async (runId) => {
     const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/stop`, { method: "POST" });
     if (!response.ok) throw new Error(await readResponseError(response));
@@ -699,9 +881,9 @@ function App() {
     <aside className="sidebar"><div className="brand"><div className="brand-glyph"><Atom size={19} /></div><div><strong>WILLY</strong><small>SCIENTIFIC WORKBENCH</small></div></div><nav className="nav-list" aria-label="主导航">{NAV_ITEMS.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={`nav-item ${section === id ? "active" : ""}`} onClick={() => selectNav(id)}><Icon size={17} /><span>{label}</span>{section === id && <ChevronRight size={14} className="nav-arrow" />}</button>)}</nav><div className="sidebar-bottom"><div className="system-line"><span className="pulse" /> SYSTEM ONLINE</div><small>受控执行环境 · 本机</small></div></aside>
     <main className="main-area"><header className="topbar"><div className="mobile-brand"><button type="button" className="icon-button" title="展开详情" aria-label="展开详情" onClick={() => setDrawerOpen((value) => !value)}><Menu size={18} /></button><span>{activeLabel}</span></div><div className="breadcrumb">WILLY <span>/</span> {activeLabel?.toUpperCase()}</div><div className="top-actions"><button type="button" className="icon-button" title="Willy 简介" aria-label="Willy 简介" onClick={() => setAboutOpen(true)}><CircleHelp size={17} /></button><div className="avatar">ZL</div></div></header>
       <div ref={workspaceRef} className={`workspace-layout ${drawerOpen ? "drawer-open" : "drawer-closed"} ${inspectorCollapsed ? "inspector-collapsed" : ""} ${isResizing ? "is-resizing" : ""}`} style={{ "--drawer-width": `${drawerOpen ? drawerWidth : 0}px`, "--inspector-width": `${inspectorCollapsed ? 44 : inspectorWidth}px` }}>
-        <aside className="detail-drawer" aria-hidden={!drawerOpen}><DrawerContent section={section} runs={runs} selectedRunId={selectedRunId} onSelectRun={selectRun} onRefresh={refreshWorkspace} onRename={renameRun} refreshState={refreshStates.tasks} /></aside><button type="button" className="drawer-toggle" title={drawerOpen ? "收起详情" : "展开详情"} aria-label={drawerOpen ? "收起详情" : "展开详情"} aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>{drawerOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
+        <aside className="detail-drawer" aria-hidden={!drawerOpen}><DrawerContent section={section} runs={runs} plans={plans} temps={temps} selectedRunId={selectedProjectKind === "run" ? selectedRunId : null} selectedProposalId={selectedProjectKind === "proposal" ? proposalId : null} onSelectRun={selectRun} onSelectPlan={selectProposal} onCreateTemp={createTempProposal} onRefresh={refreshWorkspace} onRename={renameRun} onDelete={deleteLocalItem} refreshState={refreshStates.tasks} /></aside><button type="button" className="drawer-toggle" title={drawerOpen ? "收起详情" : "展开详情"} aria-label={drawerOpen ? "收起详情" : "展开详情"} aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>{drawerOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
         {drawerOpen && <button type="button" className="panel-resize-handle panel-resize-handle-left" title="拖动调整本地任务栏宽度" aria-label="调整本地任务栏宽度" onPointerDown={(event) => beginPanelResize("drawer", event)} onKeyDown={(event) => handleResizeKeyDown("drawer", event)} />}
-        <section className="assistant-area"><div className="assistant-tabs" role="tablist" aria-label="助理工作区">{ASSISTANT_TABS.map(({ id, label, icon: Icon }) => <button type="button" role="tab" aria-selected={assistantMode === id} className={`assistant-tab ${assistantMode === id ? "active" : ""}`} key={id} onClick={() => setAssistantMode(id)}><Icon size={16} /><span>{label}</span></button>)}</div><div className="assistant-stack"><AssistantSurface kind="proposal" active={assistantMode === "proposal"} runId={selectedRunId} snapshot={snapshot} onPipelineStarted={pipelineStarted} onSnapshot={applySnapshot} onStop={stopRun} /><AssistantSurface kind="run" active={assistantMode === "run"} runId={selectedRunId} snapshot={snapshot} onPipelineStarted={pipelineStarted} onSnapshot={applySnapshot} onStop={stopRun} /><VisualizationSurface active={assistantMode === "visual"} runId={selectedRunId} runs={runs} /><LogsSurface active={assistantMode === "logs"} runId={selectedRunId} runs={runs} /></div></section>
+        <section className="assistant-area"><div className="assistant-tabs" role="tablist" aria-label="助理工作区">{ASSISTANT_TABS.map(({ id, label, icon: Icon }) => <button type="button" role="tab" aria-selected={assistantMode === id} className={`assistant-tab ${assistantMode === id ? "active" : ""}`} key={id} onClick={() => setAssistantMode(id)}><Icon size={16} /><span>{label}</span></button>)}</div><div className="assistant-stack"><AssistantSurface kind="proposal" active={assistantMode === "proposal"} runId={selectedRunId} proposalId={proposalId} snapshot={snapshot} onPipelineStarted={pipelineStarted} onProposalWorkspaceChanged={proposalWorkspaceChanged} onSnapshot={applySnapshot} onStop={stopRun} /><AssistantSurface kind="run" active={assistantMode === "run"} runId={selectedRunId} proposalId={null} snapshot={snapshot} onPipelineStarted={pipelineStarted} onProposalWorkspaceChanged={proposalWorkspaceChanged} onSnapshot={applySnapshot} onStop={stopRun} /><VisualizationSurface active={assistantMode === "visual"} runId={selectedRunId} runs={runs} /><LogsSurface active={assistantMode === "logs"} runId={selectedRunId} runs={runs} /></div></section>
         {!inspectorCollapsed && <button type="button" className="panel-resize-handle panel-resize-handle-right" title="拖动调整运行检查器宽度" aria-label="调整运行检查器宽度" onPointerDown={(event) => beginPanelResize("inspector", event)} onKeyDown={(event) => handleResizeKeyDown("inspector", event)} />}
         <StatusPanel collapsed={inspectorCollapsed} onToggle={() => setInspectorCollapsed((value) => !value)} snapshot={snapshot} onRefresh={refreshWorkspace} refreshState={refreshStates.status} />
       </div>

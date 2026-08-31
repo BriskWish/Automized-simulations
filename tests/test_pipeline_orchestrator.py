@@ -1290,3 +1290,55 @@ class TestInvokeAgent:
         sr = StepResult(step_name="struct_maker", step_index=1, success=False)
         ok = orch._invoke_agent(sr, "g16 优化", Path("/tmp"), {}, layer_index=1)
         assert ok is False
+
+
+def test_unknown_eq_failure_escalates_to_research_request_without_guessing(tmp_path, monkeypatch):
+    import willy.pipeline_orchestrator as po
+    from willy.pipeline_state import State
+    from willy.run_registry import RunRegistry
+    from willy.simulation.protocol import default_md_config
+
+    monkeypatch.setattr(po, "ROOT", tmp_path)
+    run_dir = tmp_path / "md_run" / "md__202608310001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.json").write_text(json.dumps({
+        "residues": {"Li": 1},
+        "molecules": {"Li": {"charge": 0, "spin": 1}},
+        "md": default_md_config(),
+    }), encoding="utf-8")
+    before = (run_dir / "config.json").read_bytes()
+    registry = RunRegistry(tmp_path)
+    registry.register_run(run_dir, backend="g16", total_steps=10)
+    orchestrator = po.PipelineOrchestrator(backend="g16", use_llm=False)
+    orchestrator._run_dir = run_dir
+    orchestrator._run_config_path = run_dir / "config.json"
+    orchestrator._run_registry = registry
+    orchestrator._sm.bind_status_path(run_dir / "status.json")
+    orchestrator._sm.bind_observer(orchestrator._record_run_status)
+    orchestrator._sm.set_extra(run_id=run_dir.name)
+    orchestrator._sm.transition(State.RUNNING)
+    orchestrator._sm.set_step(9, "GROMACS 三点式退火平衡", "simulation")
+    agent = MagicMock()
+    agent.propose_eq_recovery.return_value = {
+        "unknown_error": True,
+        "evidence": ["公开错误类别为 unknown"],
+    }
+    orchestrator._agents[3] = agent
+    failed = StepResult(
+        "eq", 9, False,
+        error=StepError(ErrorKind.UNKNOWN, "unclassified failure"),
+        target_type="stage", target="eq",
+    )
+    orchestrator._set_public_error(failed.error, "eq")
+
+    assert orchestrator._await_eq_user_confirmation(failed, "EQ", run_dir) is False
+    status = registry.get_run_status(run_dir.name, reconcile=False)
+
+    assert status["state"] == "escalated"
+    assert status["escalation"]["error_kind"] == "unknown"
+    assert "联网检索" in status["escalation"]["recommendation"]
+    assert "pending_action" not in status.get("extra", {})
+    assert (run_dir / "config.json").read_bytes() == before
+    assert not (run_dir / "pending_action.json").exists()
+    assert "research_requested" in (run_dir / "decision_trace.jsonl").read_text(encoding="utf-8")
+    assert "recovery.research_requested" in (run_dir / "logs" / "structured.jsonl").read_text(encoding="utf-8")

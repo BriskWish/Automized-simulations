@@ -1,7 +1,7 @@
 {
   "name": "willy-assistant-ui",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,14 +10,14 @@
     "visual-check": "node scripts/visual-check.mjs"
   },
   "dependencies": {
-    "@assistant-ui/react": "latest",
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "@assistant-ui/react": "0.15.16",
+    "lucide-react": "1.33.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.4.1",
-    "playwright": "^1.48.2",
-    "vite": "^6.3.5"
+    "@vitejs/plugin-react": "4.7.0",
+    "playwright": "1.48.2",
+    "vite": "6.4.3"
   }
 }

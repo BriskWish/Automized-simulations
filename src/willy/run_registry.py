@@ -46,6 +46,7 @@ DECISION_TRACE_FILENAME = "decision_trace.jsonl"
 LEGACY_ENVIRONMENT_REPORT_FILENAME = "environment_report.json"
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_PROPOSAL_WORKSPACE_ID_RE = re.compile(r"^plan__\d{12}$")
 _LOG_SUFFIXES = {".err", ".log", ".out", ".txt"}
 _MD_STAGE_STEPS = {
     stage: STEP_REGISTRY.index_for_stage(stage)
@@ -240,6 +241,25 @@ class RunRegistry:
             self._write_registry_manifest(directory, manifest, unified=unified)
         self._update_index(directory, manifest)
         return manifest
+
+    def record_proposal_origin(self, run_dir: str | Path, plan_id: str) -> None:
+        """Bind a formalized plan ID into the public registry audit.
+
+        The candidate configuration and conversation remain private to the
+        retained ``proposal.json`` file.  The regular manifest and event log
+        expose only the opaque pre-launch workspace identifier.
+        """
+        if not isinstance(plan_id, str) or not _PROPOSAL_WORKSPACE_ID_RE.fullmatch(plan_id):
+            raise RunRegistryError("方案工作区标识无效")
+        directory = self._validate_run_directory(run_dir)
+        with self._status_lock(directory):
+            unified = self._load_unified_manifest(directory)
+            manifest = self._read_registry_manifest(directory, unified=unified)
+            manifest["proposal_workspace_id"] = plan_id
+            manifest["updated_at"] = _now()
+            manifest = self._write_registry_manifest(directory, manifest, unified=unified)
+        self.append_event(directory, "proposal_formalized", {"plan_id": plan_id})
+        self._update_index(directory, manifest)
 
     def record_control_action(
         self,
@@ -730,6 +750,31 @@ class RunRegistry:
             key=lambda item: (str(item.get("updated_at", "")), str(item.get("run_id", ""))),
             reverse=True,
         )[:limit]
+
+    def remove_run_from_index(self, run_id: str) -> bool:
+        """Remove a deleted run's stale index entry without touching any run data."""
+        if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
+            raise RunRegistryError("run_id 格式无效")
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                payload = {"version": 1, "runs": []}
+                if self.index_path.is_file():
+                    try:
+                        payload = self._read_json(self.index_path, "运行索引")
+                    except RunRegistryError:
+                        payload = {"version": 1, "runs": []}
+                entries = payload.get("runs", [])
+                if not isinstance(entries, list):
+                    entries = []
+                remaining = [item for item in entries if item.get("run_id") != run_id]
+                changed = len(remaining) != len(entries)
+                if changed:
+                    _atomic_write(self.index_path, {"version": 1, "runs": remaining})
+                return changed
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def get_run_status(self, run_id: str, *, reconcile: bool = True) -> dict[str, Any]:
         directory = self.resolve_run_id(run_id)

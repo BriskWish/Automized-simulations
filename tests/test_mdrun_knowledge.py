@@ -97,3 +97,65 @@ def test_pending_action_exposes_verified_or_unverified_source(tmp_path):
     public = public_pending_action(action)
     assert public["advice_source"] == "knowledge_base"
     assert public["knowledge_entries"] == [index[9]]
+
+
+def test_eq_recovery_prompt_requires_two_paths_evidence_and_research_request(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "residues": {"Li": 1},
+        "molecules": {"Li": {"charge": 0, "spin": 1}},
+        "md": default_md_config(),
+    }), encoding="utf-8")
+    client = MagicMock()
+    client.chat.completions.create.return_value = _response(content=json.dumps({
+        "problem": "EQ 温度统计未通过。",
+        "evidence": ["最终温度窗口未通过验收"],
+        "current_step_retry": {
+            "applicable": True,
+            "summary": "减小时间步长后重试。",
+            "adjustments": [{"field": "dt", "after": 0.0005}],
+            "evidence": ["温度统计偏离目标值"],
+        },
+        "upstream_retry": {
+            "applicable": False,
+            "summary": "当前没有建盒问题证据。",
+            "adjustments": [],
+            "evidence": ["未检测到真空区"],
+        },
+    }, ensure_ascii=False))
+
+    proposal = SimulationAgent(client)._request_eq_recovery_proposal(
+        config_path=str(config_path),
+        error_kind="eq_not_converged",
+        error_message="EQ 未通过",
+        evidence={"vacuum_detected": False},
+    )
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+
+    assert "current_step_retry" in prompt
+    assert "upstream_retry" in prompt
+    assert "research_request" in prompt
+    assert proposal["problem"] == "EQ 温度统计未通过。"
+    assert proposal["evidence"] == ["最终温度窗口未通过验收"]
+    assert proposal["options"][0]["plan_kind"] == "current_step_retry"
+
+
+def test_unknown_eq_error_requests_research_without_calling_the_model(tmp_path):
+    from willy.errors import ErrorKind, StepError, StepResult
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "residues": {"Li": 1},
+        "molecules": {"Li": {"charge": 0, "spin": 1}},
+        "md": default_md_config(),
+    }), encoding="utf-8")
+    client = MagicMock()
+    proposal = SimulationAgent(client).propose_eq_recovery(
+        StepResult("eq", 9, False, error=StepError(ErrorKind.UNKNOWN, "unknown")),
+        str(config_path),
+    )
+
+    assert proposal["unknown_error"] is True
+    assert proposal["research_request"]["status"] == "approval_required"
+    assert "current_step_retry" not in proposal
+    client.chat.completions.create.assert_not_called()

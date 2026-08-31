@@ -181,6 +181,24 @@ class SimulationAgent(LayerAgent):
         """
         error = step_result.error
         evidence = self._eq_public_evidence(step_result.extra)
+        # An unclassified engine failure is not evidence for a numerical or
+        # protocol adjustment.  Do not turn the conservative fallback into a
+        # plausible-sounding guess; the orchestrator will record this as an
+        # approval-required research request instead of a runnable action.
+        if error is None or error.kind is ErrorKind.UNKNOWN:
+            return {
+                "problem": "EQ 阶段出现未分类错误，现有受限证据不足以确定可执行恢复路径。",
+                "evidence": [
+                    "公开错误类别为 unknown，未匹配到受控恢复规则。",
+                    "当前运行配置保持冻结，尚未写入任何参数调整。",
+                ],
+                "unknown_error": True,
+                "research_request": {
+                    "status": "approval_required",
+                    "reason": "需要以公开错误类别、阶段和已验收证据为边界检索权威资料。",
+                    "query": "GROMACS EQ unknown failure recovery",
+                },
+            }
         proposal = self._request_eq_recovery_proposal(
             config_path=config_path,
             error_kind=error.kind.value if error else "unknown",
@@ -283,6 +301,28 @@ class SimulationAgent(LayerAgent):
             "knowledge_entries 只能引用工具实际返回的条目；不得把未读取的条目写成已命中。"
             "若工具未命中或不可用，knowledge_status 必须不是 retrieved，advice_source 必须为 llm_unverified。"
             "只提出确有必要的改动，并只列允许的 field。\n\n"
+            "## 强制返回契约\n"
+            "必须返回一个 JSON 对象，并且必须同时含有 problem、evidence、current_step_retry、"
+            "upstream_retry 四个字段。evidence 必须是 2 至 6 条简短、可由本次公开错误、验收统计、"
+            "已读取知识条目或冻结配置直接支持的字符串；不能把假设写成证据。\n"
+            "current_step_retry 表示从第 9 步 EQ 重新验收，必须包含 applicable、summary、"
+            "adjustments、evidence；其中 adjustments 只能使用允许 field。\n"
+            "upstream_retry 表示仅在现有证据支持时打回第 7 步 Packmol 后重跑，必须包含 applicable、"
+            "summary、adjustments、evidence。若不适用，applicable 必须为 false，adjustments 为空，"
+            "并在 summary 和 evidence 说明当前没有支持回退的证据；不得凑出参数修改。\n"
+            "每条方案证据必须对应本方案，且不能声称已执行、已确认或已联网。EQ 当前步调参和打回前序"
+            "流程都属于高风险科学协议变更：只能供人工审核，不能建议自动重跑。\n"
+            "未知错误或本地知识无法支持任一方案时，返回 unknown_error=true 和 "
+            "research_request={\"status\":\"approval_required\",\"reason\":\"...\",\"query\":\"...\"}；"
+            "此时两个方案都应 applicable=false 且 adjustments 为空。你不能访问互联网，也不能编造检索"
+            "结论。只有未来经批准的外部检索结论能够明确落入上述两种方案，并再次经过相同白名单校验时，"
+            "才可以替换待确认方案。\n"
+            "推荐格式：{\"problem\":\"问题摘要\",\"evidence\":[\"证据一\"],"
+            "\"current_step_retry\":{\"applicable\":true,\"summary\":\"...\","
+            "\"adjustments\":[{\"field\":\"dt\",\"after\":0.0005,\"purpose\":\"...\"}],"
+            "\"evidence\":[\"...\"]},\"upstream_retry\":{\"applicable\":false,"
+            "\"summary\":\"当前证据不支持打回前序流程\",\"adjustments\":[],"
+            "\"evidence\":[\"...\"]},\"editable_fields\":[...]}。\n\n"
             f"{revision_context}"
             f"错误类型：{error_kind}\n"
             f"阶段：eq\n"
@@ -384,7 +424,17 @@ class SimulationAgent(LayerAgent):
             return {}
         if not isinstance(payload, Mapping):
             return {}
-        def parse_option(raw: object) -> dict[str, Any]:
+        def safe_points(value: object) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            points: list[str] = []
+            for item in value[:6]:
+                text = str(item or "").replace("\n", " ").replace("\r", " ").strip()[:240]
+                if text and text not in points:
+                    points.append(text)
+            return points
+
+        def parse_option(raw: object, *, plan_kind: str = "current_step_retry") -> dict[str, Any]:
             if not isinstance(raw, Mapping):
                 return {}
             adjustments = []
@@ -414,9 +464,11 @@ class SimulationAgent(LayerAgent):
                         "purpose": str(purpose or "").replace("\n", " ").strip()[:120],
                     })
             return {
+                "plan_kind": plan_kind,
                 "title": str(raw.get("title") or "").replace("\n", " ").strip()[:120],
                 "cause": str(raw.get("cause") or "").replace("\n", " ").strip()[:240],
                 "evidence": str(raw.get("evidence") or "").replace("\n", " ").strip()[:300],
+                "evidence_points": safe_points(raw.get("evidence_points", raw.get("evidence"))),
                 "summary": str(raw.get("summary") or "").replace("\n", " ").strip()[:240],
                 "adjustments": adjustments,
                 "editable_fields": safe_editable,
@@ -426,15 +478,44 @@ class SimulationAgent(LayerAgent):
                 "compatibility_notice": str(raw.get("compatibility_notice") or "").replace("\n", " ").strip()[:300],
             }
 
+        def structured_option(key: str, plan_kind: str) -> dict[str, Any]:
+            raw = payload.get(key)
+            if not isinstance(raw, Mapping) or raw.get("applicable") is not True:
+                return {}
+            return parse_option(raw, plan_kind=plan_kind)
+
+        structured = [
+            structured_option("current_step_retry", "current_step_retry"),
+            structured_option("upstream_retry", "upstream_retry"),
+        ]
+        structured = [item for item in structured if item]
+        if structured:
+            return {
+                "problem": str(payload.get("problem") or payload.get("problem_summary") or "").replace("\n", " ").strip()[:240],
+                "evidence": safe_points(payload.get("evidence")),
+                "research_request": payload.get("research_request") if isinstance(payload.get("research_request"), Mapping) else {},
+                "unknown_error": payload.get("unknown_error") is True,
+                "options": structured,
+            }
+
         raw_options = payload.get("options")
         if isinstance(raw_options, list):
             options = [parse_option(item) for item in raw_options[:3]]
             options = [item for item in options if item]
             return {
-                "problem_summary": str(payload.get("problem_summary") or payload.get("summary") or "").replace("\n", " ").strip()[:240],
+                "problem": str(payload.get("problem") or payload.get("problem_summary") or payload.get("summary") or "").replace("\n", " ").strip()[:240],
+                "evidence": safe_points(payload.get("evidence")),
+                "research_request": payload.get("research_request") if isinstance(payload.get("research_request"), Mapping) else {},
+                "unknown_error": payload.get("unknown_error") is True,
                 "options": options,
             }
-        return parse_option(payload)
+        parsed = parse_option(payload)
+        if parsed:
+            parsed["problem"] = str(payload.get("problem") or payload.get("problem_summary") or payload.get("summary") or "").replace("\n", " ").strip()[:240]
+            parsed["evidence_points"] = safe_points(payload.get("evidence")) or parsed["evidence_points"]
+            parsed["research_request"] = payload.get("research_request") if isinstance(payload.get("research_request"), Mapping) else {}
+            parsed["unknown_error"] = payload.get("unknown_error") is True
+        return parsed
 
     @staticmethod
     def _eq_agent_hypotheses(error_kind: str, evidence: Mapping[str, Any]) -> list[dict[str, str]]:
