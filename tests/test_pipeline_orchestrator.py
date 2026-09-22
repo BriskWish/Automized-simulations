@@ -259,7 +259,7 @@ class TestBuildSteps:
         monkeypatch.setattr(top_assembly, "build", top_run)
         monkeypatch.setattr(mdp, "build_all", mdp_run)
 
-        steps = orch._build_steps(run_dir)
+        steps = orch._build_unchecked_steps(run_dir)
         for index in range(6):
             steps[index][1]()
 
@@ -934,7 +934,7 @@ class TestInvokeAgent:
         assert orch._sm._status.extra["pending_action"]["restart_step"] == 9
         assert orch._sm._status.done_steps == list(range(1, 9))
 
-    def test_confirmed_eq_action_reruns_eq_before_prod(self, tmp_path, monkeypatch):
+    def test_legacy_confirmed_action_cannot_mutate_or_replay_parent(self, tmp_path, monkeypatch):
         """An approved action rewrites MDPs then needs accepted EQ before PROD."""
         import willy.pipeline_orchestrator as po
         import willy.simulation.visualization as visualization
@@ -1018,21 +1018,13 @@ class TestInvokeAgent:
         orchestrator = po.PipelineOrchestrator(
             backend="g16", use_llm=False, confirmed_action_id=action["action_id"],
         )
-        assert orchestrator.run(run_dir=run_dir) is True
-        assert eq_calls == [True]
-        assert prod_calls == [True]
-        assert json.loads(config_path.read_text())["md"]["dt"] == 0.0005
-        assert RunRegistry(tmp_path).get_run_status(run_dir.name)["state"] == "done"
-        events = [
-            json.loads(line)
-            for line in (run_dir / "events.jsonl").read_text().splitlines()
-        ]
-        transition_states = [
-            event["details"]["state"]
-            for event in events
-            if event["event_type"] in {"agent_retrying", "state_changed"}
-        ]
-        assert transition_states[:2] == ["retrying", "running"]
+        before_config = config_path.read_bytes()
+        before_status = (run_dir / "status.json").read_bytes()
+        assert orchestrator.run(run_dir=run_dir) is False
+        assert eq_calls == []
+        assert prod_calls == []
+        assert config_path.read_bytes() == before_config
+        assert (run_dir / "status.json").read_bytes() == before_status
 
     def test_eq_success_without_manifest_acceptance_is_blocked_before_prod(self, tmp_path, monkeypatch):
         """An EQ tool result alone is insufficient to progress into PROD."""

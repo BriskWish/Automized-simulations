@@ -27,6 +27,7 @@ from willy.env_registry import (
     require_tool,
 )
 from willy.step_registry import PACKMOL_STEP
+from willy.simulation.gmx_process import GMX_AUX_TIMEOUT_S, run_gmx_auxiliary
 
 
 DEFAULT_TARGET_MASS_DENSITY_G_CM3 = 0.7
@@ -841,9 +842,12 @@ def _gro_to_pdb(gro_path: str, pdb_path: str) -> Path:
     """gmx editconf: .gro → .pdb"""
     try:
         gmx = require_tool("gmx")
-        result = subprocess.run(
-            [str(gmx.executable), "editconf", "-f", gro_path, "-o", pdb_path],
-            capture_output=True, text=True, timeout=30, env=build_tool_env("gmx"),
+        directory = Path(pdb_path).resolve().parent
+        result = run_gmx_auxiliary(
+            [str(gmx.executable), "editconf", "-f", str(Path(gro_path).resolve()),
+             "-o", str(Path(pdb_path).resolve())],
+            cwd=directory, run_dir=directory, timeout=GMX_AUX_TIMEOUT_S,
+            env=build_tool_env("gmx"),
         )
     except EnvironmentRegistryError as exc:
         raise RuntimeError(f"GROMACS 不可用: {exc}") from exc

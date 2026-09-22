@@ -12,6 +12,8 @@ import secrets
 import tempfile
 import re
 
+from willy.python_runtime import parent_python_executable
+
 
 LOCK_FILENAME = ".pipeline.lock"
 STARTUP_AUDIT_FILENAME = "startup_audit.json"
@@ -28,6 +30,11 @@ class PipelineLockConflict(RuntimeError):
 
 class PipelineLaunchError(RuntimeError):
     """Raised when a child cannot adopt a reserved launch lock."""
+
+
+def pipeline_command(root: str | Path, *arguments: str) -> list[str]:
+    """Use the Web/CLI interpreter for every managed pipeline launch."""
+    return [parent_python_executable(), str(Path(root).absolute() / "run_pipeline.py"), *arguments]
 
 
 def _now() -> str:
@@ -222,10 +229,14 @@ class PipelineLaunchReservation:
 
     def detach_parent(self) -> None:
         """Close the parent's descriptor after the child inherited the lock."""
-        os.close(self.fd)
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
 
     def release(self) -> None:
         """Release and remove only the lock owned by this reservation."""
+        if self.fd < 0:
+            return
         try:
             record = _read_lock_fd(self.fd)
             if record.get("token") == self.token:
@@ -235,6 +246,7 @@ class PipelineLaunchReservation:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
             finally:
                 os.close(self.fd)
+                self.fd = -1
 
 
 def reserve_pipeline_launch(root: str | Path) -> PipelineLaunchReservation:
@@ -252,8 +264,10 @@ def reserve_pipeline_launch(root: str | Path) -> PipelineLaunchReservation:
         previous = _read_lock_fd(fd)
         # Existing pre-flock lock files from older versions remain authoritative
         # while their recorded owner is alive.
-        if _record_is_active(previous):
-            raise PipelineLockConflict(previous.get("run_id"))
+        from willy.run_processes import active_process_run
+        remaining_run = active_process_run(project_root)
+        if _record_is_active(previous) or remaining_run:
+            raise PipelineLockConflict(previous.get("run_id") or remaining_run)
 
         run_dir = _allocate_run_dir(project_root)
         token = secrets.token_urlsafe(18)
@@ -294,8 +308,10 @@ def reserve_existing_run_launch(root: str | Path, run_id: str) -> PipelineLaunch
         except BlockingIOError:
             raise PipelineLockConflict(active_pipeline_run_id(project_root))
         previous = _read_lock_fd(fd)
-        if _record_is_active(previous):
-            raise PipelineLockConflict(previous.get("run_id"))
+        from willy.run_processes import active_process_run
+        remaining_run = active_process_run(project_root)
+        if _record_is_active(previous) or remaining_run:
+            raise PipelineLockConflict(previous.get("run_id") or remaining_run)
         token = secrets.token_urlsafe(18)
         _write_lock_fd(fd, {
             "version": 1,
@@ -340,7 +356,8 @@ def active_pipeline_run_id(root: str | Path) -> str | None:
     project_root = Path(root).resolve()
     record = _read_lock_path(_lock_path(project_root))
     if not _record_is_active(record):
-        return None
+        from willy.run_processes import active_process_run
+        return active_process_run(project_root)
     run_id = record.get("run_id")
     return run_id if isinstance(run_id, str) and run_id else None
 
@@ -348,7 +365,8 @@ def active_pipeline_run_id(root: str | Path) -> str | None:
 def pipeline_launch_is_active(root: str | Path) -> bool:
     """Check lock ownership even for a legacy lock without a run ID."""
     project_root = Path(root).resolve()
-    return _record_is_active(_read_lock_path(_lock_path(project_root)))
+    from willy.run_processes import active_process_run
+    return _record_is_active(_read_lock_path(_lock_path(project_root))) or active_process_run(project_root) is not None
 
 
 def cleanup_finished_launch(root: str | Path, run_id: str, token: str) -> None:

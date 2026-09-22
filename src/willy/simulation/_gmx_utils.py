@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 import os
 import json
+import math
 import re
 import selectors
 import signal
@@ -46,6 +47,8 @@ from willy.simulation.mdrun_eta import (
     heartbeat_mdrun_eta,
 )
 from willy.process_lifecycle import ProcessTerminationController, record_process_lifecycle
+from willy.simulation.gmx_process import GMX_AUX_TIMEOUT_S, run_gmx_auxiliary
+from willy.simulation.eq_acceptance import EQCoverageError, EQWindow
 from willy.structured_log import append_structured_event
 from willy.step_registry import EM_STEP, STEP_REGISTRY
 
@@ -90,6 +93,7 @@ class StagePreparation:
     metadata: dict
     continuation_checkpoint: Path | None
     append: bool
+    step_attempt_id: str = ""
 
 
 def stage_step_index(stage: str) -> int:
@@ -196,6 +200,21 @@ def prepare_stage_execution(
     else:
         load_manifest(inputs.work_dir)
 
+    from willy.step_contracts import (
+        CONTRACT_FILENAME, StepContractError, begin_step, step_input_paths,
+        step_is_active, validate_step_inputs,
+    )
+    step_attempt_id = ""
+    step_index = stage_step_index(stage)
+    if (inputs.work_dir / CONTRACT_FILENAME).is_file():
+        expected = set(step_input_paths(inputs.work_dir, step_index))
+        actual = {path.resolve() for path in (inputs.topol, inputs.mdp, inputs.coordinates, *inputs.itps)}
+        if not actual <= expected or inputs.tpr.resolve() != (inputs.work_dir / f"{stage}.tpr").resolve():
+            raise StepContractError("受管阶段不能改用未绑定的输入或输出路径；请先导入到当前配置引用的位置并声明")
+        validate_step_inputs(inputs.work_dir, step_index)
+        if not step_is_active(inputs.work_dir, step_index):
+            step_attempt_id = begin_step(inputs.work_dir, step_index)
+
     parent_checkpoint: Path | None = None
     if stage in {"eq", "prod"}:
         require_prior_stage(inputs.work_dir, stage)
@@ -238,6 +257,7 @@ def prepare_stage_execution(
         metadata=metadata,
         continuation_checkpoint=(inputs.work_dir / f"{stage}.cpt") if resume else parent_checkpoint,
         append=resume,
+        step_attempt_id=step_attempt_id,
     )
 
 
@@ -268,6 +288,13 @@ def record_stage_execution(
         error_message=error.message if error else "",
         error_evidence=error_evidence or None,
     )
+    if preparation.step_attempt_id:
+        from willy.step_contracts import finish_step
+        finish_step(
+            preparation.inputs.work_dir, stage_step_index(preparation.inputs.stage),
+            preparation.step_attempt_id,
+            StepResult(preparation.inputs.stage, stage_step_index(preparation.inputs.stage), success, outputs=outputs or {}),
+        )
 
 
 def _load_output_trr(config_path: Path) -> bool:
@@ -281,7 +308,7 @@ def _stage_mdp_metadata(work_dir: Path, stage: str) -> dict:
     try:
         metadata = load_mdp_metadata(work_dir)
         value = metadata.get("stages", {}).get(stage, {})
-        if isinstance(value, dict):
+        if isinstance(value, dict) and value:
             return value
     except ManifestError:
         pass
@@ -290,7 +317,7 @@ def _stage_mdp_metadata(work_dir: Path, stage: str) -> dict:
         try:
             metadata = json.loads(path.read_text())
             value = metadata.get("stages", {}).get(stage, {})
-            if isinstance(value, dict):
+            if isinstance(value, dict) and value:
                 return value
         except (OSError, json.JSONDecodeError):
             pass
@@ -331,93 +358,10 @@ def run_gmx(
                 args=args,
                 on_heartbeat=on_mdrun_heartbeat,
             )
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            text=True,
-            cwd=str(cwd),
-            start_new_session=True,
-            env=gmx_env,
+        return run_gmx_auxiliary(
+            command, cwd=cwd, timeout=timeout, input_text=input_text,
+            env=gmx_env, run_dir=cwd,
         )
-        started_at = time.monotonic()
-        last_structured_heartbeat_at = started_at
-        append_structured_event(
-            cwd,
-            "process_started",
-            step=_STAGE_STEP_INDEX.get(args[0]) if args else None,
-            step_name=args[0] if args else None,
-            layer="simulation",
-            source="gromacs",
-            outcome="started",
-            message_code="process.started",
-        )
-        pending_input = input_text
-        termination: ProcessTerminationController | None = None
-        timed_out = False
-        while True:
-            remaining = None
-            if timeout is not None:
-                remaining = timeout - (time.monotonic() - started_at)
-                if remaining <= 0 and termination is None:
-                    timed_out = True
-                    termination = ProcessTerminationController(process)
-                    termination.request("timeout")
-            try:
-                stdout, stderr = process.communicate(
-                    input=pending_input,
-                    timeout=min(1.0, max(0.01, remaining)) if remaining is not None else 1.0,
-                )
-                result = subprocess.CompletedProcess(
-                    args=command,
-                    returncode=process.returncode,
-                    stdout=stdout,
-                    stderr=stderr,
-                )
-                if termination is not None:
-                    termination.finish()
-                    record_process_lifecycle(cwd, termination, command=command, returncode=result.returncode)
-                append_structured_event(
-                    cwd,
-                    "process_finished",
-                    step=_STAGE_STEP_INDEX.get(args[0]) if args else None,
-                    step_name=args[0] if args else None,
-                    layer="simulation",
-                    source="gromacs",
-                    outcome=(
-                        "timed_out" if timed_out
-                        else "succeeded" if result.returncode == 0
-                        else "failed"
-                    ),
-                    error_kind=termination.reason if termination is not None else None,
-                    duration_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
-                    message_code="process.finished",
-                )
-                if timed_out:
-                    raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
-                return result
-            except subprocess.TimeoutExpired:
-                pending_input = None
-                now = time.monotonic()
-                if now - last_structured_heartbeat_at >= MDRUN_HEARTBEAT_INTERVAL_S:
-                    append_structured_event(
-                        cwd,
-                        "process_heartbeat",
-                        step=_STAGE_STEP_INDEX.get(args[0]) if args else None,
-                        step_name=args[0] if args else None,
-                        layer="simulation",
-                        source="gromacs",
-                        outcome="running",
-                        duration_ms=max(0.0, (now - started_at) * 1000.0),
-                        message_code="process.heartbeat",
-                    )
-                    last_structured_heartbeat_at = now
-                if termination is None and stop_requested(cwd):
-                    termination = ProcessTerminationController(process)
-                    termination.request("stop_requested")
-                if termination is not None:
-                    termination.tick()
 
 
 def _run_mdrun_with_live_eta(
@@ -441,6 +385,8 @@ def _run_mdrun_with_live_eta(
         start_new_session=True,
         env=build_tool_env("gmx"),
     )
+    from willy.run_processes import track_process
+    track_process(cwd, process)
     append_structured_event(
         cwd,
         "process_started",
@@ -643,7 +589,7 @@ def grompp_and_mdrun(
         })
 
     try:
-        grompp = run_gmx(grompp_args, inputs.work_dir, timeout=60)
+        grompp = run_gmx(grompp_args, inputs.work_dir, timeout=GMX_AUX_TIMEOUT_S)
     except FileNotFoundError:
         return _gmx_missing_result(stage, started_at, inputs)
     except RunLockError as exc:
@@ -653,7 +599,7 @@ def grompp_and_mdrun(
             step_name=f"md_{stage}", step_index=step_index, success=False,
             error=StepError(
                 kind=ErrorKind.INPUT_CONTRACT,
-                message=f"{stage}: grompp 超时 (60s)",
+                message=f"{stage}: grompp 超时 (单次最多 {GMX_AUX_TIMEOUT_S}s)",
                 hint="检查 .mdp、topol.top 和 .itp 的一致性",
             ),
             duration_s=time.time() - started_at,
@@ -667,9 +613,21 @@ def grompp_and_mdrun(
             # This is a narrow, evidence-based exception for charge rounding
             # in generated topologies.  It never turns caller-supplied
             # arbitrary warnings into an accepted input.
-            retry = run_gmx(
-                [*grompp_args, "-maxwarn", "1"], inputs.work_dir, timeout=60,
-            )
+            try:
+                retry = run_gmx(
+                    [*grompp_args, "-maxwarn", "1"], inputs.work_dir, timeout=GMX_AUX_TIMEOUT_S,
+                )
+            except subprocess.TimeoutExpired:
+                return StepResult(
+                    step_name=f"md_{stage}", step_index=step_index, success=False,
+                    error=StepError(
+                        kind=ErrorKind.INPUT_CONTRACT,
+                        message=f"{stage}: grompp 受控重试超时 (单次最多 {GMX_AUX_TIMEOUT_S}s)",
+                        hint="检查 .mdp、topol.top 和 .itp 的一致性",
+                    ),
+                    duration_s=time.time() - started_at,
+                    extra={"inputs": _inputs_dict(inputs), "grompp_warning_policy": warning_policy},
+                )
             if retry.returncode == 0:
                 grompp_warning_policy = warning_policy
                 grompp_warning_policy["maxwarn"] = 1
@@ -792,7 +750,7 @@ def grompp_and_mdrun(
             converted = run_gmx(
                 ["trjconv", "-f", str(paths["gro"]), "-s", str(inputs.tpr), "-o", str(paths["xtc"])],
                 inputs.work_dir,
-                timeout=60,
+                timeout=GMX_AUX_TIMEOUT_S,
                 input_text="0\n",
             )
             if converted.returncode != 0:
@@ -852,7 +810,7 @@ def extract_energy_xvg(
         result = run_gmx(
             ["energy", "-f", str(edr_path), "-o", str(output_path)],
             edr_path.parent,
-            timeout=30,
+            timeout=GMX_AUX_TIMEOUT_S,
             input_text=f"{term}\n0\n",
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, RunLockError) as exc:
@@ -862,7 +820,7 @@ def extract_energy_xvg(
     return True, ""
 
 
-def parse_xvg(xvg_path: Path) -> tuple[list[str], list[list[float]]]:
+def parse_xvg(xvg_path: Path, *, strict: bool = False) -> tuple[list[str], list[list[float]]]:
     """Parse an XVG file into legends and columns."""
     text = xvg_path.read_text()
     lines = text.split("\n")
@@ -879,9 +837,14 @@ def parse_xvg(xvg_path: Path) -> tuple[list[str], list[list[float]]]:
         if not line or line.startswith("@") or line.startswith("#"):
             continue
         try:
-            data.append([float(value) for value in line.split()])
+            row = [float(value) for value in line.split()]
         except ValueError:
+            if strict:
+                raise ValueError("XVG 含无法解析的数值行") from None
             continue
+        if strict and (len(row) != 2 or (data and len(row) != len(data[0]))):
+            raise ValueError("XVG 能量时间序列必须为一致的两列数据")
+        data.append(row)
     if not data:
         return legends, []
     return legends, [[row[index] for row in data] for index in range(len(data[0]))]
@@ -917,42 +880,76 @@ def check_last_fraction(
     return results
 
 
-def analyze_final_window(xvg_path: Path, window_ps: float) -> dict:
+def analyze_final_window(xvg_path: Path, window_ps: float, *, coverage: EQWindow | None = None) -> dict:
     """Compute final-window means and a least-squares linear slope."""
-    _, columns = parse_xvg(xvg_path)
+    non_finite_result = {
+        "ok": False,
+        "reason_code": "non_finite",
+        "reason": "最终验收窗口含非有限数值或统计运算溢出",
+    }
+    window_ps = float(window_ps)
+    if not math.isfinite(window_ps):
+        return non_finite_result
+    try:
+        _, columns = parse_xvg(xvg_path, strict=coverage is not None)
+    except (OSError, ValueError, IndexError):
+        return {"ok": False, "reason_code": "invalid_series", "reason": "XVG 时间序列无法完整解析"}
     if len(columns) < 2 or not columns[0] or not columns[1]:
         return {"ok": False, "reason": "XVG 中没有可分析的时间序列"}
     times, values = columns[0], columns[1]
-    cutoff = times[-1] - float(window_ps)
-    selected = [
-        (time_value, value)
-        for time_value, value in zip(times, values)
-        if time_value >= cutoff
-    ]
+    if not all(math.isfinite(value) for column in (times, values) for value in column):
+        return non_finite_result
+    cutoff = times[-1] - window_ps
+    if not math.isfinite(cutoff):
+        return non_finite_result
+    coverage_details = None
+    groups = []
+    if coverage is not None:
+        try:
+            indices, groups, coverage_details = coverage.select(times)
+        except EQCoverageError as exc:
+            return {"ok": False, "reason_code": "incomplete_coverage", "reason": str(exc)}
+        selected = [(times[index], values[index]) for index in indices]
+    else:
+        selected = [(time_value, value) for time_value, value in zip(times, values) if time_value >= cutoff]
     if len(selected) < 4:
         return {"ok": False, "reason": "最终验收窗口中的采样点不足"}
     selected_times = [item[0] for item in selected]
     selected_values = [item[1] for item in selected]
-    mean_time = sum(selected_times) / len(selected_times)
-    mean = sum(selected_values) / len(selected_values)
-    variance = sum((value - mean) ** 2 for value in selected_values) / max(1, len(selected_values) - 1)
-    sem = (variance / len(selected)) ** 0.5
-    time_variance = sum((time_value - mean_time) ** 2 for time_value in selected_times)
-    slope_per_ps = (
-        sum((time_value - mean_time) * (value - mean) for time_value, value in selected)
-        / time_variance
-        if time_variance > 0
-        else 0.0
-    )
-    return {
+    try:
+        mean_time = sum(selected_times) / len(selected_times)
+        mean = sum(selected_values) / len(selected_values)
+        variance = sum((value - mean) ** 2 for value in selected_values) / max(1, len(selected_values) - 1)
+        sem = (variance / len(selected)) ** 0.5
+        time_variance = sum((time_value - mean_time) ** 2 for time_value in selected_times)
+        slope_per_ps = (
+            sum((time_value - mean_time) * (value - mean) for time_value, value in selected)
+            / time_variance
+            if time_variance > 0
+            else 0.0
+        )
+        relative_slope_per_ns = abs(slope_per_ps) * 1000.0 / max(abs(mean), 1e-12)
+        block_means = [sum(selected_values[index] for index in group) / len(group) for group in groups]
+    except OverflowError:
+        return non_finite_result
+    if not all(math.isfinite(value) for value in (
+        mean_time, mean, variance, sem, time_variance, slope_per_ps, relative_slope_per_ns, *block_means,
+    )):
+        return non_finite_result
+    result = {
         "ok": True,
         "window_ps": float(window_ps),
         "sample_count": len(selected),
         "mean": mean,
         "standard_error": sem,
         "linear_slope_per_ps": slope_per_ps,
-        "relative_slope_per_ns": abs(slope_per_ps) * 1000.0 / max(abs(mean), 1e-12),
+        "relative_slope_per_ns": relative_slope_per_ns,
     }
+    if coverage_details is not None:
+        for block, block_mean in zip(coverage_details["blocks"], block_means):
+            block["mean"] = block_mean
+        result["coverage"] = coverage_details
+    return result
 
 
 def _inputs_dict(inputs: GromacsInputs) -> dict[str, object]:

@@ -1,0 +1,1977 @@
+{
+  "schema_version": 1,
+  "gap_id": "G-07",
+  "recorded_at": "2026-09-10T13:03:11.171160+00:00",
+  "scope": "Frozen local-host source snapshot, independent Python installations, real loopback Web restarts and managed no-science resume runners; scientific/LLM failures are controlled injections, not remote-platform acceptance or coverage of later worktree changes.",
+  "complete_version_matrix": true,
+  "same_tested_snapshot": true,
+  "implementation": {
+    "app.py": "a7fccb508283c345142c8b987d1ca138dd7df23e2a8fbbb5b8185a7412ab3c28",
+    "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+    "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+    "src/willy/frontend_api.py": "5e30c45b82d549ddd3dd5d64a0cca9fa09fc82bb978d4679b2e1971da91d8f6a",
+    "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+    "src/willy/pipeline_launch.py": "b0938820cf6572cb42d39bd6089fb3855e40040a9691e6025ed137b5e42d9e9c",
+    "src/willy/pipeline_orchestrator.py": "e1a42dfca719270967ee2153877fb6be9f95780c0bcac83f2eb6e86daa19d8cf",
+    "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+    "tests/tools/g07_python_matrix_acceptance.py": "2f5157d7350bc869d3900e2b2005342d1b3782086dcd6fbdb3f05a225af9a592",
+    "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+  },
+  "reporting_implementation_sha256": "2f5157d7350bc869d3900e2b2005342d1b3782086dcd6fbdb3f05a225af9a592",
+  "source_changes_after_snapshot": {
+    "PROJECT_OVERVIEW.md": {
+      "tested_sha256": "f39d765414a9852f890953f73005bfcce17cf5865b3f258aaa36103746ccef0f",
+      "worktree_sha256": "fc427a741b9e22eba65ce98f10666c740721abe9a98285f813b2fdc19580c96b"
+    },
+    "docs/project_gap_analysis.md": {
+      "tested_sha256": "0fd80b51c362b8ed08daa2952e216e4746e5237d27572fde409dffd79d51c983",
+      "worktree_sha256": "01ead9273eb5c5d8c8b201cc4d4179c80c84ce940174bbf502c94f39a5e6a52f"
+    },
+    "docs/testing.md": {
+      "tested_sha256": "39238e9cf90dbe00f2e9104e0d748a2cd5add239f237df8f91ed76b582d5f744",
+      "worktree_sha256": "e5fa3c6bb0c00e8b1f646d00ff06f82d58e3f669e0489e00e1903361a256e4b5"
+    },
+    "frontend/scripts/recovery-check.mjs": {
+      "tested_sha256": "b10fac065a1473ecd6011fd99ede7737c0fcef751ce75ac031f31b909fa06a42",
+      "worktree_sha256": "4f1a820c96bf727e9e266c869a78da2619f6b3fd04593a6e2e02dc4bd12426a9"
+    },
+    "run_pipeline.py": {
+      "tested_sha256": "aefde8ed5058e6e7fa252c4c85cabc45744ff998c877b8846002d81dc01f8940",
+      "worktree_sha256": "43b51925218a85af09021f22182b043adb176f39ea39eb2672a155ac21b808e0"
+    },
+    "src/willy/frontend_api.py": {
+      "tested_sha256": "5e30c45b82d549ddd3dd5d64a0cca9fa09fc82bb978d4679b2e1971da91d8f6a",
+      "worktree_sha256": "4dd7f1eafaaa838e7c9a6e0f3309cd400f45fecd398581d3fc9edc17b5b2071e"
+    },
+    "src/willy/pipeline_orchestrator.py": {
+      "tested_sha256": "e1a42dfca719270967ee2153877fb6be9f95780c0bcac83f2eb6e86daa19d8cf",
+      "worktree_sha256": "b94b330a429b9eb503e1adca90b9f5d113bba13d3996266dd5362a08c0e6c6d7"
+    },
+    "src/willy/pipeline_state.py": {
+      "tested_sha256": "72e2b53113b18c5556e97e8b2cfd04051fa4c3212b2ab991b9b59199e0d9c955",
+      "worktree_sha256": "efe634e110e4dd6b41da37b56504777c9341d0760b0c52588c93cf949493b59c"
+    },
+    "src/willy/run_processes.py": {
+      "tested_sha256": "75db61b99fa45835ab660c0bcc8b5abc17adb989463376a2195e8d472eaf1851",
+      "worktree_sha256": "a6cdd93b170975c6e5f417106a7ba594ecda567834601769a46a9210e967b2ee"
+    },
+    "tests/test_run_faults.py": {
+      "tested_sha256": "bd05d397857afeadf01decb0c4d14c3922411d3f1f7efdbd7c37edda348c2916",
+      "worktree_sha256": "438572e2279e5fa053980dc90d4d147b08ea1992340603b752f7ccef4f31cc17"
+    }
+  },
+  "current_worktree_covered": false,
+  "cases": {
+    "3.10": {
+      "passed": true,
+      "g07_smoke_passed": true,
+      "checks": {
+        "pip_check": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.55,
+          "output_sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+        },
+        "compile": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.209,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 4.751,
+          "output_sha256": "373aecc16bc03d95924ad69b06c7b52f8dd455806236264dadbdd0b7ea603f16"
+        },
+        "regression": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 31.003,
+          "output_sha256": "07eb02a1c3096099783f34400c3132fc277ee710ec511770f51c48046767cea3",
+          "suite": "full",
+          "counts": {
+            "tests": 1475,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 10,
+            "passed": 1465
+          },
+          "failed_cases": [],
+          "skipped_cases": [
+            {
+              "case": "tests.e2e.test_browser_workflow.test_browser_workflow_uses_the_built_react_workbench",
+              "reason": "requires --run-e2e"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[gromacs_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[sobtop_ec]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[g16_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[orca_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[multiwfn_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[ligpargen_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_g07_local_wsl_error_matrix_is_redacted",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_frontend_api.test_real_llm_connection_is_explicitly_opt_in",
+              "reason": "requires --run-llm-connection"
+            },
+            {
+              "case": "tests.test_topology_contract.TestSobtopExecutor.test_real_sobtop_minimal_integration_when_available",
+              "reason": "requires --run-external"
+            }
+          ]
+        },
+        "live_probe": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 13.917,
+          "output_sha256": "30ddeb5b448d3a48d8337bdb58747e06fb5d5a04f8f12f9fa714012ec17a65ea"
+        }
+      },
+      "probe": {
+        "python_version": "3.10.21",
+        "is_venv": true,
+        "system": "Linux",
+        "machine": "x86_64",
+        "distribution": {
+          "ID": "ubuntu",
+          "VERSION_ID": "24.04"
+        },
+        "runtime": {
+          "ready": true,
+          "python_version": "3.10.21",
+          "supported_python": "3.10--3.12",
+          "dependencies": [
+            {
+              "name": "Willy",
+              "status": "available"
+            },
+            {
+              "name": "cryptography",
+              "status": "available"
+            },
+            {
+              "name": "fastapi",
+              "status": "available"
+            },
+            {
+              "name": "httpx",
+              "status": "available"
+            },
+            {
+              "name": "openai",
+              "status": "available"
+            },
+            {
+              "name": "py3Dmol",
+              "status": "available"
+            },
+            {
+              "name": "scikit-learn",
+              "status": "available"
+            },
+            {
+              "name": "uvicorn",
+              "status": "available"
+            }
+          ],
+          "error": ""
+        },
+        "dependencies": {
+          "willy": "0.6.0",
+          "cryptography": "50.0.1",
+          "fastapi": "0.141.1",
+          "httpx": "0.28.1",
+          "openai": "3.8.0",
+          "py3Dmol": "2.5.5",
+          "scikit-learn": "1.7.2",
+          "uvicorn": "0.52.4",
+          "pytest": "9.1.1"
+        },
+        "missing_dependencies": {
+          "passed": true,
+          "returncode": 1,
+          "public_guidance_sha256": "f7a6151aacf53cdd18acbfa65720216290b4957cf4ba7fa25dd5f9e42d091684"
+        },
+        "error_matrix": {
+          "schema_version": 1,
+          "acceptance": "passed",
+          "scope": "local WSL bounded G-07/T-07 error matrix",
+          "environment": {
+            "system": "Linux",
+            "release": "6.18.33.2-microsoft-standard-WSL2",
+            "machine": "x86_64",
+            "distribution": {
+              "ID": "ubuntu",
+              "VERSION_ID": "24.04"
+            },
+            "real_packmol": {
+              "status": "available",
+              "classification": "started",
+              "started": true,
+              "returncode": 174
+            },
+            "abi_injection": {
+              "status": "runtime_unavailable",
+              "classification": "loader_failure",
+              "runtime_unavailable": true,
+              "public_reason": "Packmol 与当前系统运行库不兼容"
+            },
+            "dependency_injection": {
+              "status": "missing",
+              "missing": true
+            }
+          },
+          "scenarios": [
+            {
+              "name": "input",
+              "step": 7,
+              "error_kind": "input_contract",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+              "public_error_event": {
+                "event_id": "md_g07_input:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_input",
+                  "step": 7,
+                  "error_kind": "input_contract"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "dependency",
+              "step": 7,
+              "error_kind": "dependency_missing",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+              "public_error_event": {
+                "event_id": "md_g07_dependency:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_dependency",
+                  "step": 7,
+                  "error_kind": "dependency_missing"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "abi",
+              "step": 7,
+              "error_kind": "runtime_unavailable",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+              "public_error_event": {
+                "event_id": "md_g07_abi:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_abi",
+                  "step": 7,
+                  "error_kind": "runtime_unavailable"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "packmol",
+              "step": 7,
+              "error_kind": "packmol_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败",
+              "public_error_event": {
+                "event_id": "md_g07_packmol:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_packmol\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_packmol",
+                  "step": 7,
+                  "error_kind": "packmol_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "grompp",
+              "step": 8,
+              "error_kind": "grompp_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+              "public_error_event": {
+                "event_id": "md_g07_grompp:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_grompp",
+                  "step": 8,
+                  "error_kind": "grompp_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "eq",
+              "step": 9,
+              "error_kind": "equilibration_failed",
+              "handled": false,
+              "state": "awaiting_confirmation",
+              "expected_state": "awaiting_confirmation",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+              "public_error_event": {
+                "event_id": "md_g07_eq:error:5",
+                "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n当前未修改配置，未启动重跑。可原参数续跑；如有调整方案，可修改后确认创建独立分支。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_eq",
+                  "step": 9,
+                  "error_kind": "equilibration_failed"
+                }
+              ],
+              "event_count": 7,
+              "structured_event_count": 7,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "prod",
+              "step": 10,
+              "error_kind": "mdrun_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+              "public_error_event": {
+                "event_id": "md_g07_prod:error:8",
+                "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_prod",
+                  "step": 10,
+                  "error_kind": "mdrun_failed"
+                }
+              ],
+              "event_count": 11,
+              "structured_event_count": 11,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            }
+          ],
+          "llm_configuration_error": {
+            "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+            "safe": true,
+            "run_artifacts_created": false
+          }
+        },
+        "web_restart_resume": {
+          "passed": true,
+          "sessions": [
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.10.21",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            },
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.10.21",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            }
+          ],
+          "distinct_web_processes": true,
+          "path_fallback_used": false,
+          "runner": "no-science controlled process with real launch gate and lock adoption"
+        },
+        "passed": true
+      },
+      "tested_implementation": {
+        "app.py": "a7fccb508283c345142c8b987d1ca138dd7df23e2a8fbbb5b8185a7412ab3c28",
+        "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+        "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+        "src/willy/frontend_api.py": "5e30c45b82d549ddd3dd5d64a0cca9fa09fc82bb978d4679b2e1971da91d8f6a",
+        "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+        "src/willy/pipeline_launch.py": "b0938820cf6572cb42d39bd6089fb3855e40040a9691e6025ed137b5e42d9e9c",
+        "src/willy/pipeline_orchestrator.py": "e1a42dfca719270967ee2153877fb6be9f95780c0bcac83f2eb6e86daa19d8cf",
+        "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+        "tests/tools/g07_python_matrix_acceptance.py": "2f5157d7350bc869d3900e2b2005342d1b3782086dcd6fbdb3f05a225af9a592",
+        "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+      },
+      "tested_snapshot_unchanged": true,
+      "tested_implementation_matches_source": false,
+      "source_manifest_sha256": "65bbc73312028b6f1005014509359ead713a97d56c34bc56eaab0abb4ad70693"
+    },
+    "3.11": {
+      "passed": true,
+      "g07_smoke_passed": true,
+      "checks": {
+        "pip_check": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.542,
+          "output_sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+        },
+        "compile": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.214,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 5.092,
+          "output_sha256": "0d5c05838cc7c73edd27415b0573e1ceb10b37bfce7d3c0ed7c2ef205291b046"
+        },
+        "regression": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 31.261,
+          "output_sha256": "0413ae4d45761e0ccb19a4d76f81df4c4e5952de8081bff576e28845f6394b5e",
+          "suite": "full",
+          "counts": {
+            "tests": 1475,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 10,
+            "passed": 1465
+          },
+          "failed_cases": [],
+          "skipped_cases": [
+            {
+              "case": "tests.e2e.test_browser_workflow.test_browser_workflow_uses_the_built_react_workbench",
+              "reason": "requires --run-e2e"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[gromacs_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[sobtop_ec]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[g16_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[orca_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[multiwfn_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[ligpargen_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_g07_local_wsl_error_matrix_is_redacted",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_frontend_api.test_real_llm_connection_is_explicitly_opt_in",
+              "reason": "requires --run-llm-connection"
+            },
+            {
+              "case": "tests.test_topology_contract.TestSobtopExecutor.test_real_sobtop_minimal_integration_when_available",
+              "reason": "requires --run-external"
+            }
+          ]
+        },
+        "live_probe": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 15.944,
+          "output_sha256": "b72ffa48a5eb2b44e394400ae36425279a57a5b1a4152d49c15b298d98bc56a1"
+        }
+      },
+      "probe": {
+        "python_version": "3.11.16",
+        "is_venv": true,
+        "system": "Linux",
+        "machine": "x86_64",
+        "distribution": {
+          "ID": "ubuntu",
+          "VERSION_ID": "24.04"
+        },
+        "runtime": {
+          "ready": true,
+          "python_version": "3.11.16",
+          "supported_python": "3.10--3.12",
+          "dependencies": [
+            {
+              "name": "Willy",
+              "status": "available"
+            },
+            {
+              "name": "cryptography",
+              "status": "available"
+            },
+            {
+              "name": "fastapi",
+              "status": "available"
+            },
+            {
+              "name": "httpx",
+              "status": "available"
+            },
+            {
+              "name": "openai",
+              "status": "available"
+            },
+            {
+              "name": "py3Dmol",
+              "status": "available"
+            },
+            {
+              "name": "scikit-learn",
+              "status": "available"
+            },
+            {
+              "name": "uvicorn",
+              "status": "available"
+            }
+          ],
+          "error": ""
+        },
+        "dependencies": {
+          "willy": "0.6.0",
+          "cryptography": "50.0.1",
+          "fastapi": "0.141.1",
+          "httpx": "0.28.1",
+          "openai": "3.8.0",
+          "py3Dmol": "2.5.5",
+          "scikit-learn": "1.9.0",
+          "uvicorn": "0.52.4",
+          "pytest": "9.1.1"
+        },
+        "missing_dependencies": {
+          "passed": true,
+          "returncode": 1,
+          "public_guidance_sha256": "f7a6151aacf53cdd18acbfa65720216290b4957cf4ba7fa25dd5f9e42d091684"
+        },
+        "error_matrix": {
+          "schema_version": 1,
+          "acceptance": "passed",
+          "scope": "local WSL bounded G-07/T-07 error matrix",
+          "environment": {
+            "system": "Linux",
+            "release": "6.18.33.2-microsoft-standard-WSL2",
+            "machine": "x86_64",
+            "distribution": {
+              "ID": "ubuntu",
+              "VERSION_ID": "24.04"
+            },
+            "real_packmol": {
+              "status": "available",
+              "classification": "started",
+              "started": true,
+              "returncode": 174
+            },
+            "abi_injection": {
+              "status": "runtime_unavailable",
+              "classification": "loader_failure",
+              "runtime_unavailable": true,
+              "public_reason": "Packmol 与当前系统运行库不兼容"
+            },
+            "dependency_injection": {
+              "status": "missing",
+              "missing": true
+            }
+          },
+          "scenarios": [
+            {
+              "name": "input",
+              "step": 7,
+              "error_kind": "input_contract",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+              "public_error_event": {
+                "event_id": "md_g07_input:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_input",
+                  "step": 7,
+                  "error_kind": "input_contract"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "dependency",
+              "step": 7,
+              "error_kind": "dependency_missing",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+              "public_error_event": {
+                "event_id": "md_g07_dependency:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_dependency",
+                  "step": 7,
+                  "error_kind": "dependency_missing"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "abi",
+              "step": 7,
+              "error_kind": "runtime_unavailable",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+              "public_error_event": {
+                "event_id": "md_g07_abi:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_abi",
+                  "step": 7,
+                  "error_kind": "runtime_unavailable"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "packmol",
+              "step": 7,
+              "error_kind": "packmol_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败",
+              "public_error_event": {
+                "event_id": "md_g07_packmol:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_packmol\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_packmol",
+                  "step": 7,
+                  "error_kind": "packmol_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "grompp",
+              "step": 8,
+              "error_kind": "grompp_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+              "public_error_event": {
+                "event_id": "md_g07_grompp:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_grompp",
+                  "step": 8,
+                  "error_kind": "grompp_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "eq",
+              "step": 9,
+              "error_kind": "equilibration_failed",
+              "handled": false,
+              "state": "awaiting_confirmation",
+              "expected_state": "awaiting_confirmation",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+              "public_error_event": {
+                "event_id": "md_g07_eq:error:5",
+                "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n当前未修改配置，未启动重跑。可原参数续跑；如有调整方案，可修改后确认创建独立分支。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_eq",
+                  "step": 9,
+                  "error_kind": "equilibration_failed"
+                }
+              ],
+              "event_count": 7,
+              "structured_event_count": 7,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "prod",
+              "step": 10,
+              "error_kind": "mdrun_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+              "public_error_event": {
+                "event_id": "md_g07_prod:error:8",
+                "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_prod",
+                  "step": 10,
+                  "error_kind": "mdrun_failed"
+                }
+              ],
+              "event_count": 11,
+              "structured_event_count": 11,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            }
+          ],
+          "llm_configuration_error": {
+            "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+            "safe": true,
+            "run_artifacts_created": false
+          }
+        },
+        "web_restart_resume": {
+          "passed": true,
+          "sessions": [
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.11.16",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            },
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.11.16",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            }
+          ],
+          "distinct_web_processes": true,
+          "path_fallback_used": false,
+          "runner": "no-science controlled process with real launch gate and lock adoption"
+        },
+        "passed": true
+      },
+      "tested_implementation": {
+        "app.py": "a7fccb508283c345142c8b987d1ca138dd7df23e2a8fbbb5b8185a7412ab3c28",
+        "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+        "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+        "src/willy/frontend_api.py": "5e30c45b82d549ddd3dd5d64a0cca9fa09fc82bb978d4679b2e1971da91d8f6a",
+        "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+        "src/willy/pipeline_launch.py": "b0938820cf6572cb42d39bd6089fb3855e40040a9691e6025ed137b5e42d9e9c",
+        "src/willy/pipeline_orchestrator.py": "e1a42dfca719270967ee2153877fb6be9f95780c0bcac83f2eb6e86daa19d8cf",
+        "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+        "tests/tools/g07_python_matrix_acceptance.py": "2f5157d7350bc869d3900e2b2005342d1b3782086dcd6fbdb3f05a225af9a592",
+        "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+      },
+      "tested_snapshot_unchanged": true,
+      "tested_implementation_matches_source": false,
+      "source_manifest_sha256": "65bbc73312028b6f1005014509359ead713a97d56c34bc56eaab0abb4ad70693"
+    },
+    "3.12": {
+      "passed": true,
+      "g07_smoke_passed": true,
+      "checks": {
+        "pip_check": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.286,
+          "output_sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+        },
+        "compile": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.237,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 5.396,
+          "output_sha256": "9aac0ecfec278c9b2e38e9789836d2278d2d7452b44f554a741b473f1e14bc26"
+        },
+        "regression": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 32.362,
+          "output_sha256": "688bc07a601d6af653acce338ba0035429c159e0d88aadf49addf28fd173ec02",
+          "suite": "full",
+          "counts": {
+            "tests": 1475,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 10,
+            "passed": 1465
+          },
+          "failed_cases": [],
+          "skipped_cases": [
+            {
+              "case": "tests.e2e.test_browser_workflow.test_browser_workflow_uses_the_built_react_workbench",
+              "reason": "requires --run-e2e"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[gromacs_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[sobtop_ec]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[g16_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[orca_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[multiwfn_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_external_smoke_preflight_gate[ligpargen_minimal]",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_external_smoke.test_g07_local_wsl_error_matrix_is_redacted",
+              "reason": "requires --run-external"
+            },
+            {
+              "case": "tests.test_frontend_api.test_real_llm_connection_is_explicitly_opt_in",
+              "reason": "requires --run-llm-connection"
+            },
+            {
+              "case": "tests.test_topology_contract.TestSobtopExecutor.test_real_sobtop_minimal_integration_when_available",
+              "reason": "requires --run-external"
+            }
+          ]
+        },
+        "live_probe": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 16.696,
+          "output_sha256": "f446ba647a4839343d4d6806a1ad91c805e002f776626d3f62b3847e90dc0e2e"
+        }
+      },
+      "probe": {
+        "python_version": "3.12.14",
+        "is_venv": true,
+        "system": "Linux",
+        "machine": "x86_64",
+        "distribution": {
+          "ID": "ubuntu",
+          "VERSION_ID": "24.04"
+        },
+        "runtime": {
+          "ready": true,
+          "python_version": "3.12.14",
+          "supported_python": "3.10--3.12",
+          "dependencies": [
+            {
+              "name": "Willy",
+              "status": "available"
+            },
+            {
+              "name": "cryptography",
+              "status": "available"
+            },
+            {
+              "name": "fastapi",
+              "status": "available"
+            },
+            {
+              "name": "httpx",
+              "status": "available"
+            },
+            {
+              "name": "openai",
+              "status": "available"
+            },
+            {
+              "name": "py3Dmol",
+              "status": "available"
+            },
+            {
+              "name": "scikit-learn",
+              "status": "available"
+            },
+            {
+              "name": "uvicorn",
+              "status": "available"
+            }
+          ],
+          "error": ""
+        },
+        "dependencies": {
+          "willy": "0.6.0",
+          "cryptography": "50.0.1",
+          "fastapi": "0.141.1",
+          "httpx": "0.28.1",
+          "openai": "3.8.0",
+          "py3Dmol": "2.5.5",
+          "scikit-learn": "1.9.0",
+          "uvicorn": "0.52.4",
+          "pytest": "9.1.1"
+        },
+        "missing_dependencies": {
+          "passed": true,
+          "returncode": 1,
+          "public_guidance_sha256": "f7a6151aacf53cdd18acbfa65720216290b4957cf4ba7fa25dd5f9e42d091684"
+        },
+        "error_matrix": {
+          "schema_version": 1,
+          "acceptance": "passed",
+          "scope": "local WSL bounded G-07/T-07 error matrix",
+          "environment": {
+            "system": "Linux",
+            "release": "6.18.33.2-microsoft-standard-WSL2",
+            "machine": "x86_64",
+            "distribution": {
+              "ID": "ubuntu",
+              "VERSION_ID": "24.04"
+            },
+            "real_packmol": {
+              "status": "available",
+              "classification": "started",
+              "started": true,
+              "returncode": 174
+            },
+            "abi_injection": {
+              "status": "runtime_unavailable",
+              "classification": "loader_failure",
+              "runtime_unavailable": true,
+              "public_reason": "Packmol 与当前系统运行库不兼容"
+            },
+            "dependency_injection": {
+              "status": "missing",
+              "missing": true
+            }
+          },
+          "scenarios": [
+            {
+              "name": "input",
+              "step": 7,
+              "error_kind": "input_contract",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+              "public_error_event": {
+                "event_id": "md_g07_input:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_input",
+                  "step": 7,
+                  "error_kind": "input_contract"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "dependency",
+              "step": 7,
+              "error_kind": "dependency_missing",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+              "public_error_event": {
+                "event_id": "md_g07_dependency:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_dependency",
+                  "step": 7,
+                  "error_kind": "dependency_missing"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "abi",
+              "step": 7,
+              "error_kind": "runtime_unavailable",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+              "public_error_event": {
+                "event_id": "md_g07_abi:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_abi",
+                  "step": 7,
+                  "error_kind": "runtime_unavailable"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "packmol",
+              "step": 7,
+              "error_kind": "packmol_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败",
+              "public_error_event": {
+                "event_id": "md_g07_packmol:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_packmol\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_packmol",
+                  "step": 7,
+                  "error_kind": "packmol_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "grompp",
+              "step": 8,
+              "error_kind": "grompp_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+              "public_error_event": {
+                "event_id": "md_g07_grompp:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_grompp",
+                  "step": 8,
+                  "error_kind": "grompp_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "eq",
+              "step": 9,
+              "error_kind": "equilibration_failed",
+              "handled": false,
+              "state": "awaiting_confirmation",
+              "expected_state": "awaiting_confirmation",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+              "public_error_event": {
+                "event_id": "md_g07_eq:error:5",
+                "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n当前未修改配置，未启动重跑。可原参数续跑；如有调整方案，可修改后确认创建独立分支。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_eq",
+                  "step": 9,
+                  "error_kind": "equilibration_failed"
+                }
+              ],
+              "event_count": 7,
+              "structured_event_count": 7,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "prod",
+              "step": 10,
+              "error_kind": "mdrun_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+              "public_error_event": {
+                "event_id": "md_g07_prod:error:8",
+                "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_prod",
+                  "step": 10,
+                  "error_kind": "mdrun_failed"
+                }
+              ],
+              "event_count": 11,
+              "structured_event_count": 11,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            }
+          ],
+          "llm_configuration_error": {
+            "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+            "safe": true,
+            "run_artifacts_created": false
+          }
+        },
+        "web_restart_resume": {
+          "passed": true,
+          "sessions": [
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.12.14",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            },
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.12.14",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            }
+          ],
+          "distinct_web_processes": true,
+          "path_fallback_used": false,
+          "runner": "no-science controlled process with real launch gate and lock adoption"
+        },
+        "passed": true
+      },
+      "tested_implementation": {
+        "app.py": "a7fccb508283c345142c8b987d1ca138dd7df23e2a8fbbb5b8185a7412ab3c28",
+        "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+        "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+        "src/willy/frontend_api.py": "5e30c45b82d549ddd3dd5d64a0cca9fa09fc82bb978d4679b2e1971da91d8f6a",
+        "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+        "src/willy/pipeline_launch.py": "b0938820cf6572cb42d39bd6089fb3855e40040a9691e6025ed137b5e42d9e9c",
+        "src/willy/pipeline_orchestrator.py": "e1a42dfca719270967ee2153877fb6be9f95780c0bcac83f2eb6e86daa19d8cf",
+        "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+        "tests/tools/g07_python_matrix_acceptance.py": "2f5157d7350bc869d3900e2b2005342d1b3782086dcd6fbdb3f05a225af9a592",
+        "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+      },
+      "tested_snapshot_unchanged": true,
+      "tested_implementation_matches_source": false,
+      "source_manifest_sha256": "65bbc73312028b6f1005014509359ead713a97d56c34bc56eaab0abb4ad70693"
+    }
+  },
+  "passed": true,
+  "g07_smoke_passed": true,
+  "isolation": {
+    "source_runs_copied": false,
+    "source_config_copied": false,
+    "source_dotenv_copied": false,
+    "source_python_environment_modified": false,
+    "public_dotenv_template_copied": true
+  },
+  "source_manifest": {
+    ".env.example": "e8f76fb30bf1b53b6a79d00623c1fc36f1da6e10a7416ffa547aafc13263e7ae",
+    ".github/workflows/tests.yml": "b1fa8f57a57f3cbc80663a1eba4fbff8c372e72f882e465f09f1b6d3473795e9",
+    ".gitignore": "404b93b926bf1f6aeb8384a5f88a5e207a59662846734a3403ca71af1545fe1a",
+    "LICENSE.md": "3e6bf7f78a13cc610c449df0aabbb7793fa686bd79577955765a731729d45d9c",
+    "PROJECT_OVERVIEW.md": "f39d765414a9852f890953f73005bfcce17cf5865b3f258aaa36103746ccef0f",
+    "README.md": "d13a82c7b78e3d4541f8093425a90cbf1aac05f669f04811c99aad874a9bbab3",
+    "app.py": "a7fccb508283c345142c8b987d1ca138dd7df23e2a8fbbb5b8185a7412ab3c28",
+    "assets/qrcode_for_gh_7df1329939c6_258.jpg": "ae4cfebd3b1359cf46c12e24b861ddae4e5757b0af09224cbb6fdf1e7a02745d",
+    "benchmarks/llm_score.py": "c958c1e0a7f0d6a3df98d98a1f4d641270c651fd1faeb4fd2b684804dd399e2d",
+    "benchmarks/precheck_examples.jsonl": "2fd1566c0c32d3c42b7674186cd7f17b00834cb4148c51a49f340bf4dffcd0e5",
+    "docs/.knowledge_molecules.md.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "docs/ERR_WARN_Build.md": "ef1706d714a97e8d2ff6098fd4315db0c56ab0b66f64d6c1ab588a4bb39fd7fb",
+    "docs/README.md": "5418eb0ec00d9df983b2d57a00c7487fe8f72a9bc89dcc7f5c2f90cdf1c8689a",
+    "docs/Willy.md": "077b5ee3d5a838153ee59adcafe415083e6f16ea6b15e807b0edbf3d2949fb10",
+    "docs/document_registry.md": "9d6b883485c2ef717e4688495afe2167018e7b6712d1a81a179d1ff3e02d07dd",
+    "docs/employees.md": "713e75dad72393337daf94c7c9175f3a5bfb252eab32dbc826a537788b742256",
+    "docs/environment_registry.md": "833aa4ec7662580cef1f901649fb7bcbaf775797506faa3b5cff037b8b42bebd",
+    "docs/gateway.md": "20bf7689b2863fd842026a87acc64f57aa7f68a5f1fecc045c2e26f5c9ba1834",
+    "docs/images/run_state_machine.png": "79246381264627aed47e044ec6a70ee4bbff56f8e28a4a1d559dc90add70e4c6",
+    "docs/images/run_state_machine.svg": "5fe2e8dcb237166aaadb4e45923277fb8d10f74a03b3fa1383cea45896691040",
+    "docs/knowledge_mdrun.md": "530015cde96ecbff30df4fbbab54aae4d050fcfd6bc128133bc16ef67f9b92e4",
+    "docs/knowledge_molecules.md": "69edc6c4710158547eebc5bd5518ab480a198c2f895ddb6d554c25cce6d9432c",
+    "docs/naming_convention.md": "470ee3d32deec75f71d522108e0e301585067c7272b1aa594e54b5c0db1b93c7",
+    "docs/project_gap_analysis.md": "0fd80b51c362b8ed08daa2952e216e4746e5237d27572fde409dffd79d51c983",
+    "docs/quantum.md": "42c13ac24f3f55af73ff27e3836cc7c4ff6bb88b9ba0af620f8577d6c2f8c785",
+    "docs/remote_execution.md": "5d6ccf61e5782ecdc89b7362d807d65647980ffdbf221f5d5d91d7858fb9a56b",
+    "docs/revision.md": "5c3b7868983d2059e7245daf44b7ac436e0b4cac49855ddf00f4d75072d30fd2",
+    "docs/run_assistant.md": "68650e10a85bf7eee50d636c41372dca6da53f8024b6f8b40adb0b982b5a0a49",
+    "docs/simulation.md": "e98f387adb1a583c282dd4af31c289f2d9ad53d4b431d28e4ad7bd8a325b5b97",
+    "docs/status_api.md": "f32bbe33aa1a2e2be215db45f4c34e95b0163513765556849a593abf37bd85fe",
+    "docs/testing.md": "39238e9cf90dbe00f2e9104e0d748a2cd5add239f237df8f91ed76b582d5f744",
+    "docs/topology.md": "27e2503b92b40b3d3fe07f3d0002bfb8cfbff33569b7aabe9017e0782e5e6adf",
+    "frontend/dist/assets/index-B6Hr-_vC.css": "97cba2031e893f1b6afa4c1a3f89ec9afbb1e1fa2161e771602596c83edcc520",
+    "frontend/dist/assets/index-CCVE1n2e.js": "3f23eec90a8ae296b472b2dda5462061b74378f99cd1757719cdcfe4e89d4b1c",
+    "frontend/dist/index.html": "2ee7c55058be9edc1da81d2e98e948001f8c80de55af4043504bc1c0e7d288ce",
+    "frontend/index.html": "970c444fd1c8d49234aa2969319b114c7784751e0bb5ce44163b8c1f339b489e",
+    "frontend/package-lock.json": "730c8b391c65846b5b36ea5b452d08469a1b8da63bad852379e330914603873e",
+    "frontend/package.json": "9cb326622d035c3cb454a2bce27137fce29640bed49f7b264eb0b3670785e2dd",
+    "frontend/scripts/recovery-check.mjs": "b10fac065a1473ecd6011fd99ede7737c0fcef751ce75ac031f31b909fa06a42",
+    "frontend/scripts/visual-check.mjs": "e84525cfe3ec6f8fff624db232a127c0c2d2e579dc9515c96c7dae572d6cc178",
+    "frontend/src/legacy-content.js": "9ba96cd50588b03d927208fd56e0b3f3818c10ed201528a2fb930548f87b77bb",
+    "frontend/src/main.jsx": "dc329961dd2d82bd9e753b992dcd24bfb2af37cf6aebe764b359fb6127cf7c7a",
+    "frontend/src/styles.css": "ce8532e0d3e705d654b96d51f9b46807fb16f7ad92a5ef5672f08637d1eee501",
+    "frontend/vite.config.js": "b0e6c607b9af9da084a052ce2298041e8d8ccdebaa44d4f26dd0db07e98fe26f",
+    "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+    "run_pipeline.py": "aefde8ed5058e6e7fa252c4c85cabc45744ff998c877b8846002d81dc01f8940",
+    "scripts/bootstrap.py": "0da4485f330792f2f7c0ede65f1f8a9df5cd8c4587111f93f515573d2cb9aa55",
+    "scripts/build_managed_client_bundle.py": "b4bb4242bb2a4b5b7ea1a96c7c889ff24b96798b46f5db93b4f812f62c8d6b6a",
+    "scripts/build_release_staging.py": "925e0d73388d52a4865863d99104025d24373243ff6c1b6973a0a8ce6e21041f",
+    "scripts/namespace_ligpargen_itps.py": "383a6cf2fcc2f5f7407a1c8282d829f896f4a20ed1385bc919d3a6cb3e1decab",
+    "scripts/prune_runs.py": "ff8870627dffcce807976df6f47f9dbd1a11252e332095841ec90abd77491b63",
+    "scripts/render_run_state_machine.py": "a84f62e887faf7fee3bf748ed5a28f5ee49041a56b7d8a3404b67ff13f134509",
+    "scripts/run_eq_trial_matrix.py": "8360177038961dfe028501644efae16c0cfe89b5d8edcdfb82e5b3462438d735",
+    "scripts/run_serial_acceptance_profiles.py": "cd43c6ca8ee520e0b103d0597f550dea153d3ad03feda05807c01e6e24cb7198",
+    "scripts/verify_vendor_manifest.py": "b6aabd50b2352d874ce587ade7952db34f2a1fcf29aee4b2a02657188983b5c9",
+    "src/willy/__init__.py": "4ab8edecf4911152f9ec487c14d847a38cb432f0d946bfc6093262bf01cfda57",
+    "src/willy/_paths.py": "e58db079055e3da42d4ac9edba06b1a168bd988a203b60fe17f95f318a2032bc",
+    "src/willy/action_contract.py": "b26992fe22d32db44800645883282b32ffed1ff54feb64d8bceaed092f33c26f",
+    "src/willy/agent_config.py": "747e4d8411967c6fc7a4bd07a663ec0ac9bc91c2887f4c7c8e5eafe0c4cdaae8",
+    "src/willy/agent_quantum.py": "0078fe0ef6820c282da1c2ccaeb0ba5275df2ff7c9c55fe982aec7929e424c6e",
+    "src/willy/agent_run.py": "277bc807cca5ac26f0d33558139f4a0cae2be13c2a136da56aa59f5ecc07b9e1",
+    "src/willy/agent_simulation.py": "5f3be6c9a78695d8f70d6ba276a3d1092890b3e4edd79b0e81c981d1803d9515",
+    "src/willy/agent_topology.py": "7a5cd389a6bc7bdb0ab28c808c75854539b2ababfdc7b6bec555b516b923cf24",
+    "src/willy/branch_controls.py": "88607fc3c1819e9b655319d0e392a4de681191438402ee3bf0c96510233ca2f6",
+    "src/willy/branching.py": "06aafe51dfc4836aa4a7553b390d84285da74e28af762d08cb02302e9ab93e52",
+    "src/willy/config_schema.py": "7d5ba014bfd440e3002b1b7a52d6b0b36348b53405511550887b87a0dd51e6e7",
+    "src/willy/config_store.py": "a1a76d44a4a04d33d52ebaa6ead34872836bf69a5475c333e255b8beef092467",
+    "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+    "src/willy/dependency_preflight.py": "1db1a8bbcdaacbd2f8955c69284ea06944640054a728c12d62699e68db6feca6",
+    "src/willy/env_checker.py": "1884c4742820f5ee1ed403c928cd24dc7e7e237a973f1d96b0c6b145d5ee2e8c",
+    "src/willy/env_registry.py": "7f36919f817d4ded27330dbd8836a2b397eb3778159b6b76eb80e38e3aadc4cf",
+    "src/willy/errors.py": "4ac0231b3c45a322e01b49715a5f810b7e31c0714c222be013bb8bd776159d25",
+    "src/willy/execution_resources.py": "7f6b9a048e3e6999a76dda911348abd2f2c2b5ffdfe8ab15c7b8059e9886b682",
+    "src/willy/external_profile_evidence.py": "6af3e0fffb444581d245c1d5164d71b5f0dd545092ab8c7cfaab139696129bee",
+    "src/willy/external_smoke.py": "6d74628f9188f6603d32aab54ce89de1c28037bdd403f4e8e00281d909841180",
+    "src/willy/frontend_api.py": "5e30c45b82d549ddd3dd5d64a0cca9fa09fc82bb978d4679b2e1971da91d8f6a",
+    "src/willy/input_declaration.py": "346720cb56fd0a170327b1b251b090d473adfd432de662633c8fd19de0e3939f",
+    "src/willy/layer_agent.py": "6e0c564aa9c613d4a568d46f13b3637b3baa4e5452b72c62c2dec28a0c799408",
+    "src/willy/llm_budget.py": "62ae4ad0d2f92265abde9e495f368d77f16bd0e5c75e8753e80762c78a8cbb18",
+    "src/willy/llm_config.py": "65740c13c86f06ff6938ac042db35e93654a235437c431a5041e44cfa76f8c0c",
+    "src/willy/log_parsers.py": "499ec86bd9116735855bad312036e2b9c32279f424aed6b0fef53ca8d412b3ad",
+    "src/willy/managed_gateway.py": "c7f23062322cddcaa58ee463bea62ce999e6385acc83ecb98c6de93777dcb10a",
+    "src/willy/managed_gateway_bundle.py": "217ac86c0a3f0beabb62e746fd67639d32f13d90e2b8b1350e6e0b31955fd2d2",
+    "src/willy/pipeline_launch.py": "b0938820cf6572cb42d39bd6089fb3855e40040a9691e6025ed137b5e42d9e9c",
+    "src/willy/pipeline_orchestrator.py": "e1a42dfca719270967ee2153877fb6be9f95780c0bcac83f2eb6e86daa19d8cf",
+    "src/willy/pipeline_state.py": "72e2b53113b18c5556e97e8b2cfd04051fa4c3212b2ab991b9b59199e0d9c955",
+    "src/willy/process_lifecycle.py": "8571afd9d04c2764d258c9dc4f0a3a0416297bf1bd05c613126807584bfeea19",
+    "src/willy/prompt_contract.py": "920cbe573822904146e3b326ee9ee4f141a9a9adc3d2f7cb0ce8b05a91382e51",
+    "src/willy/proposal_workspace.py": "58c68d6d9ebf47ff95e6f329932723a55e744039caa51b4c912f0687530d4614",
+    "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+    "src/willy/quantum/__init__.py": "ff8814701fde8c67afcdc1230dbbe351a26d29280f5e4fd5f39e9cf58bba07ae",
+    "src/willy/quantum/_orca_utils.py": "1263357d65f7381e3722066596ced90d2f09d1a9e4a7924b184bc8ff44944fa7",
+    "src/willy/quantum/chg_resp.py": "13cb23d3c3d8f565900bb2fcab48722fe2377820f22c8f049545d4a6e21ec104",
+    "src/willy/quantum/fchk_mol2.py": "39d9e4ed72586e6af41a44f18368acfd861893dea63f7d93a4f54b208fb10b78",
+    "src/willy/quantum/input_audit.py": "c01dbd82ff420984b4f5dea8c79ae41f3940d7e631df89b9852a9703353c8c7c",
+    "src/willy/quantum/molden_mol2.py": "c98f6977793bfac2b79f156debe5048c045b16c1cdd4dc55d9952b8db1d05930",
+    "src/willy/quantum/singlepoint_g09.py": "3aa6d7cb7d9290ab098ff3e1ef27b0e634a23c6e2e72febd053013a29ad259f0",
+    "src/willy/quantum/singlepoint_g16.py": "5e48845abdb840d1f3bb734fb0ae1444db831f8edc6429e939419726163e5afa",
+    "src/willy/quantum/singlepoint_orca.py": "79b2241e361f95da5a002bef52dabd73c500ce607398fcec9e6faecede54daeb",
+    "src/willy/quantum/struct_g09.py": "7342549b3bb3f1d414bb1df97f9acc03627774183cf343750c3a0744fadcfa5d",
+    "src/willy/quantum/struct_g16.py": "26ee4a520aa1196fc2814b8aa420491b4793b5088344a159b4723fadd1e88ad4",
+    "src/willy/quantum/struct_orca.py": "ff6df9cbd0592d0372a403a7cf8da497cfe00c16ccf194a0a888447461042adb",
+    "src/willy/recovery_policy.py": "95e5ed6b9c18168294bf39dbd8ec66d65153bf1077b0ddfaa46bc676c871fade",
+    "src/willy/remote_execution.py": "faaba6d7b29477e05cea7f70e92153b6cf047d6ad7495e67199c90f47fb4576f",
+    "src/willy/remote_registry.py": "53bbdaa32e7bdd40daff25db79c1f49d3c7323a2c23c1883bf7e9e96ee60923c",
+    "src/willy/resume_admission.py": "2d1ae420c3c2b9d7298526f79593edef0995a5269823140d9468051788bc92e2",
+    "src/willy/run_control.py": "4164f17e3c380a8b84661ee85e268a9a9e51583aa550011713d94e77a0cdd84a",
+    "src/willy/run_faults.py": "fc14c2b3944e0787f9de671403cccbb399446ac6af68362f08a88cea0dff138d",
+    "src/willy/run_metadata.py": "c9a9bc3344f84f1250620cb4f435bcaf493aa0d1bbc2476db7d447b054aec548",
+    "src/willy/run_processes.py": "75db61b99fa45835ab660c0bcc8b5abc17adb989463376a2195e8d472eaf1851",
+    "src/willy/run_provenance.py": "cf0938226387c2730265682fc8530cdce0cea979a09d29a21e0a90cc8db246db",
+    "src/willy/run_registry.py": "149ec80cc389acc0b2d9d053e5d0342c1f57afbea1aaeee832dc2ab7693ad58c",
+    "src/willy/run_store.py": "81102b2e4a4ca5626904f4c9092b358d1e5da777547287e3250cce2f4d299dd1",
+    "src/willy/simulation/__init__.py": "da16a6a4126d6bb51d9dc0393f4f84fe244b77855cb90dac9ae2b6b9a4e0fbac",
+    "src/willy/simulation/_gmx_utils.py": "880022d54d49ac8b766ca56fbc84ed684fcafde7c8f044628a5c9d588301dfab",
+    "src/willy/simulation/box.py": "03a3a25750f6040ec5b6c21bbbf62a0fbca218a61e330404c6acd85d8180e723",
+    "src/willy/simulation/em.py": "51671cb2894dadaa9e719d9feb64b0170134b15d21bb38b5794b804e805ab954",
+    "src/willy/simulation/eq.py": "2b8b0a40c5f0b7b585b4aadb0b055639d98fb1a416b0110ac6e89fa429df0a1d",
+    "src/willy/simulation/eq_acceptance.py": "3c7af6107be5379892f7375d9e1027752ca2077ad01329f6367c22b49ce07bf9",
+    "src/willy/simulation/gmx_process.py": "1eb1dd0aa6cdab66ae35c2770360b21ea8992f353558f3fdd09b9be39f38db3c",
+    "src/willy/simulation/manifest.py": "c81be187f215cb03c532f3ae6959b6de74cb6a306041ad139de2de135c19b7e9",
+    "src/willy/simulation/mdp.py": "8e1ef75c68980ac4e9bce77b46c70d19b1908623ee88e53224fd6e398e01a172",
+    "src/willy/simulation/mdrun_eta.py": "771ffdc14324dc1d3b4eecabebe1eabe00aa3564e430c644627ca76652574ec1",
+    "src/willy/simulation/mdrun_knowledge.py": "a889c9d9a66bcdca48ffffa738a800ea6a367cb5bff27268c38941340bd045d7",
+    "src/willy/simulation/pending_action.py": "ebfc13b9101bef50399cfced14e22317b54f9a28bf6df1b4c414754815ac133b",
+    "src/willy/simulation/postprocess.py": "3480c6f350830ffb4b314ebb6cbf62eb9f82b1b6acd86657f6b8467c8d8c0fc2",
+    "src/willy/simulation/prod.py": "958050fdccb99645304e60d50f113ceb9a4a98d877d805ec3f0aebcbf80c531c",
+    "src/willy/simulation/protocol.py": "a37adf5014b6d0e5e025df9213d79f6c09a56b3926dd96f1effc4663413af054",
+    "src/willy/simulation/visualization.py": "ad7ad396f40e2fa99e53c3c667bf2e2f91407c254afe8ab814ed5b831a81b949",
+    "src/willy/step_contracts.py": "857da4e15d400f279eeec3d9fa683881fd45ec592b9f47bdd3a8bf1b4d2eacac",
+    "src/willy/step_registry.py": "55266240b13c8f4ffd4693fa70be6f809a3dfedeed705aec40fe26b31b9cb132",
+    "src/willy/structure_uploads.py": "7016b625c233d6a9fc2c9bd39b2b2dae4cb0a4c6b76cf0815f5e180122f3a5ab",
+    "src/willy/structured_log.py": "738ca5bd67a000d9ce0910a5da823ade0bd18e4ac9478a94756cb21c574d9548",
+    "src/willy/toolist_global.py": "58a3f2de127259c363d3c18436d135ddca4162b4b240bcace3cd737165da6c52",
+    "src/willy/toolist_quantum.py": "1ba5024c0564c0bf59bb086849c03cce3c5400bd02c361d707b8fe43605adb3b",
+    "src/willy/toolist_run.py": "ebd16d2cfdf5acb82fc4c7519e2dcfdc277be43c7eb9fb7c54f44fb7f50f88b8",
+    "src/willy/toolist_simulation.py": "03ea8bee618a540901a6eeae5b0527fbc7a84c8949b52e7bc71864aec9119f2c",
+    "src/willy/toolist_topology.py": "a7c9fc8f7448769e61782c6f40f54eb6fa4334408dd8d88eab8aa3521eaf06a1",
+    "src/willy/topology/__init__.py": "99bf673ae310adeb9709f4286f4029927100a30ef8879b53291169dd7f3abbba",
+    "src/willy/topology/backends.py": "41dd1fc3023c541c83fa00ce4f215461fc05179d68b87ffa3c2866294940f771",
+    "src/willy/topology/itp_namespace.py": "07b73202113328cc5ead8c0699ccb69601a4bdbbcd2f1da4bebd6caa7c989e53",
+    "src/willy/topology/itp_revise.py": "98fac755a0c89ffbb97876242faeaae61691df76d8783eb8a2adb75320d0a679",
+    "src/willy/topology/manifest.py": "5e5b1a9d84f37406a722010cd92067df232df1ebc0d57182696d8cab98123cb7",
+    "src/willy/topology/top_assembly.py": "7c71c95db025c713d4b92b63c2f1e6e9716b8ffbfb8097347b14394363cddc93",
+    "src/willy/topology/topo_gaff.py": "567c885419c450f7c764b6b9190e40d3b96fbdb9c683af27df47444dcef7b941",
+    "src/willy/topology/topo_opls.py": "59102428f22c731daa5b3f377d05c28403b0b12fe73805de365fb1eccad7c4fe",
+    "src/willy/topology/validation.py": "c6b0511a4ed9212fd715f74a0da7c184a3d390bb7508866b1057c51e4cf66b3d",
+    "src/willy/vendor_manifest.py": "a9dbec768ed417ad9c460c721fce362cc055aab5fde86b5db32b2e8c789fa88a",
+    "src/willy/workflow_config.py": "69910bbbda9aee64c9f357635b5a1d2d6e5db23ed08aff3764c80d848c77f0bf",
+    "src/willy_gateway/__init__.py": "ed3112e530acae55c4583b7b1371aac2c2c8d6290dcca22932a39329dcc83558",
+    "src/willy_gateway/__main__.py": "c4f62af82d17120e3abfcc77427eb172060fc003879e758baf2241e19229106b",
+    "src/willy_gateway/admin.py": "0f8aafe197542007438673fa9372f98b1879ca60d6d68d4e15417b5e2c74a0e2",
+    "src/willy_gateway/admin_app.py": "960f53be31f646f67eb83efbdd689b20c56449062917c2c39e40ca8319ed06cb",
+    "src/willy_gateway/app.py": "ce78b1b5cb5294c6bf9e000c03b502ad79e5630c2d77b6ca1d91480012dd5df4",
+    "src/willy_gateway/archive.py": "a6c49c230d0026252da74fcf4692a164371e63e3b49a369b6ff03a9acaf977a5",
+    "src/willy_gateway/config.py": "842afb6d5a1fc2d7a04db4c3ab21c7b0bf5d681da58a125124a760ac18b4ba4f",
+    "src/willy_gateway/security.py": "0b173b8ce9216bbe3c5507749336ff2b53f2286e44543c3644ef685e12187259",
+    "src/willy_gateway/store.py": "03a5c318a7de8b08c2c8d826f32801d18ad95c722a2a16ee69595b3621c2d265",
+    "src/willy_gateway/upstream.py": "7f9999bb2637637308328ae6f6e935d81365a3794bbaa40260f671dae75e62d1",
+    "struct/ADN.gjf": "5eac6b2498814821c57f693d63751d6824382683c3c428ac43d122d28e8221b9",
+    "struct/ADN.inp": "a96dd09291fb34fb8aa54da6509c6b09962a93ea18f08dcd651bb462451949df",
+    "struct/AN.gjf": "404728d7965102f8141cd185cf4d8b0f34a915112beff4392c8b9bcdfa07c264",
+    "struct/AN.inp": "1dacfa2ce81bb421f52df72cd82b7a92509debc25618782ddcacb564602e4d83",
+    "struct/AsF6.gjf": "97d6eb30b0ea24ed4e22c8f21f4ce4fb215894043bfdd5a9db44b3cd34dc24b5",
+    "struct/AsF6.inp": "121e5491af9e38f21e4dad8e3dc04dc8e930d75ed27ea4728df50e75c71350c0",
+    "struct/BC.gjf": "4e32fb46d501d7b9062548c851c39081e0b380881016b35275cd8be6d4b5711e",
+    "struct/BC.inp": "25534380bdd2799f1a2d63eb935f14d7e28fe7401ca65196a52d049ab968f00e",
+    "struct/BCN4.gjf": "bce7fdd2d9b09781a4ef17c52bd1c3eb3c5c9d791c00084c2276537e6b4ffbd6",
+    "struct/BCN4.inp": "7b12fa6ad0cb4406dc29159c7b1c8259176bd52cb842db393eb6ba177ee68182",
+    "struct/BF4.gjf": "86466e7dc7f0676bcb97f2d334bb73f8d563569d6cd0a7143aaf6ff913f5be91",
+    "struct/BF4.inp": "2e8bf58dc5dbb0576df0b5e809de3764855ee05485414412f55cf76fbaf5d910",
+    "struct/BOB.gjf": "e2b58d039d5275774b00b10060591048e28a92641c8bf08a5c92fdfc8078d141",
+    "struct/BOB.inp": "a75eb9f381c44a7027c2417b74371ea81d8be53be13e9a6291e1458fc4b92741",
+    "struct/BTFE.gjf": "162079ec14a890edc8dbb83f97fb2a60214c840ceea8b27947a50f1e9715bef8",
+    "struct/BTFE.inp": "96ade83842c8c71e72c60e40bb60ecaa774b51e035bb14ce1565f06d466aca9a",
+    "struct/BzTh.gjf": "6339d0adc82b2bf38250bb1b84435b237dfe327308e7ae271e8bdb9f6503f10f",
+    "struct/BzTh.inp": "4990d23becb4675990ce88413ec2cce6e8477ece7a7c0e4b83bb90a13c2edcbc",
+    "struct/C16.gjf": "4772e6a0087b5953c7c0b9bfb2a455f40d6a7d08a92f57f863d95964757d1e9f",
+    "struct/C16.inp": "dc81194a7d8b985b5b139f65812c073b37a7cbbd95606db0dca540d9f1278a22",
+    "struct/CF3SO3.gjf": "33511d287f145a4e4ceeab481810bae8ec2c317c0aacb9d87572d5a1964a3289",
+    "struct/CF3SO3.inp": "1ac5d9146d7de8e1c1985e54e43aba9bda3febc1d3a5ee55fcd96d95b7a40954",
+    "struct/ClO4.gjf": "e42bebf481f9c081c03442a537d8fd04bd4e714d89d34a972e04798f8e1216f0",
+    "struct/ClO4.inp": "3cbf8e7cbc18c29ba30fbe56717ff95b1804dfa5fc25ff5a0af9469826480baa",
+    "struct/DEC.gjf": "98c3b2432265c79c977b39ed0e1ed4e4b3ebc2dfd1469f29d65a854d2fdbd152",
+    "struct/DEC.inp": "01519fbe3ac3aac31b963b3b3c0fdfc2d4a1ce3f109c4afce462c3c2b84f5c74",
+    "struct/DFEA.gjf": "82f573d7b7c1bbc4fdb7f45bb0217a9712973d48dd02367c984af67c1058ef2e",
+    "struct/DFEA.inp": "4a6a9dac8918c743e5d8b4200c9c4e73d22a964f5a12b4c9bf40b61315a72d94",
+    "struct/DFEC.gjf": "6c6b25787462a02d17110e5ccc7bfe87ebf17d2576a1034970d667e3ed04aab1",
+    "struct/DFEC.inp": "38bcf25b473a8a1a77e8e7ae594e63b20cc1cc8a9d175f3e6d08e8e48f04351b",
+    "struct/DFOB.gjf": "e98f61e1b9ead2c7af72c79c3334864abc142f50f25e3283df23c50336461f79",
+    "struct/DFOB.inp": "7db3db59fa7b991a31b921061a6a13b88beb603afe5d6a0faabaa8b2065ffeea",
+    "struct/DGM.gjf": "b01ca7f0a871f8388c0709c533cafa49ec485096945f122550c551dbf78265de",
+    "struct/DGM.inp": "d7dec47c450e437e0c905690fe2ca9861279a7b999ec1723892eb07ed141de13",
+    "struct/DMC.gjf": "6367918dfa0caf326ec54fcb9f5b8ec94e729134a8ae844acd9eff34ac426792",
+    "struct/DMC.inp": "9bd05bc736e189c985b8ddff81ec50e964d6489902fd50bebe35ddcc06088717",
+    "struct/DME.gjf": "e8f7883b3ac8e4825f8c32ed876093c6de27498a9037b2c10c6b83ec47b33089",
+    "struct/DME.inp": "a10bb9f66a9d2d84c3cda2140e11514b0e71b76af45b4e13fdb2123896c750b6",
+    "struct/DMM.gjf": "02b14654248b1847c20bc4926edbd044cf2d85d52d684605c1fff9c1ffdd7c2b",
+    "struct/DMM.inp": "3a32d41b441d23485f366169ebc27536434395520d5aaf5a07949560efa369fe",
+    "struct/DOL.gjf": "f8bf217445e55d214c5e591f01d20c5f98210505c33b1ecb9938621129ee9663",
+    "struct/DOL.inp": "a0fb13cf0fb94443c6a696dce4219ff811c10d8e34736dac0b768c56359be801",
+    "struct/DXA.gjf": "819ebea22459349f10d9b5ec24571eea323dcbb5be6cbbb94b01dd7e616cbb5f",
+    "struct/DXA.inp": "ecaa842dcefaee009c2b82fa8e36ca5740e920df6de3e6ab1afe44626052ada2",
+    "struct/EA.gjf": "a04f0376293ed7d600ae0e1d0033c38eb5f58a2f7746fba8dd3f68b1fa46da67",
+    "struct/EA.inp": "dcfc695d6b59fa04b89363e7545376805320a6091cd4f798b7e63cbc0c6c5f9d",
+    "struct/EB.gjf": "553c2a09c0736fdab7d6d8b9f2f6a65741e9d88e3985f17de237bb3d209b6fac",
+    "struct/EB.inp": "976e18a08e6eb91724fd03413ea270b44eb7b9e07c7b9bf8786d289b5a14defb",
+    "struct/EC.gjf": "443caa3058955107ce43f3aaa7bad4603351393ac2645fc79d8a5d2c62207961",
+    "struct/EC.inp": "3bb794bf89fae4e8b5fa6c71fc8e6175f5b67a9f76ac7fb9815b0b8ee389161f",
+    "struct/EMC.gjf": "d5543341860b05d4560de09ba687db483dc5addc7b069fe929be4185552dd4b9",
+    "struct/EMC.inp": "8adf4081e07c07412fdf8747b574acd8b8133fdc34aef8aefd582f0f1e15065a",
+    "struct/EP.gjf": "c7922786acf275d1e55d89baf765b3ca75607badad382b574b77a4ddad5e51e0",
+    "struct/EP.inp": "3464e043b1b3966b42673584aadd012fbcdd3bfd8ab83c820002219d006f0c91",
+    "struct/FEC.gjf": "20ca1708561623e06340a88462e94680e0ec929929b7e9a13b54a50c62f29350",
+    "struct/FEC.inp": "9243d90f25f2082082747c750c2d60297fe164c409bdb3b0fa87e513226d460a",
+    "struct/FEMC.gjf": "2e87b240739432ac10efa981de8fc7e0644bd3a3d45cea2591fd8581b1cb599c",
+    "struct/FEMC.inp": "2a0b09cc7a08e265074b1438cf718bf63d81d3e9ee48c1fe7d82b7690e27a427",
+    "struct/FSI.gjf": "2fc4c298eb558f71412df5ec4fe846818c04224fb2f6b4227ea133bd6527311e",
+    "struct/FSI.inp": "7073878932613d2575f85507bafc910c2b0fe23525acaeea7603ff908c299fcb",
+    "struct/FTFSI.gjf": "3f1e09061a6002fd4ea6563351b9c3aeba22dd40098a69402950cc612dee9495",
+    "struct/FTFSI.inp": "1aa56833c42c55efb9d3c2097e63cf4ef7e153987e72b8afb31c4e55744a9d38",
+    "struct/GVL.gjf": "96d406790cd196f6489f04f9d296850ffce0250c967aa0f55a87614184b4c181",
+    "struct/GVL.inp": "f4404cb69f45adbf6ead89965f7d20e9ef685fc387cfb011d2d06d08378bee29",
+    "struct/Li.gjf": "496985bb9218aca68b3af87bc9f6ab7010076a60836455bc035eb54a4c1a30d8",
+    "struct/Li.inp": "e70d01a6810c0b3642c4629cf4e28a3254aa8a2d70110c943eea3cc72534d7a2",
+    "struct/MA.gjf": "af95b626291ae4c28a42db0a18c7410e9f00f941387f517b5254c1e365499d97",
+    "struct/MA.inp": "fd27f5045003555c59aa4ea4cb4242e081afb4c371024ef4cde86e0e224d1e5d",
+    "struct/MB.gjf": "e28e1e69515f19f1972941b0d4e37efe1a7894f115bc5c1bead7e894d8d9d7ea",
+    "struct/MB.inp": "49e26b00350c53bad8b25e10661a24dee1077f0d0bd23132866c9bf7d55901ee",
+    "struct/MP.gjf": "a6445e58c5f298214b6e1b0011a9758e7e64557031be7d5b99469e654bba8163",
+    "struct/MP.inp": "f0a78079ce8d2e7590ab0ca958497079b955870b35963954c353b17018667a37",
+    "struct/MPC.gjf": "fb5d7f4e23633f2ecd9be30de095ad074a32db1bff6ec71518092fa165814698",
+    "struct/MPC.inp": "800ea547b02967717422cf65848b9492c33c13287b02f6a44a45c5d4d775a97e",
+    "struct/NA.gjf": "1f98c7027d47ef3a675ac74e182dff6e0fb26e124740961e4eb842605a857d65",
+    "struct/NA.inp": "6ce49233d1d90fa8b3b002dda6800811f10577cae6c9122a02676211f967b71f",
+    "struct/NMP.gjf": "0b2348741cc746bf96cab6fd1314777822ab03d3c45a5a038b1e3520a2041762",
+    "struct/NMP.inp": "a05111f68436582f0f476476a6e0ebbcb817936bf894ef23de136dea8d1d6fb0",
+    "struct/NO3.gjf": "b77631c696fb8bfe63c23cf1e6704d03c75f2d728c238f257259244a38bb5680",
+    "struct/NO3.inp": "1681c76b42a5e3c67e7baa939ca90d02629ad08e053a22eaa43593999cf40411",
+    "struct/Na.gjf": "75bff52b5b0a2c731b1c587c799037c55c4bb0c290ccbbd243659db5be9884c6",
+    "struct/Na.inp": "a35b411c0a0259fdacbc632533e91c7ef88f03e86ebb0bc01f786de883a0bbf9",
+    "struct/PA.gjf": "b732abeecb9f27b20ee77c5c43324223b940b9cc35089760bbe2811e84b6cc01",
+    "struct/PA.inp": "7f8f2b396d916db91d515b7b01e900e49956847ab041b47284943b26709265b1",
+    "struct/PC.gjf": "acdc06db541e5ee64d19619797b78200c23fb8144b5e1f126027f19d70754525",
+    "struct/PC.inp": "d0eaa4c2c53c09ee4807b391348dc7144a744b2249fe877028716635308bc5cc",
+    "struct/PF6.gjf": "a519f2ff790b3c1545f3be05c47a744a7691b5fa16ebf233560939ea3d549186",
+    "struct/PF6.inp": "d11cd2312df17d54c6f407f86be735d2dcf3fae1a53788d973c8ea5537cb328e",
+    "struct/PFPN.gjf": "c3df3a8848aa0f10160f3a62a09307949cd46d4c1c8375683a68e0233eaf4898",
+    "struct/PFPN.inp": "d97f45115121223521f99a2dde6e025d2aad40beac861d1b7fb804a52b4cee02",
+    "struct/PO2F2.gjf": "1d4cd630619b3f3a9d7c9ecc986751bc566f6f68925e5417c165c13d29f38e92",
+    "struct/PO2F2.inp": "b73d114ec9f35d482674a29089225690db66d3c4b7ff44ae98e4ea398a2ac41e",
+    "struct/PP.gjf": "0892c6ef7e07275496f659f745ca66ac75aea1f6f6780c513d6042ff4eff265d",
+    "struct/PP.inp": "10fc8bd718f638388914164e4f627a17b9d49d97b3122edf8d457fccde7cc1b7",
+    "struct/QL.gjf": "924341ae4839e576c89de05b050fbc496756d17e5b81354f9c53ad792ce8fc37",
+    "struct/QL.inp": "1ecbc97b2a14e94715bc02bf169c45c34e0644e01ac25cd95d23a7c5c6c99e16",
+    "struct/SN.gjf": "340ea440675ee3fb787975a7adbeb9ba763eb6db9953b5a561f638251e299ed7",
+    "struct/SN.inp": "c08bd5f657cd0ed957b150baf52df51839ecede66073130470dd7931324e0e3e",
+    "struct/T3GM.gjf": "d431ebc752742836fda9f90ad7bfff3c76f0bf77a795b5e7742a0daf320e0318",
+    "struct/T3GM.inp": "3490f73753fcccc749cb787c9df6c1bb3c4fd10a260423ea32b101682977bc72",
+    "struct/T4GM.gjf": "11c8e5353cbc223a2d00de3e8c7375d84e87eaef7484fc63591b1c94ddfc8bc4",
+    "struct/T4GM.inp": "d103ef53a6a32a93f85b246bddcc6e4c25dcfb81e8dc590644b12e65cdff3fe4",
+    "struct/TEP.gjf": "13ffac7e262491652fbc995b7342b43d26ca4d20d75ee833b8e7b7b79daf855e",
+    "struct/TEP.inp": "35c3a501e111f129015ebae5f0cbd5d8edd83b00d2a9f12d06caeaf46c658346",
+    "struct/TFOP.gjf": "a683d0f9c710efc58c9e4b80c413453fda0f8de6ecd9b9b0d4f9321d367f2ec9",
+    "struct/TFOP.inp": "0a31b8804041f4f7758d219d184ecd5981eb04a4a87f0743c0a3e8d2c9e4ad4f",
+    "struct/TFSI.gjf": "7fed3358085d6b83e8de12a74b70e565df1b2aab4beb1b0d1b71e5da052a2af3",
+    "struct/TFSI.inp": "ba0642406d3a6ef728f4be116173eac785791dfd8f9fd877bb0c873ce57fcc11",
+    "struct/TFSM.gjf": "6d8ce8307a99ab90cecc34e1a04bb899945abbba3bf6b4b6598ae86727a315ec",
+    "struct/TFSM.inp": "fa628ab6eaf59f787238448e3c13039ca70e5dd40e71d36bf5675c784af38382",
+    "struct/THF.gjf": "3b4769a9a73a54037f46665f1e98a6e23823f599867aeabd31cede0c05310bf3",
+    "struct/THF.inp": "da232d82fe8ec76b9def40a744fa2980b398c16f49493d54d7a30c5209d5c3d9",
+    "struct/TMC.gjf": "f9032aa03c2165b6ba8891ccf281897a54b9419718bcfe288d5207d23481680b",
+    "struct/TMC.inp": "d5824f2bcaebc6a05fb8013cddd4b59bb4bbf367718d34f5234246833031076d",
+    "struct/TMP.gjf": "6d91587865abf03ac374225696e9a813a60d14e313ca15547f10fd4bde539f45",
+    "struct/TMP.inp": "c35410499e6cdc1f8281ae1f8570d562fa9bfe6762a5271a00fdeb7e880efcb1",
+    "struct/TTE.gjf": "eff42dbf72ac9cee7824f61ba4e542120afee1cdf8c6e549e09101d654734cef",
+    "struct/TTE.inp": "5d36976fb5e9aa4884477cfed87e8050f811cf921bf480e0ecd1d463ff669dc8",
+    "struct/gau.gjf": "d24f84abe3dc1dd9c4b0a4f4ee353b0f54ee1377d16e015678ecaeadc52a2f37",
+    "struct/gau.inp": "08c1519c9e3a9aa4002f1179de4e6483a10c2ce5d84f33bce24a46465bfc3f6e",
+    "tests/__init__.py": "8554521655ee024b9f6a3214987dcb01d1e4322b20bf8b7a73b8bb004480607a",
+    "tests/conftest.py": "9012d86069a4060b67023f10600a6374f703f859c2e2905fe7d71f5b73106a81",
+    "tests/e2e/__init__.py": "33ce1d64d0e5666082e68e04654df87c7c216557324a7433545a7b0386a31830",
+    "tests/e2e/fake_executor.py": "ebdfd116cf70082f6b2aae3039146bd88cf81961da292736cb5be3cd8ab8c885",
+    "tests/e2e/test_browser_workflow.py": "bb266d8ca82bc25812054c6a58fb0c7a5d890b6fd1dafac07c444423ffa15a89",
+    "tests/fixtures/external/README.md": "8be4c374aaeac8ac70da214c222b46b2e0b5d86ed923cee658a5fe063359a88d",
+    "tests/llm_eval/README.md": "6bd07170e54d953be2d65cbda2224037ad082866878afcc27c6aebd74bf9f7a3",
+    "tests/llm_eval/__init__.py": "52e379748d3717e5a4093d3a89ef353636edf752c856ddc3975d90dd791ab80a",
+    "tests/llm_eval/harness.py": "0283b60cfb043845df1184c0e1f4bb4ab021fb09ff053111c669a83c604ac182",
+    "tests/llm_eval/live_config_runner.py": "898cba460c9c309569f38c9f8aec8c3c35823ad832685a1a408fa5ceb3b5c0f4",
+    "tests/llm_eval/live_protocol_runner.py": "eb15a1023424aaaf7b6644a82fdc31d2f43f174ed8090ebdb55271f8f16f90fd",
+    "tests/llm_eval/live_runner.py": "cad33a76a8a55f9cad11a01e30e268d3be49049a082f5e1cec0409d9257b04f3",
+    "tests/llm_eval/matrix.py": "4d34ae9892fabb1f37580ebeffdb97569b339021830bb3a6cc218165bfe46517",
+    "tests/llm_eval/phase2_runner.py": "38bcb972b244adcf5f5163122654859767f20f5f13ce099090c55372444959e9",
+    "tests/llm_eval/run_eval.py": "38c36e38d15b592d7f3c26048d453446123cc15efbf843511808e7ed19efd4bd",
+    "tests/llm_eval/scenarios.py": "592f898643306c29821ad2996b56da04432d965143fea1110daf8d8367e97db3",
+    "tests/llm_eval/scorer.py": "d550e4911830f7e9bac1054c294eca320abf7501c3016098dbca6a91f492d4f8",
+    "tests/reporting/__init__.py": "1d56e9bd4c43a78f1985e64fbbab671923d8b86fe5160e9fa4ed820c6fba2de7",
+    "tests/reporting/batch_report.py": "df5ac3759f0991796767c0222445086e8c1a1f612f27dcca07595f6a1314114a",
+    "tests/reports/README.md": "0459666b349eaee42b1be840d6d6c20d69d41bcf88524486142b52c9b8720594",
+    "tests/reports/audits/g01_dell_20260830.json": "1e208893ecc90ee68b16df5f4d3d34330af6fa0209104440257b259d57c13e0c",
+    "tests/reports/audits/g03_dell_20260830.json": "d5482b36ae508299ad58ce1622386477f00aff4969c9c1e055a823420e386e96",
+    "tests/reports/audits/g07_local_wsl_20260814.json": "4673b08979e308d1e693c13f79a4b444fc3f8a49d25245bb05df65feab4b7b68",
+    "tests/reports/audits/g07_python_matrix_20260908.json": "1433ea31facd2317ad83611c25fff7dd91ac961ff5a2477a1264fbe99d9ef74f",
+    "tests/reports/audits/g09_eq_coverage_20260906.json": "87e0c411cd04596746da8b293c940db29e245d340c31405b0e8d4a892ec72f1c",
+    "tests/reports/baselines/external_profiles_20260814/g16_ligpargen_solvents.json": "d8617085f1bd8501c6ca5e360861d253659dd460547092cc89fb628fc09208b4",
+    "tests/reports/baselines/external_profiles_20260814/g16_ligpargen_solvents.xml": "7097b24263e3d83520396e4b561ae9e30688d7c60687c443e32ad820c88ed2a7",
+    "tests/reports/baselines/external_profiles_20260814/g16_sobtop_electrolyte.json": "f07dc97df325628686305f6e84a03a34b90cd031521cd3eb86f5ec67f9439a87",
+    "tests/reports/baselines/external_profiles_20260814/g16_sobtop_electrolyte.xml": "cf12c747a16676b3515ee02f91836cbf5aac247b9852b5ebfd92c2cf002f5b16",
+    "tests/reports/baselines/external_profiles_20260814/index.json": "4eda4fb95a319288255486a0c3bf144abb6b4b5f8e9a54e46d300e8c0ea40c1a",
+    "tests/reports/baselines/external_profiles_20260814/orca_ligpargen_solvents.json": "0d4f5afa0a0cd5617e5642db80a7c022f4defaada9db6ad060b530ff6e4a1258",
+    "tests/reports/baselines/external_profiles_20260814/orca_ligpargen_solvents.xml": "6395bc300d102f49f785fdc47fc36b428978b0fbbc6075b0e02ecae193d36ad7",
+    "tests/reports/baselines/external_profiles_20260814/orca_sobtop_electrolyte.json": "99951ccb4bb7c31d48b77596953086efa2cfea72eb49d97fbe368ceb81d74d77",
+    "tests/reports/baselines/external_profiles_20260814/orca_sobtop_electrolyte.xml": "af5a29b8e8b92a2f6528b7e44526f118ed76663fc2ed5fe02b41428a67f53969",
+    "tests/reports/live_llm_config_eval.json": "ea750422b0419ce6b7714ede57615d312887d85af13e4f1cb2fb07bf54972bf2",
+    "tests/reports/live_llm_eval.json": "4adc6d0285b604b5cba561492b2569a9bb373f1ffd443f306cfc71b3464109c8",
+    "tests/reports/live_llm_eval_20260814.json": "83110cd8068fed7830d0bb142c0986e9657dccaceba74be956b100efa8a4e4d9",
+    "tests/reports/live_llm_eval_g09_regression_20260814.json": "4f9b09ad9a60aedffff12f453448dc6a5b1c9c6a9da654f93ad476c3e1f509f8",
+    "tests/reports/live_llm_protocol_probe.json": "5250c4d69b136e5a044415d1eee37c798d810b5df9fd342a8689d652c95124f8",
+    "tests/reports/live_llm_protocol_probe_20260814.json": "a61eaeb0b88d9b339e9445a6479246a61a67b8eb61e1886eeaff4325f96ef659",
+    "tests/reports/llm_eval_mock_20260814.json": "4d57c88f2ab83a15e895354b1f65d19d3eec0ec70ccae7f05a6847fd6913dcf0",
+    "tests/reports/test_case_catalog.md": "24da0aaabbdc4b5e08a26afc3b18e613254e6c1dad82336821ad00e59aba32fb",
+    "tests/run_contract_fixture.py": "0f878b09517f569a5880bd02bee1ae1f1c245d4059c502a299c2606f579c8268",
+    "tests/test_action_contract.py": "f2974093420a20b509076b6a12374449593d458c2dcea2510771f233a459c37c",
+    "tests/test_agent_config.py": "48cc557d85e7745e2763906a4dd46691777010652e656bcdcfeab30c891907e0",
+    "tests/test_app_ui.py": "c3e74b4e859d086dcdb5a9258fca6842968a367b1fb4d4bc13856d1aac59c288",
+    "tests/test_batch_report.py": "8c7b2f46d3e43abb1a455e6482cf04eb43d2edd38a9973a757b40e4f291ede15",
+    "tests/test_bootstrap_script.py": "d4ce107f344d3298e05b4bca9cd54e9b9f9962a474d0faf99ed783fbbc1b6c43",
+    "tests/test_branching.py": "65947364689171b16604125221a6676fd1f68ad5a669d4ba8246e82bead342d4",
+    "tests/test_controlled_launch.py": "2c0d909b037d0b72735f71f93a0dc3eece0aa60e5f95555e06bb7f86f1400213",
+    "tests/test_dependency_preflight.py": "f8995417375e5e7cbd59cafd72d58c8bf24e843dfb54309b9f305ebc280dde89",
+    "tests/test_documentation_consistency.py": "10e752eeadfd2c4648829af8a5ac92da5d1046b0ddbcbba220d9815590c2aec1",
+    "tests/test_e2e_gate.py": "aa6b440000ba284bbb03cba77bf2fcea08fffdcbbdcbc161dfb1ed284706885a",
+    "tests/test_env_checker.py": "ca1f339d2f71d4726ddfc076077a487452dd3586b7abe6f7ec2cc17fbfd6faa2",
+    "tests/test_env_registry.py": "3fa0b6a5ae80e6dfefae3b82b8d40d799faa8a4bcfb04683c262a41ed0079da0",
+    "tests/test_eq_acceptance.py": "d704c1e0e8dba29855e785ca6d3798b41d52e21f0af3f23cadcf622d6a1d6331",
+    "tests/test_errors.py": "80353e4757c1c80e7800bd33dbf9b6263a01772f79f8490ae97f36f48982d317",
+    "tests/test_external_profile_evidence.py": "6f9635df5b4bec6b6994d73f64477cb60e2c3efe8b7b4a319d7bafb82b7395cc",
+    "tests/test_external_smoke.py": "b2e8505c5996125d8faab074b2790db5abe0e8d9d6a8ad97810b45f440d54c48",
+    "tests/test_frontend_api.py": "8d85e4c80b49737a6b4233adb2ba23959c9e58f55b8a82b82c6e827f36bd7926",
+    "tests/test_gateway.py": "c4b2b2504981a0ae25059c6f6ffa120c1e659d5a36569ce499efbb219a4ebd78",
+    "tests/test_gateway_admin.py": "deb54cf8f0c70d4ba1000c2ef0846b689d8f23206d71a8064368c8311696f77f",
+    "tests/test_gateway_archive.py": "93346d3cd0294c34df5c2d53b7d5f3c53c9e504050e236e31c6ea5741746465e",
+    "tests/test_gateway_offline_acceptance.py": "db17b9f3a3a2d401e09c7b707622160773ffb87adf1250f0eba89eab7fc75b95",
+    "tests/test_gmx_process.py": "4a23de24974eb7dff1f11bead187e52b597dd04c4bf7ece8619e2d4835eb40fe",
+    "tests/test_input_declaration.py": "b9b32455d3a096ecc0796b190be3e8058b749b72051c8f5dd06e262769924326",
+    "tests/test_itp_namespace.py": "aa2837543f3ed6cabb58254667cf8491019f7d1b6d7eded8985a053ce24cf41f",
+    "tests/test_layer_agent.py": "97a3b555af8b38c7fcc4f00dbdcad1b3c76ff81cbd66d8e294e17b8e33df9614",
+    "tests/test_llm_budget.py": "4d86e3f07559baf246d63b37b13a65d045ed386a16cfe8aedc1c06d7e2fe20dc",
+    "tests/test_llm_config.py": "dc7b2e2a9644895e27676c3b67ada17dfb081e69d08e5af0ab89f8c54992cc23",
+    "tests/test_llm_eval_live_config_report.py": "710a6f9d5b8a241e12a804731c1e51d1e0d25de5a45a550e6d4895fcb286e596",
+    "tests/test_llm_eval_live_protocol_report.py": "636abeac66cbbe5d0e44939e81dde6a1e1a9bdd28de8b0e3ea15c5eb36e68fff",
+    "tests/test_llm_eval_live_report.py": "a8017d9d13189bff610cf88725c73529e5b3f7e6229d95f1a38f3c6766855178",
+    "tests/test_llm_eval_matrix.py": "4c885863bd29b354b5f17a33141b8353a079eaeaf6daad1475d22bdc963d490e",
+    "tests/test_llm_eval_report.py": "80ca9cccf5f75412a7415ab357e446c53c7052f40671b4533190fb65f22a0012",
+    "tests/test_log_parsers.py": "f56a0fb006e439b11b5f6cef49b39c2bb0cd696a17700f99250605f510529337",
+    "tests/test_managed_gateway.py": "8e37061f7ae375f480868f1cf68594ad64f0e109b4304f5fd21d4c78ac73e780",
+    "tests/test_managed_gateway_bundle.py": "5a1dac2a25115c0e0ebebc2aba2040e053e035a235e5fe7c1c0a8d286e78b500",
+    "tests/test_mdrun_eta.py": "4408ddca557edb0337c39787d2b62201a5b0aa03f7cae1807d10f7289508640a",
+    "tests/test_mdrun_knowledge.py": "2e9e7c8a7caeaeb2662a46945e5105299204cbb4eb249ce4d33d02384a0f38d6",
+    "tests/test_multi_factor_pending_action.py": "53c83521d1a907eb9cb12108903998fe0cb369c04e9c6a1703244917442a66b2",
+    "tests/test_multiwfn_bundled.py": "97613107846ebe805d5c5c41f089e7be1f68c4b90e6070c1bb8279baaf7a6dce",
+    "tests/test_pending_action.py": "a6937a8fbcc99c083bfd1416e889c082883e7b88a17a9f38e4710c98216c72f8",
+    "tests/test_pipeline_launch.py": "0b99a3259b57574a6fbdd224ed982b577af7c09a5e00a978538f51d8f1adf8f1",
+    "tests/test_pipeline_orchestrator.py": "6a512c9f96502d4834e7cb4360d003b065d2627edcb1e57aa7d169fa4a09ff1c",
+    "tests/test_pipeline_state.py": "86fcaa3f49e95655615512792b59a9e7763d16ff6435976c30991c1cae6d10ee",
+    "tests/test_postprocess.py": "3d704eed1ac4abc2f95dc1f4f014049fc52d279293af32521c9d83752dec6e88",
+    "tests/test_process_lifecycle.py": "fb84b3581bfdcb084d272792d3fc5200e543edc64707b875ffb77312c07913c6",
+    "tests/test_proposal_workspace.py": "78c243c97ddcd48e549c102722e3efb1c177d338b22c53982d135589517d3d37",
+    "tests/test_prune_runs.py": "a9d96d32f474e4c817dabeee67a2dbf36f0cb37383ef18a1727ca414e2fdccbe",
+    "tests/test_python_runtime.py": "4dc16535548eddf32ed106d81b9d783134f31f07e7894220953f1a87b01c39fc",
+    "tests/test_quantum_input_audit.py": "7f158d59755ae210907cc3fe26773147560245467d7959815e24685e613df748",
+    "tests/test_recovery_contracts.py": "b20583ef74710858a1fc742871a87b853bdadc9978a932ba735a65d6bcc9a68b",
+    "tests/test_recovery_policy.py": "0dbc649b089b8849f56418b269946c80348bcac47dabed1e92c9c5bec00f00d7",
+    "tests/test_release_baseline.py": "9ad3a93001c4969bf0bfcda30a4b6a05f23798e7e6700940f651a522199c2ec2",
+    "tests/test_release_staging.py": "87c728218e48ae16d1512159f0e1e6df8e0acd61f2de6092813375db82019503",
+    "tests/test_remote_execution.py": "002793d1e3b93455ddd8b4ed6793c085c8c47fee238ac8c4cd49168b83cbdb08",
+    "tests/test_remote_registry.py": "4fe30963b8653c93f24f4b2fa778504c0bf64a1338b6438f6d5f7d64b22c01ca",
+    "tests/test_resume_admission.py": "1849250de7b20a8e51c99e27bd324001a72e9ce0620f9a760225a82816bc135f",
+    "tests/test_run_assistant.py": "7d9e104499663ea350e4c1bad02c9ec08e4f96c2640c9da5b0017e627795b294",
+    "tests/test_run_control.py": "74c0a7e32e17e998a1c38f6081fad7bcbac34980176f0fcd7f68fbb8ae515895",
+    "tests/test_run_faults.py": "bd05d397857afeadf01decb0c4d14c3922411d3f1f7efdbd7c37edda348c2916",
+    "tests/test_run_metadata.py": "59ba6adc79472e11f4f1856b08c2f6b59ca2f80a884e67a2bcc037bd546bfab4",
+    "tests/test_run_provenance.py": "32bd26a1ed10a5c4b4b4f225aeece356f702a69286ba17aece193a75b00606cb",
+    "tests/test_run_store.py": "7e267a7aa34290802f66fe7ebb1c0f636cf629afd07907b506afadc00962fdf6",
+    "tests/test_simulation_execution.py": "5fbe1a4427fb85bbf0bd9a2e0a82a6e9754192043346c8ca87d2dea720b649d8",
+    "tests/test_simulation_protocol.py": "378619f0e3c8ee97705a33659ab0360547da92b50b3efe24c227bfd35b8e30c5",
+    "tests/test_stage_visualization.py": "ae66a22f24b6b0a811e525edb3af9f28a910adf18c0d2bd3f0a3c915ab7270e7",
+    "tests/test_step_contracts.py": "7225a6185e1283a4382c7c35dded1a9ef56721e319b318807965a9a7875b3893",
+    "tests/test_step_registry.py": "c5d54363b7ddc6dbea0db27c0dd24aea0e9da537b81a926879d85beeb2cea3ba",
+    "tests/test_struct_orca.py": "ef77ad7c8c91b0ec338dee0f394d7807b97c52f10a2888bb40639f7734aa1bf7",
+    "tests/test_structure_uploads.py": "9e84026d32cbcb4c1eb1d42d17b7bbd8ad2752d002673e937a6c0f32d36814d2",
+    "tests/test_structured_log.py": "51382ff34fa6af07a2061274cb9b52c977387fb5a09ed8f19304265a27628e7f",
+    "tests/test_structured_log_integration.py": "133b3ec598008a6cff3d5ea0bc60803bde77718f786aa4d495f9680cce93c434",
+    "tests/test_toolist_global.py": "ffa4be93f89a62fdb363a6050c1e601a8680cf9afa0bcd7ddf2c2cbbc63be69d",
+    "tests/test_toolist_quantum_topology.py": "e7093acf05eb97aacb9d78ad34a8261ac2068ab6b58349a46d4a22a3dcebb271",
+    "tests/test_toolist_simulation.py": "0e2261bdcc86f70fbc8da1ccfb230dfb7b51cb7013fc1f97d74968b6f3ab31c8",
+    "tests/test_top_assembly.py": "60baad485e1b2ee2d2251fa03cf3bd30b92fad47d31c56ff41ab992a3f69a958",
+    "tests/test_topology_contract.py": "63e34f3373017e804e4186ef37abebcce5a50215fcb1bf3a960e5efaabeee885",
+    "tests/test_vendor_manifest.py": "963872fd550e208168469d64dec67b654efa02d6b291aa566995e20a858bc934",
+    "tests/test_workflow_config.py": "28150ca4db971637e4d02e300f6761b6157ce0105b08108c5ea2be4c7b4b7b43",
+    "tests/tools/__init__.py": "cd02f889552d39df354091f2f4219b96870d79098e7d86ccac18bf4932ce3390",
+    "tests/tools/catalog_impl.py": "52e9975f4e7242f6383d90c5ff3830170f8a25b83d27d60fa3b2bbdc3e415b42",
+    "tests/tools/g01_gromacs_minimal_acceptance.py": "a03367f4fa6d5295c8b8fbab900e350543589cb5d248bf4c84737f593a75d976",
+    "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+    "tests/tools/g07_python_matrix_acceptance.py": "2f5157d7350bc869d3900e2b2005342d1b3782086dcd6fbdb3f05a225af9a592",
+    "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e",
+    "tests/tools/g09_eq_coverage_acceptance.py": "a70d5964a4e2f87e9f768fc7944f1b527dfef82e31ecf2b115ebcc38cc4f2c41",
+    "tests/tools/generate_test_case_catalog.py": "bc1b5feeb46c44d73d76e9f9a3614e91452a1675d33aae6c603bb9ed89763c3d",
+    "tests/tools/release_baseline.py": "c9b848d8403e68fb0c4ba92a5f474ce2136cab161b8866f3bb07363b1bf3fb53",
+    "vendor/3Dmol-min.js": "c24a17b28f38a6fbde99cea746e2d7414da2c60efce65fa75d5293bed204e510",
+    "vendor/PACKMOL_LICENSE.txt": "b7f87d528cc3b9b8d8724ec67ed47754e05fb984a63e2cb6dd3167e62df86af7",
+    "vendor/libcoordgen.so.3": "769a1efa3bc9a827253944aa36fa972916f4340853a7368a191dcb7d5539959a",
+    "vendor/libcoordgen.so.3.0.2": "769a1efa3bc9a827253944aa36fa972916f4340853a7368a191dcb7d5539959a",
+    "vendor/libopenbabel.so.7": "c3e815c6f325e11e244ef67a6e84bb2dc42b3207a976be5b7222a9f2ef228fd8",
+    "vendor/libopenbabel.so.7.0.0": "c3e815c6f325e11e244ef67a6e84bb2dc42b3207a976be5b7222a9f2ef228fd8",
+    "vendor/manifest.json": "32300e26b05875bc6e3459a4c71ba2e6f304bef46720c90ffb10d27dd05ce99f",
+    "vendor/multiwfn/linux-x86_64/3.8-dev-2025-02-14/LICENSE.txt": "683ebe19409e1629bc7dc8ffc34cdc89b2da5c7fac940003574ebfa8b30aef67",
+    "vendor/multiwfn/linux-x86_64/3.8-dev-2025-02-14/Multiwfn": "63d5164f06f881fd98a03623403c00eb4b53dc5b02b618a893cfc450c415e902",
+    "vendor/multiwfn/linux-x86_64/3.8-dev-2025-02-14/NOTICE.md": "529602db40f38b4ba4ead6229926e434f5927b2b81696ce88248e6b8db63cd14",
+    "vendor/multiwfn/linux-x86_64/3.8-dev-2025-02-14/manifest.json": "3b6c5402b1effd4c80fe5b86422128eb9f7bfdf7fc6815a7f247d869d20e7ca3",
+    "vendor/multiwfn/linux-x86_64/3.8-dev-2025-02-14/settings.ini": "c889e528389e5a29f34e613a34ea1ef6672eb2990508a43deda5cd16de0e50d2",
+    "vendor/obabel": "6809a51450c631e893de06079bb16e3fe5906936b75d511d05e28fe3df93fa58",
+    "vendor/obabel.bin": "16c9406c1ae6a0f41f22ff8ff6acf5d40ea0888cfe2a10846c9c3a9961d51b67",
+    "vendor/packmol": "b4ec513ea4c950a2af763f60233cd4d20ef705562aa700b3e9daaf6c1addb818",
+    "vendor/sobtop/ATOMTYPE_AMBER.DEF": "f07888e09394e95f6940a4a54d5b874e6ead019bb0045adf0c6f9a15a85fa6fe",
+    "vendor/sobtop/ATOMTYPE_GFF.DEF": "33631b041f3f5f88434e2ae395734eaa1094fa3da0babbadf78c6b3266132e80",
+    "vendor/sobtop/CORR_NAME_TYPE.DAT": "f7138c8d5d9a10ab02c577be76597201212465da3711dbfc34861f7d5d81f968",
+    "vendor/sobtop/LJ_param.dat": "785ddb1831143b79ccb9711b9145ed756ab5773ecfdcc258ccc8315622fbbfc5",
+    "vendor/sobtop/assign_AT.dat": "bc25b9db15e9598739548027478b8fec6ba8c4bf8f6e8d316e70d9736a8ec5fa",
+    "vendor/sobtop/atomtype": "e53b0ade8043d9a0bbceac9d63384ff8f244394a8accec9f0c379ccce91d8f08",
+    "vendor/sobtop/atomtype.exe": "7e8614baa8c157814866d72c67d0f394b5fb5dea7d542f4f2f5827a98f95faed",
+    "vendor/sobtop/bondcrit.dat": "ba7e51a9da408e206cd6e245da9ad7576b0188b491b9b2a921f7ed83b88be116",
+    "vendor/sobtop/bonded_param.dat": "000637d5f1e6c06426feebfa62bd3953c1b51bac0120b2d63bdac8a514859941",
+    "vendor/sobtop/libiomp5md.dll": "0ad71f466d115d353dce94ba32b63e288f48198e89f551d46dcce461fedbd195",
+    "vendor/sobtop/sobtop": "97a78133ccbe7ccd8bcfd1d40eb86b08ad9faa319ad992cbdd671c9bd95dc2ca",
+    "vendor/sobtop/sobtop.exe": "b60e1ccf33fdc9cf810b46d9fcdcbb15e6e1bab24c4e6aeeefd3700e0aa9b2ce",
+    "vendor/sobtop/sobtop.ini": "8299d65ff602f7bc57b410c2073d0e4cd224e71583f023c99923eb68bf6a28c4"
+  },
+  "validation_target": "Complete frozen source checkout, default full regression on three installed Python versions, with opt-in external suites excluded.",
+  "current_version_accepted": false,
+  "blocking_reason_codes": [
+    "source_changed_during_validation"
+  ],
+  "frontend": {
+    "scope": "Frozen frontend source, copied local dependencies, offline build and deterministic recovery controls; no real browser or LLM.",
+    "node_version": "v22.16.0",
+    "recovery_controls": {
+      "passed": true,
+      "returncode": 0,
+      "duration_s": 0.183,
+      "output_sha256": "7ca73694db0e367c40fcc60f4c3d9ed849eb6a0614cf3c45ba6df37f888205d0"
+    },
+    "production_build": {
+      "passed": true,
+      "returncode": 0,
+      "duration_s": 2.581,
+      "output_sha256": "f5871611247a5b1dc093280f0b07cb28a4a1bbcfbd3e0d214abd8c50591382fa"
+    },
+    "built_dist_matches_tested_snapshot": true,
+    "tested_frontend_source": {
+      "main.jsx": "dc329961dd2d82bd9e753b992dcd24bfb2af37cf6aebe764b359fb6127cf7c7a",
+      "styles.css": "ce8532e0d3e705d654b96d51f9b46807fb16f7ad92a5ef5672f08637d1eee501",
+      "legacy-content.js": "9ba96cd50588b03d927208fd56e0b3f3818c10ed201528a2fb930548f87b77bb"
+    },
+    "recovery_fixture_groups": 10,
+    "passed": true,
+    "build_source_matches_tested_snapshot": true,
+    "built_dist_manifest": {
+      "index.html": "2ee7c55058be9edc1da81d2e98e948001f8c80de55af4043504bc1c0e7d288ce",
+      "assets/index-CCVE1n2e.js": "3f23eec90a8ae296b472b2dda5462061b74378f99cd1757719cdcfe4e89d4b1c",
+      "assets/index-B6Hr-_vC.css": "97cba2031e893f1b6afa4c1a3f89ec9afbb1e1fa2161e771602596c83edcc520"
+    },
+    "tested_recovery_script_sha256": "b10fac065a1473ecd6011fd99ede7737c0fcef751ce75ac031f31b909fa06a42"
+  },
+  "environment_reuse": {
+    "prepared_on": "2026-09-08",
+    "dependency_specification_unchanged": true,
+    "new_install_claimed": false
+  },
+  "previous_attempts": [
+    {
+      "recorded_at": "2026-09-10T09:44:34.601139+00:00",
+      "passed": true,
+      "g07_smoke_passed": true,
+      "current_worktree_covered": false,
+      "changed_paths": [
+        "frontend/src/main.jsx",
+        "src/willy/pipeline_launch.py",
+        "src/willy/process_lifecycle.py",
+        "src/willy/run_faults.py",
+        "src/willy/run_processes.py",
+        "src/willy/simulation/_gmx_utils.py",
+        "src/willy/simulation/gmx_process.py"
+      ],
+      "counts_by_minor": {
+        "3.10": {
+          "tests": 1436,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1426
+        },
+        "3.11": {
+          "tests": 1436,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1426
+        },
+        "3.12": {
+          "tests": 1436,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1426
+        }
+      }
+    },
+    {
+      "recorded_at": "2026-09-10T09:55:22.429215+00:00",
+      "passed": true,
+      "g07_smoke_passed": true,
+      "current_worktree_covered": false,
+      "changed_paths": [
+        "frontend/src/main.jsx",
+        "src/willy/branching.py",
+        "src/willy/frontend_api.py",
+        "src/willy/run_faults.py",
+        "src/willy/run_registry.py",
+        "tests/conftest.py",
+        "tests/reports/test_case_catalog.md",
+        "tests/test_run_faults.py",
+        "tests/tools/catalog_impl.py"
+      ],
+      "counts_by_minor": {
+        "3.10": {
+          "tests": 1436,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1426
+        },
+        "3.11": {
+          "tests": 1436,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1426
+        },
+        "3.12": {
+          "tests": 1436,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1426
+        }
+      }
+    },
+    {
+      "recorded_at": "2026-09-10T10:00:53.454095+00:00",
+      "passed": true,
+      "g07_smoke_passed": true,
+      "current_worktree_covered": false,
+      "changed_paths": [
+        "frontend/dist/assets/index-C4EOnY_j.js",
+        "frontend/dist/assets/index-CCVE1n2e.js",
+        "frontend/dist/index.html"
+      ],
+      "counts_by_minor": {
+        "3.10": {
+          "tests": 1475,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1465
+        },
+        "3.11": {
+          "tests": 1475,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1465
+        },
+        "3.12": {
+          "tests": 1475,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 10,
+          "passed": 1465
+        }
+      }
+    }
+  ],
+  "archive_check": {
+    "recorded_at": "2026-09-10T13:08:19.488366+00:00",
+    "documentation_regression": {
+      "3.10": {
+        "passed": true,
+        "returncode": 0,
+        "output_sha256": "d8723ee001feaaf2086b9ce1b811b05cd7fcaa5a6810308b70293e0529ba97f7",
+        "passed_cases": 5
+      },
+      "3.11": {
+        "passed": true,
+        "returncode": 0,
+        "output_sha256": "d8723ee001feaaf2086b9ce1b811b05cd7fcaa5a6810308b70293e0529ba97f7",
+        "passed_cases": 5
+      },
+      "3.12": {
+        "passed": true,
+        "returncode": 0,
+        "output_sha256": "ad430bcd751b836a91fab4ff65c168e7e4f252c79243c40745308b866b554cb7",
+        "passed_cases": 5
+      }
+    },
+    "current_catalog_pytest_cases": 1483,
+    "current_catalog_is_collection_not_full_matrix_execution": true,
+    "uncovered_runtime_or_test_files": [
+      "frontend/scripts/recovery-check.mjs",
+      "run_pipeline.py",
+      "src/willy/frontend_api.py",
+      "src/willy/pipeline_orchestrator.py",
+      "src/willy/pipeline_state.py",
+      "src/willy/run_processes.py",
+      "tests/test_run_faults.py"
+    ],
+    "current_recovery_script_matches_tested_snapshot": false,
+    "public_evidence_redacted": true
+  }
+}

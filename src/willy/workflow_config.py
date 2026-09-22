@@ -13,8 +13,10 @@ from typing import Any, Mapping, Optional
 import json
 import copy
 import math
+from decimal import Decimal
 
 from willy._paths import get_project_root
+from willy.charge_scaling import DEFAULT_ION_CHARGE_SCALE, validate_ion_charge_scale
 from willy.config_schema import validate_config_schema
 from willy.config_store import replace_json_with_backup
 from willy.remote_registry import merge_execution_md_defaults, validate_execution_md
@@ -25,9 +27,64 @@ from willy.simulation.protocol import (
     migrate_config_file,
     validate_md_config,
 )
+from willy.quantum.smd_solvents import GAS_SOLVENT, resolve_exact, validate_custom_values
+
 
 ROOT = get_project_root()
 CONFIG_PATH = ROOT / "config.json"
+
+
+def molecule_solvent_settings(
+    molecule: Mapping[str, Any], backend: str, *, project_root: str | Path | None = None,
+    require_registered: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Validate a shared optimization/SP solvent without replacing a frozen snapshot."""
+    backend = str(backend).strip().casefold()
+    solvent = molecule.get("solvent", GAS_SOLVENT if backend == "orca" else "acetone")
+    if not isinstance(solvent, str) or not solvent.strip():
+        raise ValueError("solvent 必须是已登记溶剂名或 gas")
+    solvent = solvent.strip()
+    snapshot = molecule.get("solvent_ref")
+    if snapshot is not None:
+        if not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("name"), str):
+            raise ValueError("solvent_ref 必须是含名称的溶剂快照")
+        if snapshot["name"].strip().casefold() != solvent.casefold():
+            raise ValueError("solvent 与 solvent_ref.name 不一致")
+    if solvent.casefold() == GAS_SOLVENT:
+        if snapshot is not None and (
+            snapshot.get("source") != "none" or snapshot.get("manual") is not False
+            or snapshot.get("epsilon") is not None or snapshot.get("epsinf") is not None
+        ):
+            raise ValueError("gas 的 solvent_ref 不得包含 SMD 参数")
+        return GAS_SOLVENT, {"name": GAS_SOLVENT, "source": "none", "manual": False}
+    if backend == "orca" or str(molecule.get("_backend", "")).strip().casefold() == "orca":
+        raise ValueError("ORCA 当前不支持 SMD，仅允许 gas")
+    record = resolve_exact(solvent, project_root)
+    if snapshot is None:
+        if record is None:
+            raise ValueError(f"solvent 未在 Gaussian 溶剂库中登记: {solvent}")
+        return record.name, record.as_dict()
+    source = snapshot.get("source")
+    if source == "manual" and snapshot.get("manual") is True:
+        epsilon, epsinf = validate_custom_values(snapshot.get("epsilon"), snapshot.get("epsinf"))
+        normalized = {
+            "name": snapshot["name"].strip(), "source": "manual", "manual": True,
+            "epsilon": epsilon, "epsinf": epsinf,
+        }
+        if record is not None and record.source != "manual":
+            raise ValueError("solvent_ref 来源与同名内置溶剂不一致")
+        if require_registered:
+            if record is None or tuple(map(Decimal, validate_custom_values(record.epsilon, record.epsinf))) != (Decimal(epsilon), Decimal(epsinf)):
+                raise ValueError("solvent_ref 参数未登记，模型不得创建或修改人工溶剂")
+            normalized["name"] = record.name
+        return normalized["name"], normalized
+    if source != "builtin" or snapshot.get("manual") is not False or record is None or record.source != "builtin":
+        raise ValueError("solvent_ref 来源无效或内置溶剂未登记")
+    epsilon, _ = validate_custom_values(snapshot.get("epsilon"), 1)
+    expected_epsilon, _ = validate_custom_values(record.epsilon, 1)
+    if Decimal(epsilon) != Decimal(expected_epsilon) or snapshot.get("epsinf") is not None:
+        raise ValueError("solvent_ref 与内置溶剂参数不一致")
+    return record.name, record.as_dict()
 
 
 def _available_residues() -> dict[str, dict]:
@@ -89,6 +146,7 @@ def validate_config(config_dict: object) -> list[str]:
     for name, molecule in molecules.items():
         if isinstance(molecule, Mapping) and "nproc" in molecule:
             _validate_nproc(issues, f"molecules.{name}.nproc", molecule.get("nproc"), nullable=True)
+    configured_backend = str(config_dict.get("backend", "g16")).strip().lower()
     for name in residues:
         if name not in molecules:
             issues.append(f"residues 中的 '{name}' 未在 molecules 中定义")
@@ -102,6 +160,12 @@ def validate_config(config_dict: object) -> list[str]:
             issues.append(f"molecules.{name}.charge 必须是由原始输入审计得到的整数")
         if isinstance(spin, bool) or not isinstance(spin, int) or spin < 1:
             issues.append(f"molecules.{name}.spin 必须是由原始输入审计得到的正整数")
+    for name, molecule in molecules.items():
+        if isinstance(molecule, Mapping):
+            try:
+                molecule_solvent_settings(molecule, configured_backend)
+            except ValueError as exc:
+                issues.append(f"molecules.{name}.solvent: {exc}")
     md = config_dict.get("md", {})
     if isinstance(md, Mapping) and md:
         md_validation = validate_md_config(md)
@@ -143,8 +207,16 @@ def validate_config(config_dict: object) -> list[str]:
     topology = config_dict.get("topology")
     if isinstance(topology, Mapping):
         from willy.topology.backends import normalize_topology_config
-        _, topology_issues, _ = normalize_topology_config(topology)
+        normalized_topology, topology_issues, _ = normalize_topology_config(topology)
         issues.extend(topology_issues)
+        if (
+            normalized_topology.get("backend") != "sobtop"
+            and config_dict.get("ion_charge_scale", DEFAULT_ION_CHARGE_SCALE) != 1.0
+        ):
+            issues.append(
+                "ion_charge_scale != 1.00 仅支持 sobtop；非 sobtop 拓扑不消费 CHG 的 .chg 电荷，"
+                "不能静默忽略或再次缩放拓扑电荷"
+            )
     execution = config_dict.get("execution")
     if execution is None:
         issues.extend(validate_execution_md(None))
@@ -185,6 +257,10 @@ def _apply_defaults(config_dict: dict) -> dict:
     out.pop("error", None)
     out.pop("warnings", None)
     out.setdefault("backend", "g16")
+    default_solvent = "gas" if str(out.get("backend", "g16")).strip().lower() == "orca" else "acetone"
+    out["ion_charge_scale"] = validate_ion_charge_scale(
+        out.get("ion_charge_scale", DEFAULT_ION_CHARGE_SCALE)
+    )
     out.setdefault("defaults", {"mem": "5GB", "nproc": 8})
     out["defaults"].setdefault("mem", "5GB")
     out["defaults"].setdefault("nproc", 8)
@@ -196,7 +272,7 @@ def _apply_defaults(config_dict: dict) -> dict:
                 "charge": None,
                 "spin": None,
                 "basis": "b3lyp/6-311+g(d,p)",
-                "solvent": "acetone",
+                "solvent": default_solvent,
                 "mem": "",
                 "nproc": None,
             }
@@ -204,7 +280,12 @@ def _apply_defaults(config_dict: dict) -> dict:
             molecules[name].setdefault("basis", "b3lyp/6-311+g(d,p)")
             molecules[name].setdefault("mem", "")
             molecules[name].setdefault("nproc", None)
-            molecules[name].setdefault("solvent", "acetone")
+            molecules[name].setdefault("solvent", default_solvent)
+    for molecule in molecules.values():
+        if isinstance(molecule, Mapping):
+            solvent, snapshot = molecule_solvent_settings(molecule, out["backend"])
+            molecule["solvent"] = solvent
+            molecule["solvent_ref"] = snapshot
     try:
         out["md"] = merge_v2_defaults(out.get("md", {}))
     except MDConfigError:

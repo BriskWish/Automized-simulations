@@ -67,8 +67,9 @@ def test_multi_factor_action_requires_selection_and_applies_only_selected_option
         validate_pending_action_for_launch(run_dir, action["action_id"])
 
     select_pending_action_option(run_dir, action["action_id"], "option_2")
-    applied = apply_pending_action(run_dir, action["action_id"])
-    config = json.loads((run_dir / "config.json").read_text())
+    from willy.branching import preview_repair_config
+    applied, config = preview_repair_config(run_dir, action["action_id"])
+    assert (run_dir / "config.json").read_bytes() == before
 
     assert applied["selected_option_id"] == "option_2"
     assert config["md"]["dt"] == 0.001

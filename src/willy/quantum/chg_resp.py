@@ -17,6 +17,10 @@ from willy._paths import get_project_root
 from willy.errors import StepResult, StepError, ErrorKind
 from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import find_multiwfn
+from willy.charge_scaling import validate_ion_charge_scale
+from willy.quantum.charge_files import (
+    archive_charge_files, cached_charge_record, charge_paths, publish_charge_files,
+)
 
 ROOT = get_project_root()
 
@@ -27,6 +31,7 @@ def make_chg(
     spin: int = 1,
     workdir: str = None,
     output_name: str = None,
+    ion_charge_scale: float = 1.0,
 ) -> StepResult:
     """*_opt.fchk → Multiwfn RESP(内部ESP) → .chg。
 
@@ -58,13 +63,30 @@ def make_chg(
     if output_name is None:
         output_name = fp.stem.replace("_opt", "")
 
-    chg_path = Path(workdir) / f"{output_name}.chg"
-    if chg_path.exists():
-        print(f"[chg_resp] ⏭ {output_name}: .chg 已存在")
+    directory = Path(workdir).resolve()
+    try:
+        factor = validate_ion_charge_scale(ion_charge_scale)
+        if type(charge) is not int or type(spin) is not int or spin < 1:
+            raise ValueError("电荷修正需要审计后的整数净电荷和自旋")
+        chg_path, raw_path, metadata_path = charge_paths(directory, output_name)
+        previous = cached_charge_record(directory, output_name, fp, charge, spin)
+        raw_text = raw_path.read_text(encoding="utf-8") if previous else None
+        if previous is None or previous["ion_charge_scale"] != factor:
+            archive_charge_files(directory, output_name, fp)
+            if raw_text is not None:
+                previous = publish_charge_files(directory, output_name, fp, charge, spin, factor, raw_text)
+    except (OSError, ValueError) as exc:
+        return StepResult(
+            step_name="chg_resp", step_index=3, success=False,
+            error=StepError(ErrorKind.INPUT_CONTRACT, str(exc)), duration_s=_time.time() - _start,
+        )
+    if previous is not None:
+        print(f"[chg_resp] ⏭ {output_name}: 已验证电荷产物，修正因子 {factor:.2f}")
         return StepResult(
             step_name="chg_resp", step_index=3, success=True,
-            outputs={"chg": str(chg_path)},
-            artifacts=[str(chg_path)], duration_s=0.0,
+            outputs={"chg": str(chg_path), "raw_chg": str(raw_path), "charge_scaling": str(metadata_path)},
+            artifacts=[str(chg_path), str(raw_path), str(metadata_path)],
+            extra={"charge_scaling": previous}, duration_s=_time.time() - _start,
         )
 
     try:
@@ -104,14 +126,29 @@ def make_chg(
 
     # Check for output
     for candidate in [
+        chg_path,
         Path(workdir) / f"{fp.stem}.chg",
         Path(workdir) / "gau.chg",
     ]:
-        if candidate.exists() and candidate != chg_path:
-            candidate.rename(chg_path)
+        if candidate.exists() or candidate.is_symlink():
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    raise ValueError("Multiwfn 电荷输出必须是独立文件")
+                record = publish_charge_files(
+                    directory, output_name, fp, charge, spin, factor, candidate.read_text(encoding="utf-8"),
+                )
+                if candidate != chg_path:
+                    candidate.unlink()
+            except (OSError, ValueError) as exc:
+                return StepResult(
+                    step_name="chg_resp", step_index=3, success=False,
+                    error=StepError(ErrorKind.RESP_FAILED, str(exc)), duration_s=_time.time() - _start,
+                )
             break
+    else:
+        record = None
 
-    if not chg_path.exists():
+    if record is None:
         return StepResult(
             step_name="chg_resp", step_index=3, success=False,
             error=StepError(kind=ErrorKind.RESP_FAILED,
@@ -123,8 +160,9 @@ def make_chg(
 
     return StepResult(
         step_name="chg_resp", step_index=3, success=True,
-        outputs={"chg": str(chg_path)},
-        artifacts=[str(chg_path)],
+        outputs={"chg": str(chg_path), "raw_chg": str(raw_path), "charge_scaling": str(metadata_path)},
+        artifacts=[str(chg_path), str(raw_path), str(metadata_path)],
+        extra={"charge_scaling": record},
         duration_s=_time.time() - _start,
     )
 
@@ -138,8 +176,14 @@ def batch_make_chg(
     try:
         with open(config_path) as f:
             cfg = json.load(f)
-    except Exception:
+    except FileNotFoundError:
         cfg = {}
+    except (OSError, ValueError):
+        return [StepResult("chg_resp", 3, False, error=StepError(ErrorKind.CONFIG_INVALID, "RESP 配置不可读取"))]
+    try:
+        factor = validate_ion_charge_scale(cfg.get("ion_charge_scale", 1.0))
+    except (AttributeError, ValueError) as exc:
+        return [StepResult("chg_resp", 3, False, error=StepError(ErrorKind.CONFIG_INVALID, str(exc)))]
     registered = list(cfg.get("molecules", {}).keys())
     workspace = Path(struct_dir)
     if registered:
@@ -182,7 +226,7 @@ def batch_make_chg(
             })
         sr = make_chg(str(fchk), charge=mol_info.get("charge", 0),
                        spin=mol_info.get("spin", 1),
-                       output_name=name)
+                       output_name=name, ion_charge_scale=factor)
         sr.target_type = "molecule"
         sr.target = name
         results.append(sr)

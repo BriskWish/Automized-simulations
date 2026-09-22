@@ -18,12 +18,14 @@ from typing import Iterable, Optional
 import subprocess
 import shutil
 import re
+import shlex
 import uuid
 
 from willy._paths import get_project_root
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.errors import StepResult, StepError, ErrorKind
 from willy.process_lifecycle import run_managed_command
+from willy.python_runtime import parent_python_executable
 from willy.topology.validation import (
     run_output_path,
     validate_topology_files,
@@ -111,7 +113,8 @@ def _prepare_ligpargen_child_env(
     compat_dir.mkdir(mode=0o700)
     wrapper = compat_dir / "babel"
     wrapper.write_text(
-        "#!/usr/bin/env python3\n"
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(parent_python_executable())} - \"$@\" <<'WILLY_BABEL_WRAPPER'\n"
         "import os\n"
         "import sys\n"
         f"obabel = {str(obabel_executable)!r}\n"
@@ -125,7 +128,8 @@ def _prepare_ligpargen_child_env(
         "        continue\n"
         "    arguments.append(argument)\n"
         "    index += 1\n"
-        "os.execv(obabel, [obabel, *arguments])\n",
+        "os.execv(obabel, [obabel, *arguments])\n"
+        "WILLY_BABEL_WRAPPER\n",
         encoding="utf-8",
     )
     wrapper.chmod(0o700)

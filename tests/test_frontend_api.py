@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from html import unescape
 import json
 import stat
+import sys
 
 import pytest
 
@@ -99,7 +100,34 @@ def test_reconcile_stale_latest_run_marks_transient_status_aborted_with_audit(tm
     events = (run_dir / "events.jsonl").read_text()
     assert "run_aborted_after_process_exit" in events
     assert '"source": "stale_reconciliation"' in events
+    manifest = RunRegistry(tmp_path)._read_registry_manifest(run_dir)
+    assert manifest["interruption_history"][-1]["source"] == "stale_reconciliation"
+    assert manifest["interruption_history"][-1]["outcome"] == "aborted"
     assert "当前工序" not in frontend_api.get_run_summary_markdown(run_dir.name)
+
+
+def test_service_startup_reconciles_each_stale_transient_run_with_audit(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    first = _record_run_status(tmp_path, "md__202608020001", {
+        "state": "running", "step": 8, "activity": {},
+    })
+    second = _record_run_status(tmp_path, "md__202608020002", {
+        "state": "retrying", "step": 9, "activity": {},
+    })
+    monkeypatch.setattr(frontend_api, "is_pipeline_running", lambda: False)
+
+    reconciled = frontend_api.reconcile_stale_pipeline_states()
+
+    assert set(reconciled) == {first.name, second.name}
+    registry = RunRegistry(tmp_path)
+    assert registry.get_run_status(first.name, reconcile=False)["state"] == "aborted"
+    assert registry.get_run_status(second.name, reconcile=False)["state"] == "aborted"
+    for directory in (first, second):
+        events = (directory / "events.jsonl").read_text(encoding="utf-8")
+        assert "run_aborted_after_process_exit" in events
+        assert '"source": "service_startup"' in events
+        manifest = registry._read_registry_manifest(directory)
+        assert manifest["interruption_history"][-1]["source"] == "service_startup"
 
 
 def test_frontend_polling_does_not_reconcile_or_mutate_status(tmp_path, monkeypatch):
@@ -247,7 +275,8 @@ def test_awaiting_confirmation_summary_explains_the_llm_and_user_boundary(tmp_pa
     markdown = frontend_api.get_run_summary_markdown(run_id)
 
     assert "状态：等待用户确认调整方案" in markdown
-    assert "LLM 已返回方案" in markdown
+    assert "可原参数续跑" in markdown
+    assert "如有调整方案" in markdown
     assert "未启动重跑" in markdown
 
 
@@ -403,8 +432,10 @@ def test_active_pipeline_run_wins_over_newer_historical_index_entry(tmp_path, mo
     assert frontend_api.latest_run_id() == active_id
 
 
-def test_confirm_pending_action_reserves_the_same_run_and_spawns_controlled_retry(tmp_path, monkeypatch):
+@pytest.mark.parametrize("revisions", (0, 1, 2))
+def test_confirm_pending_action_creates_child_without_changing_parent(tmp_path, monkeypatch, revisions):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr("willy.simulation.manifest.tool_versions", lambda: {"gromacs": "test", "packmol": "test"})
     run_id = "md__202608030001"
     run_dir = tmp_path / "md_run" / run_id
     run_dir.mkdir(parents=True)
@@ -431,10 +462,40 @@ def test_confirm_pending_action_reserves_the_same_run_and_spawns_controlled_retr
     }, "run_awaiting_confirmation")
 
     spawned = []
+    from tests.run_contract_fixture import seed_contracts
+    (run_dir / "Li.gjf").write_text("synthetic input")
+    seed_contracts(run_dir)
+    expected_dt = 0.0005
+    config_before_revision = (run_dir / "config.json").read_bytes()
+    if revisions:
+        import willy.agent_config as agent_config
+        from willy.agent_simulation import SimulationAgent
+        from willy.simulation.pending_action import load_pending_action
+
+        monkeypatch.setattr(agent_config, "_DS", object())
+        for revision_index in range(revisions):
+            expected_dt = 0.0005 / (2 ** (revision_index + 1))
+            monkeypatch.setattr(SimulationAgent, "propose_revised_eq_recovery", lambda *_args, **_kwargs: {
+                "adjustments": [{"field": "dt", "after": expected_dt}],
+            })
+            old_pending = frontend_api.get_pending_action(run_id)
+            result = frontend_api.revise_pending_action(
+                action["action_id"], f"将 dt 改为 {expected_dt}", run_id,
+                state_revision=old_pending["state_revision"],
+                config_fingerprint=old_pending["config_fingerprint"],
+            )
+            assert "已按你的要求更新" in result
+            assert "已失效" in frontend_api.confirm_pending_action(action["action_id"], run_id)
+            action = load_pending_action(run_dir)
+            assert action["action_id"] != old_pending["action_id"]
+            assert (run_dir / "config.json").read_bytes() == config_before_revision
+    parent_before = {path.name: path.read_bytes() for path in run_dir.iterdir() if path.is_file()}
+    child = tmp_path / "md_run" / "md__202608030003"
+    child.mkdir()
 
     class Reservation:
         def __init__(self):
-            self.run_dir = run_dir
+            self.run_dir = child
             self.fd = 19
             self.token = "reservation-token"
 
@@ -460,7 +521,7 @@ def test_confirm_pending_action_reserves_the_same_run_and_spawns_controlled_retr
         def start(self):
             return None
 
-    monkeypatch.setattr(frontend_api, "reserve_existing_run_launch", lambda root, selected: Reservation())
+    monkeypatch.setattr(frontend_api, "reserve_pipeline_launch", lambda root: Reservation())
     monkeypatch.setattr(frontend_api.subprocess, "Popen", lambda args, **kwargs: spawned.append((args, kwargs)) or Process())
     monkeypatch.setattr(frontend_api.threading, "Thread", IdleThread)
 
@@ -472,7 +533,7 @@ def test_confirm_pending_action_reserves_the_same_run_and_spawns_controlled_retr
         state_revision=pending["state_revision"],
         config_fingerprint="0" * 64,
     )
-    assert "已更新" in fingerprint_reply
+    assert "已失效" in fingerprint_reply
     assert spawned == []
     stale_reply = frontend_api.confirm_pending_action(
         action["action_id"],
@@ -480,7 +541,7 @@ def test_confirm_pending_action_reserves_the_same_run_and_spawns_controlled_retr
         state_revision=pending["state_revision"] + 1,
         config_fingerprint=pending["config_fingerprint"],
     )
-    assert "已更新" in stale_reply
+    assert "已失效" in stale_reply
     assert spawned == []
 
     reply = frontend_api.confirm_pending_action(
@@ -490,20 +551,24 @@ def test_confirm_pending_action_reserves_the_same_run_and_spawns_controlled_retr
         config_fingerprint=pending["config_fingerprint"],
     )
 
-    assert "当前进入重跑准备" in reply
+    assert "已创建 fork" in reply
     status = RunRegistry(tmp_path).get_run_status(run_id)
-    assert status["state"] == "retrying"
-    assert status["state_revision"] == pending["state_revision"] + 1
+    assert status["state"] == "awaiting_confirmation"
+    assert status["state_revision"] == pending["state_revision"]
     assert status["extra"]["pending_action"]["action_id"] == action["action_id"]
     args, kwargs = spawned[0]
-    assert args[:3] == ["python3", "run_pipeline.py", "orca"]
-    assert args[-2:] == ["--resume-pending-action", action["action_id"]]
-    assert kwargs["pass_fds"] == (19,)
-    assert "已失效" in frontend_api.confirm_pending_action(action["action_id"], run_id)
+    assert args[:3] == [sys.executable, str(tmp_path / "run_pipeline.py"), "orca"]
+    assert args[-2:] == ["--resume-from-step", "6"]
+    assert kwargs["pass_fds"][0] == 19
+    assert len(kwargs["pass_fds"]) == 2
+    assert "不会重复启动" in frontend_api.confirm_pending_action(action["action_id"], run_id)
     assert len(spawned) == 1
+    assert {name: (run_dir / name).read_bytes() for name in parent_before} == parent_before
+    assert json.loads((child / "config.json").read_text())["md"]["dt"] == expected_dt
+    assert frontend_api.get_pending_action(run_id) is None
 
 
-def test_confirm_pending_action_restores_waiting_state_when_runner_cannot_start(tmp_path, monkeypatch):
+def test_confirm_pending_action_preserves_parent_when_child_cannot_start(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     run_id = "md__202608030002"
     run_dir = tmp_path / "md_run" / run_id
@@ -530,19 +595,25 @@ def test_confirm_pending_action_restores_waiting_state_when_runner_cannot_start(
         }},
     }, "run_awaiting_confirmation")
 
+    from tests.run_contract_fixture import seed_contracts
+    (run_dir / "Li.gjf").write_text("synthetic input")
+    seed_contracts(run_dir)
+    child = tmp_path / "md_run" / "md__202608030004"
+    child.mkdir()
+
     class Reservation:
         fd = 19
         token = "reservation-token"
         released = False
 
         def __init__(self):
-            self.run_dir = run_dir
+            self.run_dir = child
 
         def release(self):
             self.released = True
 
     reservation = Reservation()
-    monkeypatch.setattr(frontend_api, "reserve_existing_run_launch", lambda *_args: reservation)
+    monkeypatch.setattr(frontend_api, "reserve_pipeline_launch", lambda *_args: reservation)
     monkeypatch.setattr(
         frontend_api.subprocess,
         "Popen",
@@ -552,7 +623,7 @@ def test_confirm_pending_action_restores_waiting_state_when_runner_cannot_start(
     reply = frontend_api.confirm_pending_action(action["action_id"], run_id)
 
     status = RunRegistry(tmp_path).get_run_status(run_id)
-    assert "启动失败" in reply
+    assert "分支未启动" in reply
     assert reservation.released is True
     assert status["state"] == "awaiting_confirmation"
     assert status["extra"]["pending_action"]["action_id"] == action["action_id"]
@@ -650,7 +721,8 @@ def test_revising_pending_action_keeps_run_waiting_and_config_unchanged(tmp_path
     assert "pending_action_revised" in (run_dir / "events.jsonl").read_text()
 
 
-def test_invalid_revised_proposal_preserves_original_waiting_action(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ("invalid_proposal", "state_changed", "commit_conflict", "launch_busy", "llm_unavailable", "already_confirmed"))
+def test_failed_revision_preserves_original_waiting_action(tmp_path, monkeypatch, failure):
     import willy.agent_config as agent_config
     from willy.agent_simulation import SimulationAgent
 
@@ -679,17 +751,62 @@ def test_invalid_revised_proposal_preserves_original_waiting_action(tmp_path, mo
             "summary": original["summary"], "adjustments": [],
         }},
     }, "run_awaiting_confirmation")
-    monkeypatch.setattr(agent_config, "_DS", object())
-    monkeypatch.setattr(SimulationAgent, "propose_revised_eq_recovery", lambda *_args, **_kwargs: {})
+    from willy.run_registry import RunStateConflict
+
+    before = (run_dir / "pending_action.json").read_bytes()
+    monkeypatch.setattr(agent_config, "_DS", None if failure == "llm_unavailable" else object())
+
+    def propose(*_args, **_kwargs):
+        if failure == "invalid_proposal":
+            return {}
+        if failure == "already_confirmed":
+            from willy.branching import control_path
+            from willy.config_store import write_json
+
+            write_json(control_path(tmp_path, "receipts", run_id, original["action_id"]), {
+                "parent_run_id": run_id, "run_id": "md__202609080002",
+            })
+        if failure == "state_changed":
+            status = registry.get_run_status(run_id, reconcile=False)
+            registry.compare_and_swap_status(
+                run_dir, expected_revision=status["state_revision"], status=status,
+                event_type="competing_control",
+            )
+        return {"adjustments": [{"field": "dt", "after": 0.00025}]}
+
+    def reject_commit(*_args, **_kwargs):
+        raise RunStateConflict("simulated competing control")
+
+    def reject_launch(*_args, **_kwargs):
+        raise frontend_api.PipelineLockConflict("simulated launch")
+
+    monkeypatch.setattr(SimulationAgent, "propose_revised_eq_recovery", propose)
+    if failure == "commit_conflict":
+        monkeypatch.setattr(RunRegistry, "compare_and_swap_status", reject_commit)
+    if failure == "launch_busy":
+        monkeypatch.setattr(frontend_api, "reserve_existing_run_launch", reject_launch)
 
     reply = frontend_api.revise_pending_action(
         original["action_id"], "把方案改为更长的保温段", run_id,
     )
 
-    assert "未通过校验：调整项格式无效：需要 adjustments 数组" in reply
-    assert frontend_api.get_pending_action(run_id)["action_id"] == original["action_id"]
+    assert "已按你的要求更新" not in reply
+    if failure == "invalid_proposal":
+        assert "未通过校验：调整项格式无效：需要 adjustments 数组" in reply
+    elif failure == "llm_unavailable":
+        assert "LLM 当前不可用" in reply
+    elif failure == "launch_busy":
+        assert "工程正在启动" in reply
+    else:
+        assert "待确认方案已更新" in reply
+    assert (run_dir / "pending_action.json").read_bytes() == before
+    if failure == "already_confirmed":
+        assert frontend_api.get_pending_action(run_id) is None
+    else:
+        assert frontend_api.get_pending_action(run_id)["action_id"] == original["action_id"]
     assert RunRegistry(tmp_path).get_run_status(run_id)["state"] == "awaiting_confirmation"
-    assert '"result": "rejected_validation"' in (run_dir / "decision_trace.jsonl").read_text()
+    if failure != "llm_unavailable":
+        assert '"result": "rejected_validation"' in (run_dir / "decision_trace.jsonl").read_text()
 
 
 def test_pipeline_launch_receipt_does_not_repeat_the_proposed_plan(tmp_path, monkeypatch):
@@ -701,12 +818,12 @@ def test_pipeline_launch_receipt_does_not_repeat_the_proposed_plan(tmp_path, mon
         def wait(self):
             return 0
 
-    class ImmediateThread:
+    class DeferredThread:
         def __init__(self, target, daemon):
             self.target = target
 
         def start(self):
-            self.target()
+            return None
 
     monkeypatch.setattr(agent_config, "ROOT", tmp_path)
     (tmp_path / "struct").mkdir()
@@ -720,7 +837,7 @@ def test_pipeline_launch_receipt_does_not_repeat_the_proposed_plan(tmp_path, mon
     monkeypatch.setattr(agent_config, "validate_config", lambda config: [])
     monkeypatch.setattr(agent_config, "apply_config", lambda config: tmp_path / "config.json")
     monkeypatch.setattr(agent_config.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
-    monkeypatch.setattr(agent_config.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(agent_config.threading, "Thread", DeferredThread)
 
     receipt = agent_config.launch_pipeline(config)
 

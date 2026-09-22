@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from willy.charge_scaling import validate_ion_charge_scale
+
 
 WORKFLOW_CONFIG_SCHEMA_VERSION = 1
 
@@ -37,6 +39,7 @@ class WorkflowConfigSchema:
     known_top_level_fields: frozenset[str] = frozenset({
         "backend", "defaults", "molecules", "residues", "md", "topology", "box",
         "ion_compensation", "non_neutral_confirmed", "execution", "error", "warnings",
+        "ion_charge_scale",
     })
     mapping_fields: frozenset[str] = frozenset({
         "defaults", "molecules", "residues", "md", "topology", "ion_compensation",
@@ -52,6 +55,11 @@ class WorkflowConfigSchema:
             )
 
         issues: list[str] = []
+        if "ion_charge_scale" in payload:
+            try:
+                validate_ion_charge_scale(payload["ion_charge_scale"])
+            except ValueError as exc:
+                issues.append(str(exc))
         for field in self.mapping_fields:
             if field in payload and not isinstance(payload[field], Mapping):
                 issues.append(f"{field} 必须是对象")

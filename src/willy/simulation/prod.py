@@ -16,6 +16,7 @@ from willy.simulation._gmx_utils import (
 )
 from willy.simulation.manifest import ManifestError
 from willy.simulation.mdp import load_mdp_config
+from willy.simulation.gmx_process import GMX_AUX_TIMEOUT_S
 from willy.step_registry import PROD_STEP
 
 
@@ -54,7 +55,7 @@ def _normal_end_time(log_path: Path) -> float | None:
 
 def _trajectory_frames(cwd: Path) -> tuple[int, str]:
     try:
-        result = run_gmx(["check", "-f", str(cwd / "prod.xtc")], cwd, timeout=60)
+        result = run_gmx(["check", "-f", str(cwd / "prod.xtc")], cwd, timeout=GMX_AUX_TIMEOUT_S)
     except Exception as exc:
         return 0, str(exc)
     if result.returncode != 0:

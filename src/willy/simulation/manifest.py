@@ -15,6 +15,7 @@ import shutil
 import subprocess
 
 from willy.simulation.protocol import canonical_json_fingerprint
+from willy.simulation.eq_acceptance import has_eq_coverage_evidence
 from willy.env_registry import require_tool
 from willy._paths import get_project_root
 from willy.run_metadata import (
@@ -423,6 +424,28 @@ def require_prior_stage(run_dir: str | Path, stage: str) -> dict[str, Any] | Non
     record = manifest.get("stages", {}).get(parent, {})
     if record.get("status") != "accepted":
         raise ManifestError(f"{stage.upper()} 只能消费已验收的 {parent.upper()}，文件存在本身不构成许可")
+    if stage == "prod" and not has_eq_coverage_evidence(record):
+        raise ManifestError("PROD 缺少有效的 EQ 最后 1 ns 五段覆盖证据，须先重新验收 EQ")
+    if stage == "prod":
+        try:
+            evidence = [record["contract"]["inputs"]["mdp"]]
+            evidence.extend(record["outputs"][name] for name in (
+                "tpr", "gro", "edr", "log", "cpt", "temperature_xvg", "potential_xvg",
+            ))
+            directory = Path(run_dir).resolve()
+            for fingerprint in evidence:
+                path = (directory / fingerprint["path"]).resolve()
+                if not path.is_relative_to(directory):
+                    raise ValueError("EQ evidence outside run")
+                from willy.step_contracts import declared_input_matches
+
+                if path.name in {"eq.gro", "eq.cpt"} and declared_input_matches(directory, 10, path):
+                    continue
+                observed = file_fingerprint(path, directory)
+                if any(observed[key] != fingerprint[key] for key in ("sha256", "size_bytes")):
+                    raise ValueError("EQ evidence changed")
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise ManifestError("PROD 的 EQ 验收证据缺失或指纹变化，须先重新验收 EQ") from exc
     return record
 
 
@@ -708,9 +731,10 @@ def has_disk_capacity(run_dir: str | Path, estimated_output_bytes: int) -> bool:
 class RunLock:
     """A non-blocking advisory lock scoped to exactly one MD run directory."""
 
-    def __init__(self, run_dir: str | Path):
+    def __init__(self, run_dir: str | Path, *, remove_artifact: bool = False):
         self.path = Path(run_dir) / LOCK_FILENAME
         self._handle = None
+        self._remove_artifact = remove_artifact and not self.path.exists()
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -731,6 +755,9 @@ class RunLock:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
             self._handle.close()
             self._handle = None
+            if self._remove_artifact:
+                self.path.unlink(missing_ok=True)
+            self._remove_artifact = False
 
     def __enter__(self) -> "RunLock":
         self.acquire()
@@ -738,6 +765,17 @@ class RunLock:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.release()
+
+
+@contextmanager
+def existing_run_lock(run_dir: str | Path):
+    """Guard a read-only admission check without creating a lock artifact."""
+    directory = Path(run_dir)
+    if not (directory / LOCK_FILENAME).exists():
+        yield
+        return
+    with RunLock(directory):
+        yield
 
 
 def request_safe_stop(run_dir: str | Path) -> Path:

@@ -182,6 +182,8 @@ def _scenario(
         "error_kind": kind.value,
         "handled": handled,
         "state": status.get("state"),
+        "expected_state": "awaiting_confirmation" if agent_kind == "eq" else "escalated",
+        "terminal_state_matches": status.get("state") == ("awaiting_confirmation" if agent_kind == "eq" else "escalated"),
         "public_error": status.get("error"),
         "public_error_event": panel.get("error_event"),
         "decision_facts": decision_facts,
@@ -206,6 +208,8 @@ def run_acceptance(project_root: str | Path) -> dict[str, object]:
                       agent_kind="simulation"),
             _scenario(isolated, "dependency", 7, "Packmol 盒子构建", ErrorKind.DEPENDENCY_MISSING),
             _scenario(isolated, "abi", 7, "Packmol 盒子构建", ErrorKind.RUNTIME_UNAVAILABLE),
+            _scenario(isolated, "packmol", 7, "Packmol 盒子构建", ErrorKind.PACKMOL_FAILED,
+                      agent_kind="simulation"),
             _scenario(isolated, "grompp", 8, "GROMACS 输入预处理", ErrorKind.GROMPP_FAILED,
                       agent_kind="simulation"),
             _scenario(isolated, "eq", 9, "GROMACS 三点式退火平衡", ErrorKind.EQUILIBRATION_FAILED,
@@ -279,7 +283,7 @@ def run_acceptance(project_root: str | Path) -> dict[str, object]:
         if result["environment"]["real_packmol"]["status"] != AVAILABLE:  # type: ignore[index]
             result["acceptance"] = "conditional"
         if not all(
-            bool(item["public_projection_redacted"] and item["private_records_redacted"]
+            bool(item["terminal_state_matches"] and item["public_projection_redacted"] and item["private_records_redacted"]
                    and item["private_decision_contract"])
             for item in scenarios
         ) or not llm_config["safe"] or llm_config["run_artifacts_created"]:

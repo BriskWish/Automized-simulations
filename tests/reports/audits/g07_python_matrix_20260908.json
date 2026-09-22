@@ -1,0 +1,1194 @@
+{
+  "schema_version": 1,
+  "gap_id": "G-07",
+  "recorded_at": "2026-09-08T15:14:43.662694+00:00",
+  "scope": "Frozen local-host source snapshot, independent Python installations, real loopback Web restarts and managed no-science resume runners; scientific/LLM failures are controlled injections, not remote-platform acceptance or coverage of later worktree changes.",
+  "complete_version_matrix": true,
+  "same_tested_snapshot": true,
+  "implementation": {
+    "app.py": "a5e0e2cb173fddf0b7e1333157786018d698e01c3109aa2ab644efe833e1ab46",
+    "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+    "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+    "src/willy/frontend_api.py": "dedb8cf2e42d7b6734ec802417034418c068c2ea0082f3dfa9d5a5dacf5d2b69",
+    "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+    "src/willy/pipeline_launch.py": "79e177eaa00e0e37e00861426c326f923fef404eb11ab0289088fd3c8c0cd881",
+    "src/willy/pipeline_orchestrator.py": "9fd8d3e69e1154164be728e2efb10aa1aad59391e529bb675ba95a969ad29c4f",
+    "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+    "tests/tools/g07_python_matrix_acceptance.py": "42b7e9ebc4e71fa08991ce26dc9c00b0a66867b54573b86316380c0d99d941fe",
+    "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+  },
+  "reporting_implementation_sha256": "2de08c93ffa4a42ba8c3152047cc2eb3febc0b47cc4750000b0ccd160ab2a474",
+  "source_changes_after_snapshot": {
+    "app.py": {
+      "tested_sha256": "a5e0e2cb173fddf0b7e1333157786018d698e01c3109aa2ab644efe833e1ab46",
+      "worktree_sha256": "499379a34909ffd7c19a8671e0777df5bcb1943b9ad4b2499b58b834938a423c"
+    },
+    "tests/tools/g07_python_matrix_acceptance.py": {
+      "tested_sha256": "42b7e9ebc4e71fa08991ce26dc9c00b0a66867b54573b86316380c0d99d941fe",
+      "worktree_sha256": "2de08c93ffa4a42ba8c3152047cc2eb3febc0b47cc4750000b0ccd160ab2a474"
+    }
+  },
+  "current_worktree_covered": false,
+  "cases": {
+    "3.10": {
+      "passed": true,
+      "g07_smoke_passed": true,
+      "checks": {
+        "pip_check": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.545,
+          "output_sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+        },
+        "compile": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.197,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 5.047,
+          "output_sha256": "373aecc16bc03d95924ad69b06c7b52f8dd455806236264dadbdd0b7ea603f16"
+        },
+        "regression": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 16.333,
+          "output_sha256": "e7d43e1ae139bf13660bda7769fe16d2ad19e3181ea921200c53f23a596d2adb",
+          "counts": {
+            "tests": 526,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 1,
+            "passed": 525
+          },
+          "failed_cases": []
+        },
+        "live_probe": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 15.186,
+          "output_sha256": "30ddeb5b448d3a48d8337bdb58747e06fb5d5a04f8f12f9fa714012ec17a65ea"
+        }
+      },
+      "probe": {
+        "python_version": "3.10.21",
+        "is_venv": true,
+        "system": "Linux",
+        "machine": "x86_64",
+        "distribution": {
+          "ID": "ubuntu",
+          "VERSION_ID": "24.04"
+        },
+        "runtime": {
+          "ready": true,
+          "python_version": "3.10.21",
+          "supported_python": "3.10--3.12",
+          "dependencies": [
+            {
+              "name": "Willy",
+              "status": "available"
+            },
+            {
+              "name": "cryptography",
+              "status": "available"
+            },
+            {
+              "name": "fastapi",
+              "status": "available"
+            },
+            {
+              "name": "httpx",
+              "status": "available"
+            },
+            {
+              "name": "openai",
+              "status": "available"
+            },
+            {
+              "name": "py3Dmol",
+              "status": "available"
+            },
+            {
+              "name": "scikit-learn",
+              "status": "available"
+            },
+            {
+              "name": "uvicorn",
+              "status": "available"
+            }
+          ],
+          "error": ""
+        },
+        "dependencies": {
+          "willy": "0.6.0",
+          "cryptography": "50.0.1",
+          "fastapi": "0.141.1",
+          "httpx": "0.28.1",
+          "openai": "3.8.0",
+          "py3Dmol": "2.5.5",
+          "scikit-learn": "1.7.2",
+          "uvicorn": "0.52.4",
+          "pytest": "9.1.1"
+        },
+        "missing_dependencies": {
+          "passed": true,
+          "returncode": 1,
+          "public_guidance_sha256": "f7a6151aacf53cdd18acbfa65720216290b4957cf4ba7fa25dd5f9e42d091684"
+        },
+        "error_matrix": {
+          "schema_version": 1,
+          "acceptance": "passed",
+          "scope": "local WSL bounded G-07/T-07 error matrix",
+          "environment": {
+            "system": "Linux",
+            "release": "6.18.33.2-microsoft-standard-WSL2",
+            "machine": "x86_64",
+            "distribution": {
+              "ID": "ubuntu",
+              "VERSION_ID": "24.04"
+            },
+            "real_packmol": {
+              "status": "available",
+              "classification": "started",
+              "started": true,
+              "returncode": 174
+            },
+            "abi_injection": {
+              "status": "runtime_unavailable",
+              "classification": "loader_failure",
+              "runtime_unavailable": true,
+              "public_reason": "Packmol 与当前系统运行库不兼容"
+            },
+            "dependency_injection": {
+              "status": "missing",
+              "missing": true
+            }
+          },
+          "scenarios": [
+            {
+              "name": "input",
+              "step": 7,
+              "error_kind": "input_contract",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+              "public_error_event": {
+                "event_id": "md_g07_input:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_input",
+                  "step": 7,
+                  "error_kind": "input_contract"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "dependency",
+              "step": 7,
+              "error_kind": "dependency_missing",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+              "public_error_event": {
+                "event_id": "md_g07_dependency:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_dependency",
+                  "step": 7,
+                  "error_kind": "dependency_missing"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "abi",
+              "step": 7,
+              "error_kind": "runtime_unavailable",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+              "public_error_event": {
+                "event_id": "md_g07_abi:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_abi",
+                  "step": 7,
+                  "error_kind": "runtime_unavailable"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "packmol",
+              "step": 7,
+              "error_kind": "packmol_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败",
+              "public_error_event": {
+                "event_id": "md_g07_packmol:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_packmol\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_packmol",
+                  "step": 7,
+                  "error_kind": "packmol_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "grompp",
+              "step": 8,
+              "error_kind": "grompp_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+              "public_error_event": {
+                "event_id": "md_g07_grompp:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_grompp",
+                  "step": 8,
+                  "error_kind": "grompp_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "eq",
+              "step": 9,
+              "error_kind": "equilibration_failed",
+              "handled": false,
+              "state": "awaiting_confirmation",
+              "expected_state": "awaiting_confirmation",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+              "public_error_event": {
+                "event_id": "md_g07_eq:error:5",
+                "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n当前未修改配置，未启动重跑。可原参数续跑；如有调整方案，可修改后确认创建独立分支。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_eq",
+                  "step": 9,
+                  "error_kind": "equilibration_failed"
+                }
+              ],
+              "event_count": 7,
+              "structured_event_count": 7,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "prod",
+              "step": 10,
+              "error_kind": "mdrun_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+              "public_error_event": {
+                "event_id": "md_g07_prod:error:8",
+                "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_prod",
+                  "step": 10,
+                  "error_kind": "mdrun_failed"
+                }
+              ],
+              "event_count": 11,
+              "structured_event_count": 11,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            }
+          ],
+          "llm_configuration_error": {
+            "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+            "safe": true,
+            "run_artifacts_created": false
+          }
+        },
+        "web_restart_resume": {
+          "passed": true,
+          "sessions": [
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.10.21",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            },
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.10.21",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            }
+          ],
+          "distinct_web_processes": true,
+          "path_fallback_used": false,
+          "runner": "no-science controlled process with real launch gate and lock adoption"
+        },
+        "passed": true
+      },
+      "tested_implementation": {
+        "app.py": "a5e0e2cb173fddf0b7e1333157786018d698e01c3109aa2ab644efe833e1ab46",
+        "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+        "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+        "src/willy/frontend_api.py": "dedb8cf2e42d7b6734ec802417034418c068c2ea0082f3dfa9d5a5dacf5d2b69",
+        "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+        "src/willy/pipeline_launch.py": "79e177eaa00e0e37e00861426c326f923fef404eb11ab0289088fd3c8c0cd881",
+        "src/willy/pipeline_orchestrator.py": "9fd8d3e69e1154164be728e2efb10aa1aad59391e529bb675ba95a969ad29c4f",
+        "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+        "tests/tools/g07_python_matrix_acceptance.py": "42b7e9ebc4e71fa08991ce26dc9c00b0a66867b54573b86316380c0d99d941fe",
+        "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+      },
+      "tested_implementation_matches_source": false,
+      "tested_snapshot_unchanged": true
+    },
+    "3.11": {
+      "passed": true,
+      "g07_smoke_passed": true,
+      "checks": {
+        "pip_check": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.578,
+          "output_sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+        },
+        "compile": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.212,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 5.335,
+          "output_sha256": "0d5c05838cc7c73edd27415b0573e1ceb10b37bfce7d3c0ed7c2ef205291b046"
+        },
+        "regression": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 17.069,
+          "output_sha256": "ac43d7f7666106f522100f0749fb6e5fdf4c780feb9df184235c0d4a7cbfa304",
+          "counts": {
+            "tests": 526,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 1,
+            "passed": 525
+          },
+          "failed_cases": []
+        },
+        "live_probe": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 17.158,
+          "output_sha256": "b72ffa48a5eb2b44e394400ae36425279a57a5b1a4152d49c15b298d98bc56a1"
+        }
+      },
+      "probe": {
+        "python_version": "3.11.16",
+        "is_venv": true,
+        "system": "Linux",
+        "machine": "x86_64",
+        "distribution": {
+          "ID": "ubuntu",
+          "VERSION_ID": "24.04"
+        },
+        "runtime": {
+          "ready": true,
+          "python_version": "3.11.16",
+          "supported_python": "3.10--3.12",
+          "dependencies": [
+            {
+              "name": "Willy",
+              "status": "available"
+            },
+            {
+              "name": "cryptography",
+              "status": "available"
+            },
+            {
+              "name": "fastapi",
+              "status": "available"
+            },
+            {
+              "name": "httpx",
+              "status": "available"
+            },
+            {
+              "name": "openai",
+              "status": "available"
+            },
+            {
+              "name": "py3Dmol",
+              "status": "available"
+            },
+            {
+              "name": "scikit-learn",
+              "status": "available"
+            },
+            {
+              "name": "uvicorn",
+              "status": "available"
+            }
+          ],
+          "error": ""
+        },
+        "dependencies": {
+          "willy": "0.6.0",
+          "cryptography": "50.0.1",
+          "fastapi": "0.141.1",
+          "httpx": "0.28.1",
+          "openai": "3.8.0",
+          "py3Dmol": "2.5.5",
+          "scikit-learn": "1.9.0",
+          "uvicorn": "0.52.4",
+          "pytest": "9.1.1"
+        },
+        "missing_dependencies": {
+          "passed": true,
+          "returncode": 1,
+          "public_guidance_sha256": "f7a6151aacf53cdd18acbfa65720216290b4957cf4ba7fa25dd5f9e42d091684"
+        },
+        "error_matrix": {
+          "schema_version": 1,
+          "acceptance": "passed",
+          "scope": "local WSL bounded G-07/T-07 error matrix",
+          "environment": {
+            "system": "Linux",
+            "release": "6.18.33.2-microsoft-standard-WSL2",
+            "machine": "x86_64",
+            "distribution": {
+              "ID": "ubuntu",
+              "VERSION_ID": "24.04"
+            },
+            "real_packmol": {
+              "status": "available",
+              "classification": "started",
+              "started": true,
+              "returncode": 174
+            },
+            "abi_injection": {
+              "status": "runtime_unavailable",
+              "classification": "loader_failure",
+              "runtime_unavailable": true,
+              "public_reason": "Packmol 与当前系统运行库不兼容"
+            },
+            "dependency_injection": {
+              "status": "missing",
+              "missing": true
+            }
+          },
+          "scenarios": [
+            {
+              "name": "input",
+              "step": 7,
+              "error_kind": "input_contract",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+              "public_error_event": {
+                "event_id": "md_g07_input:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_input",
+                  "step": 7,
+                  "error_kind": "input_contract"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "dependency",
+              "step": 7,
+              "error_kind": "dependency_missing",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+              "public_error_event": {
+                "event_id": "md_g07_dependency:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_dependency",
+                  "step": 7,
+                  "error_kind": "dependency_missing"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "abi",
+              "step": 7,
+              "error_kind": "runtime_unavailable",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+              "public_error_event": {
+                "event_id": "md_g07_abi:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_abi",
+                  "step": 7,
+                  "error_kind": "runtime_unavailable"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "packmol",
+              "step": 7,
+              "error_kind": "packmol_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败",
+              "public_error_event": {
+                "event_id": "md_g07_packmol:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_packmol\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_packmol",
+                  "step": 7,
+                  "error_kind": "packmol_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "grompp",
+              "step": 8,
+              "error_kind": "grompp_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+              "public_error_event": {
+                "event_id": "md_g07_grompp:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_grompp",
+                  "step": 8,
+                  "error_kind": "grompp_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "eq",
+              "step": 9,
+              "error_kind": "equilibration_failed",
+              "handled": false,
+              "state": "awaiting_confirmation",
+              "expected_state": "awaiting_confirmation",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+              "public_error_event": {
+                "event_id": "md_g07_eq:error:5",
+                "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n当前未修改配置，未启动重跑。可原参数续跑；如有调整方案，可修改后确认创建独立分支。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_eq",
+                  "step": 9,
+                  "error_kind": "equilibration_failed"
+                }
+              ],
+              "event_count": 7,
+              "structured_event_count": 7,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "prod",
+              "step": 10,
+              "error_kind": "mdrun_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+              "public_error_event": {
+                "event_id": "md_g07_prod:error:8",
+                "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_prod",
+                  "step": 10,
+                  "error_kind": "mdrun_failed"
+                }
+              ],
+              "event_count": 11,
+              "structured_event_count": 11,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            }
+          ],
+          "llm_configuration_error": {
+            "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+            "safe": true,
+            "run_artifacts_created": false
+          }
+        },
+        "web_restart_resume": {
+          "passed": true,
+          "sessions": [
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.11.16",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            },
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.11.16",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            }
+          ],
+          "distinct_web_processes": true,
+          "path_fallback_used": false,
+          "runner": "no-science controlled process with real launch gate and lock adoption"
+        },
+        "passed": true
+      },
+      "tested_implementation": {
+        "app.py": "a5e0e2cb173fddf0b7e1333157786018d698e01c3109aa2ab644efe833e1ab46",
+        "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+        "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+        "src/willy/frontend_api.py": "dedb8cf2e42d7b6734ec802417034418c068c2ea0082f3dfa9d5a5dacf5d2b69",
+        "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+        "src/willy/pipeline_launch.py": "79e177eaa00e0e37e00861426c326f923fef404eb11ab0289088fd3c8c0cd881",
+        "src/willy/pipeline_orchestrator.py": "9fd8d3e69e1154164be728e2efb10aa1aad59391e529bb675ba95a969ad29c4f",
+        "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+        "tests/tools/g07_python_matrix_acceptance.py": "42b7e9ebc4e71fa08991ce26dc9c00b0a66867b54573b86316380c0d99d941fe",
+        "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+      },
+      "tested_implementation_matches_source": false,
+      "tested_snapshot_unchanged": true
+    },
+    "3.12": {
+      "passed": true,
+      "g07_smoke_passed": true,
+      "checks": {
+        "pip_check": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.31,
+          "output_sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+        },
+        "compile": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 0.232,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 5.674,
+          "output_sha256": "9aac0ecfec278c9b2e38e9789836d2278d2d7452b44f554a741b473f1e14bc26"
+        },
+        "regression": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 18.01,
+          "output_sha256": "97368663c80ae8140c8739e4b53b758cbedabe4a3ec49e315d4c565732c079ce",
+          "counts": {
+            "tests": 526,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 1,
+            "passed": 525
+          },
+          "failed_cases": []
+        },
+        "live_probe": {
+          "passed": true,
+          "returncode": 0,
+          "duration_s": 19.16,
+          "output_sha256": "f446ba647a4839343d4d6806a1ad91c805e002f776626d3f62b3847e90dc0e2e"
+        }
+      },
+      "probe": {
+        "python_version": "3.12.14",
+        "is_venv": true,
+        "system": "Linux",
+        "machine": "x86_64",
+        "distribution": {
+          "ID": "ubuntu",
+          "VERSION_ID": "24.04"
+        },
+        "runtime": {
+          "ready": true,
+          "python_version": "3.12.14",
+          "supported_python": "3.10--3.12",
+          "dependencies": [
+            {
+              "name": "Willy",
+              "status": "available"
+            },
+            {
+              "name": "cryptography",
+              "status": "available"
+            },
+            {
+              "name": "fastapi",
+              "status": "available"
+            },
+            {
+              "name": "httpx",
+              "status": "available"
+            },
+            {
+              "name": "openai",
+              "status": "available"
+            },
+            {
+              "name": "py3Dmol",
+              "status": "available"
+            },
+            {
+              "name": "scikit-learn",
+              "status": "available"
+            },
+            {
+              "name": "uvicorn",
+              "status": "available"
+            }
+          ],
+          "error": ""
+        },
+        "dependencies": {
+          "willy": "0.6.0",
+          "cryptography": "50.0.1",
+          "fastapi": "0.141.1",
+          "httpx": "0.28.1",
+          "openai": "3.8.0",
+          "py3Dmol": "2.5.5",
+          "scikit-learn": "1.9.0",
+          "uvicorn": "0.52.4",
+          "pytest": "9.1.1"
+        },
+        "missing_dependencies": {
+          "passed": true,
+          "returncode": 1,
+          "public_guidance_sha256": "f7a6151aacf53cdd18acbfa65720216290b4957cf4ba7fa25dd5f9e42d091684"
+        },
+        "error_matrix": {
+          "schema_version": 1,
+          "acceptance": "passed",
+          "scope": "local WSL bounded G-07/T-07 error matrix",
+          "environment": {
+            "system": "Linux",
+            "release": "6.18.33.2-microsoft-standard-WSL2",
+            "machine": "x86_64",
+            "distribution": {
+              "ID": "ubuntu",
+              "VERSION_ID": "24.04"
+            },
+            "real_packmol": {
+              "status": "available",
+              "classification": "started",
+              "started": true,
+              "returncode": 174
+            },
+            "abi_injection": {
+              "status": "runtime_unavailable",
+              "classification": "loader_failure",
+              "runtime_unavailable": true,
+              "public_reason": "Packmol 与当前系统运行库不兼容"
+            },
+            "dependency_injection": {
+              "status": "missing",
+              "missing": true
+            }
+          },
+          "scenarios": [
+            {
+              "name": "input",
+              "step": 7,
+              "error_kind": "input_contract",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足",
+              "public_error_event": {
+                "event_id": "md_g07_input:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_input\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：模拟输入契约不满足\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_input",
+                  "step": 7,
+                  "error_kind": "input_contract"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "dependency",
+              "step": 7,
+              "error_kind": "dependency_missing",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用",
+              "public_error_event": {
+                "event_id": "md_g07_dependency:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_dependency\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行依赖不可用\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_dependency",
+                  "step": 7,
+                  "error_kind": "dependency_missing"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "abi",
+              "step": 7,
+              "error_kind": "runtime_unavailable",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容",
+              "public_error_event": {
+                "event_id": "md_g07_abi:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_abi\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：运行环境不兼容\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：当前系统无法启动所需运行工具。自动调整模拟参数不能解决此问题；请安装或重新编译与当前系统兼容的运行工具后重新提交。\n处理记录：检测到运行环境不可用，未执行自动参数修复"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_abi",
+                  "step": 7,
+                  "error_kind": "runtime_unavailable"
+                }
+              ],
+              "event_count": 9,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "packmol",
+              "step": 7,
+              "error_kind": "packmol_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败",
+              "public_error_event": {
+                "event_id": "md_g07_packmol:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_packmol\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>Packmol 初始盒子构建失败：当前体系\n原因：Packmol 建盒执行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_packmol",
+                  "step": 7,
+                  "error_kind": "packmol_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "grompp",
+              "step": 8,
+              "error_kind": "grompp_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败",
+              "public_error_event": {
+                "event_id": "md_g07_grompp:error:7",
+                "content": "#### 工程错误 · 运行 md_g07_grompp\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 输入预处理失败：em\n原因：GROMACS 输入预处理失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：simulation 层未执行受控修复动作即升级。流水线在此步骤停止，MD 模拟不会继续执行。建议：检查运行环境、LLM 服务或输入契约后重新运行。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_grompp",
+                  "step": 8,
+                  "error_kind": "grompp_failed"
+                }
+              ],
+              "event_count": 10,
+              "structured_event_count": 10,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "eq",
+              "step": 9,
+              "error_kind": "equilibration_failed",
+              "handled": false,
+              "state": "awaiting_confirmation",
+              "expected_state": "awaiting_confirmation",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：eq\n原因：平衡验收未通过",
+              "public_error_event": {
+                "event_id": "md_g07_eq:error:5",
+                "content": "#### 工程错误 · 运行 md_g07_eq\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：eq\n原因：平衡验收未通过\n\n当前未修改配置，未启动重跑。可原参数续跑；如有调整方案，可修改后确认创建独立分支。"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_eq",
+                  "step": 9,
+                  "error_kind": "equilibration_failed"
+                }
+              ],
+              "event_count": 7,
+              "structured_event_count": 7,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            },
+            {
+              "name": "prod",
+              "step": 10,
+              "error_kind": "mdrun_failed",
+              "handled": false,
+              "state": "escalated",
+              "expected_state": "escalated",
+              "terminal_state_matches": true,
+              "public_error": "GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败",
+              "public_error_event": {
+                "event_id": "md_g07_prod:error:8",
+                "content": "#### 工程错误 · 运行 md_g07_prod\n<span class=\"pipeline-status-indicator pipeline-status-indicator--error\" aria-hidden=\"true\">×</span>GROMACS 运行模拟失败：prod\n原因：GROMACS 模拟运行失败\n\n自动处理未完成，当前工程未继续执行。可原参数续跑，或用 /fork 调参创建独立分支。\n\n自动修复：未执行参数调整\n处理建议：本次修复需要修改模拟协议。当前运行未改写，请审阅新的方案并由用户确认后重新启动。\n处理记录：检测到模拟协议变更请求，已升级为用户确认"
+              },
+              "decision_facts": [
+                {
+                  "run_id": "md_g07_prod",
+                  "step": 10,
+                  "error_kind": "mdrun_failed"
+                }
+              ],
+              "event_count": 11,
+              "structured_event_count": 11,
+              "public_projection_redacted": true,
+              "private_records_redacted": true,
+              "private_decision_contract": true
+            }
+          ],
+          "llm_configuration_error": {
+            "public_message": "LLM 配置无效：API Key 不能为空且不能包含换行。",
+            "safe": true,
+            "run_artifacts_created": false
+          }
+        },
+        "web_restart_resume": {
+          "passed": true,
+          "sessions": [
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.12.14",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            },
+            {
+              "healthy": true,
+              "same_web_interpreter": true,
+              "resume_accepted": true,
+              "resume": {
+                "python_version": "3.12.14",
+                "is_venv": true,
+                "same_interpreter": true,
+                "same_prefix": true,
+                "resume_step": 8,
+                "launch_lock_adopted": true
+              },
+              "public_reply_redacted": true
+            }
+          ],
+          "distinct_web_processes": true,
+          "path_fallback_used": false,
+          "runner": "no-science controlled process with real launch gate and lock adoption"
+        },
+        "passed": true
+      },
+      "tested_implementation": {
+        "app.py": "a5e0e2cb173fddf0b7e1333157786018d698e01c3109aa2ab644efe833e1ab46",
+        "pyproject.toml": "42894ceefaff47533d7c170af4ac7d33ce52184109bf5fe40fa881ca0ce5eee8",
+        "src/willy/python_runtime.py": "c8536d65f89bd59e1f6344a2fced029487b258bd4d496d94ef77c73adeb53c96",
+        "src/willy/frontend_api.py": "dedb8cf2e42d7b6734ec802417034418c068c2ea0082f3dfa9d5a5dacf5d2b69",
+        "src/willy/controlled_launch.py": "7b43a866d5fe110e715e100dfa30a6cea81960b40bdb5ff1a8870fd1b2e35d1a",
+        "src/willy/pipeline_launch.py": "79e177eaa00e0e37e00861426c326f923fef404eb11ab0289088fd3c8c0cd881",
+        "src/willy/pipeline_orchestrator.py": "9fd8d3e69e1154164be728e2efb10aa1aad59391e529bb675ba95a969ad29c4f",
+        "tests/tools/g07_local_wsl_acceptance.py": "b4f12c5a25deecaeaed59051ab65533bfb63c2ed5ee0234d97dfea506132c949",
+        "tests/tools/g07_python_matrix_acceptance.py": "42b7e9ebc4e71fa08991ce26dc9c00b0a66867b54573b86316380c0d99d941fe",
+        "tests/tools/g07_python_runtime_probe.py": "01e852ed8c291eef29c7b9af0f1789937696d545b494617943e1c06f0d288c3e"
+      },
+      "tested_implementation_matches_source": false,
+      "tested_snapshot_unchanged": true
+    }
+  },
+  "passed": true,
+  "g07_smoke_passed": true,
+  "isolation": {
+    "source_runs_copied": false,
+    "source_config_copied": false,
+    "source_dotenv_copied": false,
+    "source_python_environment_modified": false
+  },
+  "execution_recorded_at": "2026-09-08T15:08:26.652869+00:00",
+  "reporting_regression": {
+    "3.10": {
+      "passed": 3
+    },
+    "3.11": {
+      "passed": 3
+    },
+    "3.12": {
+      "passed": 3
+    }
+  }
+}

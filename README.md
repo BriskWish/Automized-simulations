@@ -2,13 +2,24 @@
 
 用自然语言描述化学体系，AI Agent 自动完成从量子化学计算、建盒到 GROMACS EM/EQ/PROD 的 MD 流程。
 
-> **0.6.0 前端工作台更新**：采用 assistant-ui 工作台，按工程保留方案、运行和审计上下文，提供本地任务、方案助理、运行助理、可视化与日志视图。
+> **0.7.0 隐式溶剂与工作台更新**：Gaussian 方案支持内置及人工登记的 SMD 隐式溶剂；工作台新增隐式溶剂查询/登记、分子库浏览与上传入口，并优化长名称工具按钮的响应式布局。
 
-> 当前公开能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理支持受控 `/resume`、`/fork`、`/switch` 与按工程保存的对话记录；CPU 资源预检会规范化 `nproc`。远程执行与托管网关不属于当前产品入口。
+> 当前公开能力为本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理支持原工程原参数 `/resume`、完整上下文独立分支 `/fork`、LLM 决定范围的新输入声明 `/inputs` 和 `/switch`；每步校验输入哈希，重做产物先归档到 `old/`。确认报错后的新参数方案也创建分支，不覆盖父工程。CPU 资源预检会规范化 `nproc`。远程执行与托管网关不属于当前产品入口。
+
+报错和手动暂停均可选择“原参数续跑”，不依赖 LLM 建议；修改建议后，确认按钮绑定最新方案，仅确认时创建独立分支。八种运行状态保持不变，见 [状态流转简图](docs/run_assistant.md#状态图)。
+
+Gaussian 方案支持 [SMD 溶剂库](docs/quantum.md#gaussian-smd-溶剂)：184 个内置条目与独立人工库，
+可在方案页“溶剂库”查询、登记 `epsilon/epsinf`，或向方案助理直接提交参数。
+优化与单点按分子共享冻结的溶剂设置，默认统一应用到所有选中分子，并展示原 SCRF 覆盖情况。
+人工二参数采用经本机 G16 验证的 `Generic,Read` 介电近似；不宣称完整 SMD 参数化。ORCA 当前不支持 SMD。
+
+故障及停止失败会记录发生步骤和控制环节；人工处理后刷新，Willy 重新检查处理结果，通过后自动回到“已中止”，不自动续跑。无法自动验证的处理提供版本绑定的“已完成人工处理，复查”入口。
 
 > 当前公开主流程为 10 步：体系准备后执行 GROMACS EM、三点式退火 EQ 和生产模拟。每个 MD 阶段至少登记 `.tpr`、`.gro`、`.xtc`、`.edr`；任一前置阶段未验收都不会进入 PROD。成熟方案必须在目标机以受支持 profile 完成十步，并通过受控 LLM 错误处理验收。
 
 本版本以“受支持 profile 完成十步、最终状态无错误且产物契约通过”为成熟方案标准。G09 仅保留接口并在方案助理欢迎气泡提示未经可靠全链路验证；科学体系预测和后处理/分析不属于本版本公开能力。
+
+EQ 验收检查最终目标保温段最后 1 ns 的五段 0.2 ns 完整覆盖，拒绝缺段、提前结束、乱序、重复时间以及配置、能量序列和统计计算中的 `NaN`、`+Inf`、`-Inf`。五段均值用于审计，稳定性仍以完整窗口原始样本判定；缺少新验收证据的旧许可不能直接进入 PROD。详见 [`docs/simulation.md`](docs/simulation.md)。
 
 > **发行边界**：本项目唯一支持的交付形态是 GitHub 上的完整源码检出后进行可编辑安装，不发布 wheel、PyPI 包、独立二进制安装包或受控 staging 作为可运行产品。`vendor/` 中的第三方文件不因 Willy 的公开源码使用条款而获得授权；使用者必须遵守各上游项目的许可、下载和再分发条件。受控 staging 只用于文件与许可审计，不是可运行发行物。
 
@@ -57,7 +68,7 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 
 | 依赖 | 当前项目版本基线 | 用途 | 获取方式与许可状态 |
 |------|------|------|------|
-| Python | 3.10--3.12 | 运行环境 | 系统、conda/mamba 或受控环境提供；系统 Python 3.8 不受支持 |
+| Python | >=3.10,<3.13 | Web 与流水线运行环境 | 系统、venv、conda/mamba 或受控环境均可；不绑定 Anaconda 或 Python 3.11，系统 Python 3.8 不受支持 |
 | Node.js | 项目私有 Node 22.16.0（或自定版本） | 构建 React 前端 | `scripts/bootstrap.py` 下载到 `.willy/toolchains/` 并在该项目内运行 `npm ci && npm run build`；运行时由 `app.py` 提供已构建静态资源 |
 | Gaussian 16 | 合法安装，Revision 不自动探测 | 默认量子化学后端 | 用户自行安装；Gaussian 的签署许可软件，不随 Willy 提供或再分发 |
 | Gaussian 09 | 合法安装，Revision 不自动探测 | 保留后端接口 | 用户自行安装；同样属于 Gaussian 许可软件，且本版本不作可靠全链路验收 |
@@ -74,7 +85,7 @@ OpenAI-compatible LLM  →  config.json  →  run_pipeline.py (10 步)
 
 > 完整源码检出当前含 Packmol、Sobtop、Multiwfn 与精简 Open Babel 运行负载；上游入口分别为 Packmol、[Sobtop](http://sobereva.com/soft/sobtop/)、Multiwfn、[Open Babel](https://openbabel.org/) 和 [3Dmol.js](https://3dmol.org/)。这些第三方内容不属于 Willy 作者声明拥有权利的内容，也不构成向使用者授予的第三方授权；受控 staging 仍按 `vendor/manifest.json` 排除未纳入发行工件的负载。Multiwfn 不需要外部安装或 PATH 配置；OPLS-AA 的 LigParGen/BOSS 链路仍需要用户另行安装 LigParGen、BOSS、含格式插件和数据文件的完整 Open Babel，以及 C shell。
 
-> OPLS-AA 仅能作为与 Sobtop/GAFF 隔离的显式参数化路径。中性有机小分子的 LigParGen/BOSS 参数化、ITP 命名空间、GRO 五列残基字段、Packmol 以及 GROMACS EM/EQ/PROD 已有真实证据；对于单一 Ewald 净电荷 warning，只有总电荷绝对值不超过 `0.15e` 时才按受控规则放行，其他 warning 或更大不平衡仍拒绝。Li+、NO3-、TFSI- 等离子或不含 H 组分不由当前 LigParGen 路径支持，必须提供可验证的外部 OPLS 参数，且不得与 Sobtop 产物混用。
+> OPLS-AA 仅能作为与 Sobtop/GAFF 隔离的显式参数化路径。中性有机小分子的 LigParGen/BOSS 参数化、ITP 命名空间、GRO 五列残基字段、Packmol 以及 GROMACS EM/EQ/PROD 已有真实证据；对于 `grompp` 的单一 Ewald 净电荷 warning，只有总电荷绝对值不超过 `0.15 e`（含正负边界）时才按受控规则放行，其他 warning 或更大不平衡仍拒绝。这是参数化电荷的累计舍入容差，不替代配置阶段对原始输入净电荷的审计；未明确补偿或非中性策略时，配置电荷不平衡仍阻塞。Li+、NO3-、TFSI- 等离子或不含 H 组分不由当前 LigParGen 路径支持，必须提供可验证的外部 OPLS 参数，且不得与 Sobtop 产物混用。
 
 ### 下载与安装
 
@@ -84,6 +95,13 @@ cd Willy
 python3.11 scripts/bootstrap.py
 .venv/bin/python app.py
 ```
+
+示例中的 `python3.11` 可以替换为任意受支持的 Python 3.10--3.12。Web 不要求 Anaconda：
+`app.py` 会先检查当前 Python 版本、本地依赖导入以及同一解释器子进程能否导入当前源码检出的 Willy，
+再加载工作台。不支持的版本、未安装的依赖或不可用的导入会给出环境修复提示，不会自动安装软件或切换解释器。
+需要先检查而不启动 Web 时，运行 `.venv/bin/python app.py --check-runtime`；未安装工程前也可运行
+`python3 src/willy/python_runtime.py` 获取检查结果。依赖版本由可编辑安装按 `pyproject.toml` 解析，
+导入探针不替代安装后的 `pip check` 或真实科学流程验收。
 
 引导脚本只在当前源码检出中创建 `.venv/`、`.willy/`、`frontend/node_modules/` 和
 `frontend/dist/`：Python 依赖通过 `.venv` 可编辑安装，Node 22 运行时、npm 缓存和 pip 缓存均位于
@@ -123,7 +141,7 @@ cp .env.example .env
 ### 命令行检查环境
 
 ```bash
-python3 -m willy.env_checker
+.venv/bin/python -m willy.env_checker
 ```
 
 该命令列出逐模块的严格执行依赖；它不写入配置。日常首次部署优先使用配置页的“预检运行依赖”。
@@ -131,9 +149,12 @@ python3 -m willy.env_checker
 ### 启动
 
 ```bash
-python3 app.py
+.venv/bin/python app.py
 # 浏览器打开 http://localhost:7860
 ```
+
+普通启动、确认调参重跑、`/resume` 和 `/fork` 统一沿用启动 Web 的 Python 解释器，不再通过 PATH
+重新寻找 `python3`。不必为此激活 conda 或修改系统 Python；科学软件仍由各自的 `WILLY_*` 配置解析。
 
 在聊天框输入模拟需求，例如：
 

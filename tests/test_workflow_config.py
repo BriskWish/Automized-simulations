@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,19 @@ from willy.workflow_config import (
 )
 from willy.config_schema import WORKFLOW_CONFIG_SCHEMA_VERSION, validate_config_schema
 from willy.simulation.protocol import default_md_config
+
+
+@pytest.fixture
+def tmp_project_root(tmp_project_root):
+    from willy.quantum import smd_solvents
+
+    published_root = Path(smd_solvents.__file__).resolve().parents[3]
+    catalog = tmp_project_root / "struct" / "smd_solvents"
+    catalog.mkdir()
+    builtin = published_root / "struct" / "smd_solvents" / "gaussian_builtin.json"
+    (catalog / "gaussian_builtin.json").write_bytes(builtin.read_bytes())
+    (catalog / "gaussian_manual.json").write_text('{"solvents": {}}', encoding="utf-8")
+    return tmp_project_root
 
 
 def _config(md=None, *, charge=0, count=1):
@@ -376,6 +390,24 @@ def test_apply_config_writes_v2_snapshot(tmp_project_root, monkeypatch):
     saved = json.loads(result.read_text())
     assert saved["md"]["schema_version"] == 2
     assert "eq_ns" not in saved["md"]
+    assert saved["molecules"]["A"]["solvent"].casefold() == "acetone"
+    assert saved["molecules"]["A"]["solvent_ref"]["source"] == "builtin"
+
+
+def test_unknown_solvent_is_not_accepted_by_isolated_workflow_fixture(tmp_project_root, monkeypatch):
+    import willy.workflow_config as workflow_config
+
+    path = tmp_project_root / "config.json"
+    monkeypatch.setattr(workflow_config, "CONFIG_PATH", path)
+    original = path.read_bytes()
+    config = _config()
+    config["molecules"]["A"]["solvent"] = "UnregisteredSolvent"
+
+    with pytest.raises(ValueError, match="未在 Gaussian 溶剂库中登记"):
+        apply_config(config)
+
+    assert path.read_bytes() == original
+    assert not path.with_suffix(".json.bak").exists()
 
 
 def test_apply_config_replaces_active_file_only_after_atomic_backup(tmp_project_root, monkeypatch):

@@ -22,6 +22,8 @@ config.json.bak
 vendor/sobtop/.willy-sobtop.lock
 docs/.*.lock
 struct/.*.lock
+struct/smd_solvents/.*.lock
+tests/reports/audits/.*.lock
 struct/.willy_uploaded_structures.json
 prompt.txt
 

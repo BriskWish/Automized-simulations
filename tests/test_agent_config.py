@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
+import json
 
 import willy.agent_config as agent_config
 
@@ -151,8 +152,10 @@ def test_start_pipeline_rejects_validation_issues_before_reserving_a_run(monkeyp
 
 def test_start_pipeline_clamps_explicit_cpu_request_and_returns_warning(tmp_path, monkeypatch):
     import willy.execution_resources as resources
+    import sys
 
     applied = []
+    spawned = []
     reservation = SimpleNamespace(
         run_dir=tmp_path / "md_run" / "md__202608150001",
         fd=7,
@@ -171,7 +174,10 @@ def test_start_pipeline_clamps_explicit_cpu_request_and_returns_warning(tmp_path
     monkeypatch.setattr(agent_config, "validate_config", lambda _config: [])
     monkeypatch.setattr(agent_config, "reserve_pipeline_launch", lambda _root: reservation)
     monkeypatch.setattr(agent_config, "apply_config", lambda config: applied.append(config))
-    monkeypatch.setattr(agent_config.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        agent_config.subprocess, "Popen",
+        lambda command, **kwargs: spawned.append((command, kwargs)) or process,
+    )
     monkeypatch.setattr(agent_config, "cleanup_finished_launch", lambda *_args: None)
     monkeypatch.setattr(
         agent_config.threading,
@@ -187,6 +193,9 @@ def test_start_pipeline_clamps_explicit_cpu_request_and_returns_warning(tmp_path
     })
 
     assert receipt.state == "started"
+    assert spawned[0][0][:3] == [sys.executable, str(tmp_path / "run_pipeline.py"), "g16"]
+    assert spawned[0][1]["pass_fds"][0] == 7
+    assert len(spawned[0][1]["pass_fds"]) == 2
     assert applied[0]["defaults"]["nproc"] == 2
     assert applied[0]["molecules"]["Li"]["nproc"] == 2
     assert "资源提示" in receipt.message
@@ -621,8 +630,28 @@ def test_summary_uses_mass_density_default_prompt():
         "box": {"target_mass_density_g_cm3": 0.7},
     })
 
-    assert "初始体积将由使用默认0.7g/cm3的密度猜测" in summary
-    assert "分子数密度" not in summary
+    marker = next(line for line in summary.splitlines() if line.startswith("[[WILLY_PLAN_DATA:"))
+    payload = json.loads(marker.removeprefix("[[WILLY_PLAN_DATA:").removesuffix("]]"))
+    assert payload["environment"]["initial_density"] == "0.70 g/cm3"
+
+
+def test_summary_exposes_the_configured_optimization_level_in_structure_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_config, "ROOT", tmp_path)
+    summary = agent_config.summarize({
+        "residues": {"Li": 2},
+        "molecules": {"Li": {"charge": 1, "basis": "b3lyp/6-311+g(d,p)"}},
+        "md": {"eq": {"target_temperature": 298, "segments_ns": {}}, "prod": {"duration_ns": 2}},
+    })
+
+    marker = next(line for line in summary.splitlines() if line.startswith("[[WILLY_PLAN_DATA:"))
+    payload = json.loads(marker.removeprefix("[[WILLY_PLAN_DATA:").removesuffix("]]"))
+
+    assert payload["structure"] == [{
+        "name": "Li", "count": 2,
+        "optimization_level": "b3lyp/6-311+g(d,p)",
+        "solvent": "Acetone", "solvent_source": "builtin",
+        "scrf_override": "原始无 SCRF，将新增",
+    }]
 
 
 def test_remote_selection_is_server_validated_and_bound_into_new_plan(monkeypatch):
@@ -699,7 +728,7 @@ def test_remote_selection_is_server_validated_and_bound_into_new_plan(monkeypatc
     assert pending["execution"] == {
         "md": {"backend": "ssh", "profile": "lab_gpu", "retain_remote_run": True}
     }
-    assert "profile: lab_gpu" in updates[-1][1][-1]["content"]
+    assert "profile: lab_gpu" not in updates[-1][1][-1]["content"]
     assert "SSH 直连" in replies.calls[0]["messages"][1]["content"]
 
 

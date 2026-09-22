@@ -119,7 +119,7 @@ def test_resp_uses_clean_exit_sequence_and_publishes_charge(tmp_path, monkeypatc
 
     def fake_run(_command, *, input_text, cwd, **_kwargs):
         calls.append(input_text)
-        (tmp_path / "sample_opt.chg").write_text("1\n\nLi 0.0\n", encoding="utf-8")
+        (tmp_path / "sample_opt.chg").write_text("Li 0.0 0.0 0.0 0.0000000000\n", encoding="utf-8")
         assert cwd == str(tmp_path)
         return subprocess.CompletedProcess([], 0, stdout="", stderr="")
 

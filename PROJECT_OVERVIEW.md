@@ -1,6 +1,6 @@
 # Willy 项目总览：面向可信分子模拟的 Agent 工作流
 
-> 当前范围：本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理提供受控 `/resume`、`/fork`、`/switch`、按工程保存的对话记录和 CPU 资源预检。远程执行与托管网关不属于当前产品入口。
+> 当前范围：本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理提供原样 `/resume`、完整上下文分支 `/fork`、有界 `/inputs` 声明、`/switch`、工程对话记录和 CPU 资源预检。步骤输入逐步校验哈希，旧产物先归档；确认新的修复参数也创建独立分支。远程执行与托管网关不属于当前产品入口。
 
 > 定位：Willy 将自然语言需求转化为可审计的分子动力学工作流。LLM 不直接执行科学计算，而是在受限工具、结构化配置、确定性编排和人工授权的边界内参与决策。
 >
@@ -62,7 +62,9 @@ FastAPI + React 前端
 
 模拟阶段严格为 `EM -> EQ -> PROD`。默认 EQ 是高温、过渡温度和目标温度组成的三点式退火，含六段可定义时长；初始体积默认按 `0.7 g/cm3` 估算，实际盒矢量、体积和质量密度在 run 内记录。PROD 必须消费通过验收的 EQ 许可与匹配 checkpoint，不能仅以 `eq.gro` 的存在作为依据。
 
-Sobtop 的 GAFF/UFF 与 LigParGen/BOSS 的 OPLS-AA 是两条独立拓扑路径，不能在同一 run 中混用。中性 OPLS 组合的单一 Ewald 净电荷 warning 仅在总电荷绝对值不超过 `0.15e` 时按受控规则放行。AMBER、离子 OPLS 参数化和其他力场混用不属于公开能力。
+EQ 的最终目标保温段最后 1 ns 按五个 0.2 ns 区间核验完整采样，正常结束、时间轴、有限数值与原有整窗温度/势能规则均通过后才授予许可。分段均值仅作审计；旧 `accepted` 标志或已改变的验收产物不能绕过新的 PROD 前置门禁。
+
+Sobtop 的 GAFF/UFF 与 LigParGen/BOSS 的 OPLS-AA 是两条独立拓扑路径，不能在同一 run 中混用。中性 OPLS 组合在 `grompp` 中的单一 Ewald 净电荷 warning 仅在总电荷绝对值不超过 `0.15 e`（含正负边界）时按受控规则放行；超过阈值或伴随其他 warning 时仍拒绝。AMBER、离子 OPLS 参数化和其他力场混用不属于公开能力。
 
 ## 4. 文字到配置：轻量 RAG 与结构化校验
 
@@ -80,7 +82,9 @@ Config Agent 将输入路由为“单次查询/操作”或“新体系配置”
   -> schema 与业务规则二次验证
 ```
 
-模型只生成待确认的候选配置，不是直接启动指令。候选方案可在确认前被用户明确修改；每次修改都必须重新通过量子输入审计和 workflow schema 校验，并覆写会话中的待确认候选。只有用户明确确认开始运行后，服务端才再次审计并写入最终运行 `config.json`。无效组分、歧义名称和非法数值会阻塞；净电荷不平衡和过大体系是对用户可见的非阻塞警告。
+模型只生成待确认的候选配置，不是直接启动指令。候选方案可在确认前被用户明确修改；每次修改都必须重新通过量子输入审计和 workflow schema 校验，并覆写会话中的待确认候选。只有用户明确确认开始运行后，服务端才再次审计并写入最终运行 `config.json`。无效组分、歧义名称和非法数值会阻塞；原始量子输入审计后的体系净电荷不为零，且用户未明确补偿或非中性策略时，返回阻塞错误 `charge_imbalance`，不生成可确认方案。过大体系仍属于非阻塞警告。
+
+配置阶段的净电荷来自原始输入的整数电荷与组分数量，不等同于参数化后 `grompp` 报告的累计舍入残差。后者适用 `abs(total_charge) <= 0.15 e` 的单一 Ewald 警告白名单；该容差不允许自动配平、改写原始电荷或绕过配置确认。具体规则见 `docs/ERR_WARN_Build.md` 与 `docs/simulation.md`。
 
 ### 4.2 面向分子实体识别的轻量 RAG
 
@@ -102,7 +106,7 @@ Config Agent 将输入路由为“单次查询/操作”或“新体系配置”
 | 1 | Quantum Agent | 量子优化、转换、RESP 失败诊断 | 量子层工具 |
 | 2 | Topology Agent | 力场、参数化、主拓扑和 ITP 问题 | 拓扑层工具 |
 | 3 | Simulation Agent | MDP、建盒、EM/EQ/PROD 诊断与重跑提案 | 模拟层工具；高影响修改需确认 |
-| 运行层 | Run Assistant | 当前 run 的状态、产物、ETA、错误摘要和按工程隔离的对话历史 | 只读；仅完整 `/resume`、`/fork`、`/switch` 由前端确定性控制层处理 |
+| 运行层 | Run Assistant | 当前 run 的状态、产物、ETA、错误摘要和按工程隔离的对话历史 | 只读；显式 `/resume`、`/fork`、`/inputs`、`/switch` 由独立受控入口处理，LLM 只能为明确声明选择有界输入范围 |
 
 这种架构采用最小权限、领域工具隔离和分层错误归属。发生问题时，拥有真实输入、产物与工具上下文的层负责形成候选处理，而不是由通用模型跨层猜测。
 
@@ -112,7 +116,7 @@ Prompt 不是唯一安全边界，而是模型的第一层行为约束；动作�
 
 **领域修复 Prompt** 统一包含角色范围、工具白名单、输入事实、禁止行为、错误分类、修复候选和升级条件。Layer Agent 通过 function-calling 循环执行，并受轮次、时间和费用预算约束。工具、模型或参数错误都会转为结构化结果或升级，不会直接穿透到前端。
 
-**运行助理 Prompt** 强制只读，只能依据当前 run 的公开工具结果回答；它不得把 ETA 说成保证，不得展示日志、命令、路径或密钥，也不能把“暂停”等聊天文本理解为停止命令。停止由独立按钮和服务端二次确认完成。用户中止后，只有完整 `/resume` 或 `/fork` 在进入 Prompt 前由服务端确定性处理；`/switch` 只切换到指定 run 及其独立历史。普通文本不会恢复、派生或切换运行。
+**运行助理 Prompt** 强制只读，只能依据当前 run 的公开工具结果回答；它不得把 ETA 说成保证，不得展示日志、命令、路径或密钥，也不能把“暂停”等聊天文本理解为停止命令。停止由独立按钮和服务端二次确认完成。`/resume`、`/fork`、`/switch` 及明确的原参数恢复、方案修改和确认指令在进入 Prompt 前由受控入口处理；普通询问与否定表达不触发计算。`/inputs` 是单独的明确声明入口，仅该入口提供名称、相对路径和哈希并调用受限 LLM 选择范围。
 
 模型标识和 Prompt 版本会被写入决策记录，允许比较同一失败在不同模型或 Prompt 版本下的处理差异。
 
@@ -132,13 +136,13 @@ read_only -> retry_safe -> requires_confirmation -> requires_fork -> destructive
 
 `RecoveryPolicy` 再按 `layer + ErrorKind + step + attempt` 做声明式裁决：指定可用工具、最大尝试次数、是否需要确认、是否只能 fork，以及从哪一步重跑。模型可以提出候选，但无法自行放宽策略。
 
-EQ 失败是该机制的代表：模型只生成脱敏修复方案；用户确认前配置、MDP、阶段许可和进程均不改变；确认后状态必须按 `awaiting_confirmation -> retrying -> running` 流转。替代方案会产生新的 `action_id` 并使旧方案失效。
+EQ 失败是该机制的代表：模型只生成脱敏修复方案；确认后创建完整上下文子工程，仅子工程按 `awaiting_confirmation -> retrying -> running` 流转；父配置、状态及证据不改变。替代方案产生新的 `action_id`，分支回执防止重复确认再次启动。
 
 ## 7. 状态机、停止与恢复
 
 系统公开八个运行状态：`idle`、`running`、`retrying`、`awaiting_confirmation`、`stopping`、`escalated`、`done`、`aborted`。
 
-状态机维护合法迁移表：`awaiting_confirmation` 不能直接跳到 `running`，而必须先进入 `retrying`；`stopping` 只能结束为 `aborted`；`done` 是终态，`aborted` 仅可由显式 `/resume` 或被拒绝的 `/fork` 经 CAS 回到无 `pending_action` 的 `awaiting_confirmation`，再由受控启动进入 `retrying`。每次写入带单调 `state_revision`，通过比较后写入避免旧页面、双击确认或并发控制覆盖新状态。
+状态机保留八种状态及合法迁移表：`awaiting_confirmation` 不能直接跳到 `running`，而必须先进入 `retrying`；`stopping` 正常退出到 `aborted`，停止失败或超时升级为 `escalated`。非完成状态的执行或控制故障可以升级，记录步骤、阶段和关联原因；`done` 不回退。人工处理后，页面刷新及轮询重新核验进程退出和已知故障条件，通过则 `escalated -> aborted`；未知或科学执行故障须声明完成处理，不能靠文件变化推断修复。此复查不启动计算、不自动接纳新输入。报错和手动暂停均可显式原参数续跑，不依赖 LLM 方案；续跑仍须哈希准入，再经 CAS 迁至 `awaiting_confirmation -> retrying`。修改 LLM 建议只原子替换待确认方案和按钮绑定，不启动计算；`/fork` 和修复确认只迁移子工程状态。每次写入带单调 `state_revision`，过期方案禁止确认。简图见 [`运行助理状态图`](docs/run_assistant.md#状态图)。
 
 状态快照只包含当前步骤、层、受限活动描述、重试次数、已应用白名单参数差异、错误摘要和完成步骤。`activity` 固定为工具、操作、对象类型、对象、当前数和总数，例如“正在使用 GROMACS 进行 NPT 退火（2/2）”。
 

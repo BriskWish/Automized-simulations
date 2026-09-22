@@ -187,6 +187,21 @@ def test_potential_slope_acceptance_threshold_is_validated():
     )
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "negative-inf"])
+@pytest.mark.parametrize(
+    "field",
+    ["window_ns", "temperature_abs_tolerance_k", "max_potential_relative_slope_per_ns"],
+)
+def test_eq_acceptance_rejects_non_finite_configuration(field, value):
+    md = default_md_config()
+    md["eq"]["acceptance"][field] = value
+
+    validation = validate_md_config(md)
+
+    assert validation.valid is False
+    assert any(field in issue and "有限" in issue for issue in validation.issues)
+
+
 def test_eq_cannot_run_without_accepted_em(tmp_path):
     from willy.simulation.eq import run_eq
 
@@ -214,9 +229,8 @@ def test_prod_requires_the_accepted_eq_checkpoint(tmp_path):
     (tmp_path / "eq.gro").write_text(gro)
     (tmp_path / "eq.cpt").write_text("eq checkpoint")
     initialize_manifest(tmp_path, config, random_seed=12345, versions={"gromacs": "mock", "packmol": "mock"})
-    payload = load_manifest(tmp_path)
-    payload["stages"]["eq"] = {"status": "accepted"}
-    manifest_path(tmp_path).write_text(json.dumps(payload))
+    from tests.test_eq_acceptance import accept_eq_fixture
+    assert accept_eq_fixture(tmp_path).success
 
     prod = prepare_stage_execution("prod", tmp_path)
 
@@ -256,9 +270,8 @@ def test_prod_append_requires_matching_manifest_contract_and_checkpoint(tmp_path
     (tmp_path / "eq.gro").write_text("fixture\n1\n    1SOL      C    1   0.000   0.000   0.000\n1 1 1\n")
     (tmp_path / "eq.cpt").write_text("eq checkpoint")
     initialize_manifest(tmp_path, config, random_seed=12345, versions={"gromacs": "mock", "packmol": "mock"})
-    payload = load_manifest(tmp_path)
-    payload["stages"]["eq"] = {"status": "accepted"}
-    manifest_path(tmp_path).write_text(json.dumps(payload))
+    from tests.test_eq_acceptance import accept_eq_fixture
+    assert accept_eq_fixture(tmp_path).success
     contract = stage_contract(
         tmp_path,
         "prod",

@@ -1,0 +1,474 @@
+{
+  "schema_version": 1,
+  "gap_id": "G-09",
+  "recorded_at": "2026-09-06T15:23:06.838615+00:00",
+  "policy": "eq-final-1ns-five-blocks-v1",
+  "python_version": "3.12.3",
+  "scope": "Current-code acceptance revalidation of isolated copies of real EQ artifacts; no mdrun, PROD or ten-step rerun; original runs and permissions are unchanged.",
+  "implementation": {
+    "src/willy/simulation/eq_acceptance.py": {
+      "sha256": "3c7af6107be5379892f7375d9e1027752ca2077ad01329f6367c22b49ce07bf9",
+      "size_bytes": 12264
+    },
+    "src/willy/simulation/eq.py": {
+      "sha256": "2b8b0a40c5f0b7b585b4aadb0b055639d98fb1a416b0110ac6e89fa429df0a1d",
+      "size_bytes": 11061
+    },
+    "src/willy/simulation/_gmx_utils.py": {
+      "sha256": "23245fca6d1ffc79de090bcfe61512793ca4e003a88cc7418e5be9864f783a4f",
+      "size_bytes": 39767
+    },
+    "src/willy/simulation/manifest.py": {
+      "sha256": "f3743f0f7e28e003ba8febff891a90995dd4441b073f1b8f80308db7f6fdca3f",
+      "size_bytes": 30422
+    },
+    "src/willy/simulation/protocol.py": {
+      "sha256": "a37adf5014b6d0e5e025df9213d79f6c09a56b3926dd96f1effc4663413af054",
+      "size_bytes": 21126
+    },
+    "src/willy/simulation/gmx_process.py": {
+      "sha256": "2e686be568dcb7fa3456e5e463cc2959d234c04e3c5df51f38eff1b63b8e4c5c",
+      "size_bytes": 5814
+    },
+    "tests/test_eq_acceptance.py": {
+      "sha256": "d704c1e0e8dba29855e785ca6d3798b41d52e21f0af3f23cadcf622d6a1d6331",
+      "size_bytes": 14770
+    },
+    "tests/test_simulation_execution.py": {
+      "sha256": "5fbe1a4427fb85bbf0bd9a2e0a82a6e9754192043346c8ca87d2dea720b649d8",
+      "size_bytes": 21889
+    },
+    "tests/test_simulation_protocol.py": {
+      "sha256": "378619f0e3c8ee97705a33659ab0360547da92b50b3efe24c227bfd35b8e30c5",
+      "size_bytes": 26300
+    },
+    "tests/tools/g09_eq_coverage_acceptance.py": {
+      "sha256": "a70d5964a4e2f87e9f768fc7944f1b527dfef82e31ecf2b115ebcc38cc4f2c41",
+      "size_bytes": 8076
+    }
+  },
+  "cases": {
+    "complete_eq": {
+      "expected_accepted": true,
+      "accepted": true,
+      "production_permission": true,
+      "gromacs_version": "2025.0",
+      "managed_auxiliary_execution": true,
+      "managed_process_count": 5,
+      "expected_end_ps": 10000.0,
+      "observed_end": {
+        "step": 10000000,
+        "time_ps": 10000.0
+      },
+      "acceptance_issues": [],
+      "series": {
+        "density": {
+          "ok": true,
+          "sample_count": 2001,
+          "mean": 1099.9427582313842,
+          "relative_slope_per_ns": 0.001727937471298555,
+          "coverage": {
+            "policy": "eq-final-1ns-five-blocks-v1",
+            "complete": true,
+            "expected_start_ps": 9000.0,
+            "expected_end_ps": 10000.0,
+            "observed_start_ps": 9000.0,
+            "observed_end_ps": 10000.0,
+            "hold_start_ps": 8000.0,
+            "sample_interval_ps": 0.5,
+            "expected_sample_count": 2001,
+            "sample_count": 2001,
+            "blocks": [
+              {
+                "start_ps": 9000.0,
+                "end_ps": 9200.0,
+                "relative_end_ns": -0.8,
+                "sample_count": 400,
+                "observed_start_ps": 9000.0,
+                "observed_end_ps": 9199.5,
+                "complete": true,
+                "mean": 1098.1709808125001
+              },
+              {
+                "start_ps": 9200.0,
+                "end_ps": 9400.0,
+                "relative_end_ns": -0.6,
+                "sample_count": 400,
+                "observed_start_ps": 9200.0,
+                "observed_end_ps": 9399.5,
+                "complete": true,
+                "mean": 1100.1838894775
+              },
+              {
+                "start_ps": 9400.0,
+                "end_ps": 9600.0,
+                "relative_end_ns": -0.4,
+                "sample_count": 400,
+                "observed_start_ps": 9400.0,
+                "observed_end_ps": 9599.5,
+                "complete": true,
+                "mean": 1097.0268139575
+              },
+              {
+                "start_ps": 9600.0,
+                "end_ps": 9800.0,
+                "relative_end_ns": -0.2,
+                "sample_count": 400,
+                "observed_start_ps": 9600.0,
+                "observed_end_ps": 9799.5,
+                "complete": true,
+                "mean": 1105.8277655025
+              },
+              {
+                "start_ps": 9800.0,
+                "end_ps": 10000.0,
+                "relative_end_ns": 0.0,
+                "sample_count": 401,
+                "observed_start_ps": 9800.0,
+                "observed_end_ps": 10000.0,
+                "complete": true,
+                "mean": 1098.5079284812969
+              }
+            ]
+          }
+        },
+        "temperature": {
+          "ok": true,
+          "sample_count": 2001,
+          "mean": 300.7124407746127,
+          "relative_slope_per_ns": 0.0044254297207687995,
+          "coverage": {
+            "policy": "eq-final-1ns-five-blocks-v1",
+            "complete": true,
+            "expected_start_ps": 9000.0,
+            "expected_end_ps": 10000.0,
+            "observed_start_ps": 9000.0,
+            "observed_end_ps": 10000.0,
+            "hold_start_ps": 8000.0,
+            "sample_interval_ps": 0.5,
+            "expected_sample_count": 2001,
+            "sample_count": 2001,
+            "blocks": [
+              {
+                "start_ps": 9000.0,
+                "end_ps": 9200.0,
+                "relative_end_ns": -0.8,
+                "sample_count": 400,
+                "observed_start_ps": 9000.0,
+                "observed_end_ps": 9199.5,
+                "complete": true,
+                "mean": 301.34714779999996
+              },
+              {
+                "start_ps": 9200.0,
+                "end_ps": 9400.0,
+                "relative_end_ns": -0.6,
+                "sample_count": 400,
+                "observed_start_ps": 9200.0,
+                "observed_end_ps": 9399.5,
+                "complete": true,
+                "mean": 301.33411752
+              },
+              {
+                "start_ps": 9400.0,
+                "end_ps": 9600.0,
+                "relative_end_ns": -0.4,
+                "sample_count": 400,
+                "observed_start_ps": 9400.0,
+                "observed_end_ps": 9599.5,
+                "complete": true,
+                "mean": 300.23610290749997
+              },
+              {
+                "start_ps": 9600.0,
+                "end_ps": 9800.0,
+                "relative_end_ns": -0.2,
+                "sample_count": 400,
+                "observed_start_ps": 9600.0,
+                "observed_end_ps": 9799.5,
+                "complete": true,
+                "mean": 300.36102088250004
+              },
+              {
+                "start_ps": 9800.0,
+                "end_ps": 10000.0,
+                "relative_end_ns": 0.0,
+                "sample_count": 401,
+                "observed_start_ps": 9800.0,
+                "observed_end_ps": 10000.0,
+                "complete": true,
+                "mean": 300.28488365586037
+              }
+            ]
+          }
+        },
+        "pressure": {
+          "ok": true,
+          "sample_count": 2001,
+          "mean": 16.971646586706644,
+          "relative_slope_per_ns": 1.6147399841632448,
+          "coverage": {
+            "policy": "eq-final-1ns-five-blocks-v1",
+            "complete": true,
+            "expected_start_ps": 9000.0,
+            "expected_end_ps": 10000.0,
+            "observed_start_ps": 9000.0,
+            "observed_end_ps": 10000.0,
+            "hold_start_ps": 8000.0,
+            "sample_interval_ps": 0.5,
+            "expected_sample_count": 2001,
+            "sample_count": 2001,
+            "blocks": [
+              {
+                "start_ps": 9000.0,
+                "end_ps": 9200.0,
+                "relative_end_ns": -0.8,
+                "sample_count": 400,
+                "observed_start_ps": 9000.0,
+                "observed_end_ps": 9199.5,
+                "complete": true,
+                "mean": 104.22743094249999
+              },
+              {
+                "start_ps": 9200.0,
+                "end_ps": 9400.0,
+                "relative_end_ns": -0.6,
+                "sample_count": 400,
+                "observed_start_ps": 9200.0,
+                "observed_end_ps": 9399.5,
+                "complete": true,
+                "mean": -44.2512329675
+              },
+              {
+                "start_ps": 9400.0,
+                "end_ps": 9600.0,
+                "relative_end_ns": -0.4,
+                "sample_count": 400,
+                "observed_start_ps": 9400.0,
+                "observed_end_ps": 9599.5,
+                "complete": true,
+                "mean": -53.424962335000004
+              },
+              {
+                "start_ps": 9600.0,
+                "end_ps": 9800.0,
+                "relative_end_ns": -0.2,
+                "sample_count": 400,
+                "observed_start_ps": 9600.0,
+                "observed_end_ps": 9799.5,
+                "complete": true,
+                "mean": 100.25807590250001
+              },
+              {
+                "start_ps": 9800.0,
+                "end_ps": 10000.0,
+                "relative_end_ns": 0.0,
+                "sample_count": 401,
+                "observed_start_ps": 9800.0,
+                "observed_end_ps": 10000.0,
+                "complete": true,
+                "mean": -21.854014456359106
+              }
+            ]
+          }
+        },
+        "potential": {
+          "ok": true,
+          "sample_count": 2001,
+          "mean": -18081.57328464118,
+          "relative_slope_per_ns": 0.0008936986576075464,
+          "coverage": {
+            "policy": "eq-final-1ns-five-blocks-v1",
+            "complete": true,
+            "expected_start_ps": 9000.0,
+            "expected_end_ps": 10000.0,
+            "observed_start_ps": 9000.0,
+            "observed_end_ps": 10000.0,
+            "hold_start_ps": 8000.0,
+            "sample_interval_ps": 0.5,
+            "expected_sample_count": 2001,
+            "sample_count": 2001,
+            "blocks": [
+              {
+                "start_ps": 9000.0,
+                "end_ps": 9200.0,
+                "relative_end_ns": -0.8,
+                "sample_count": 400,
+                "observed_start_ps": 9000.0,
+                "observed_end_ps": 9199.5,
+                "complete": true,
+                "mean": -18079.3397460925
+              },
+              {
+                "start_ps": 9200.0,
+                "end_ps": 9400.0,
+                "relative_end_ns": -0.6,
+                "sample_count": 400,
+                "observed_start_ps": 9200.0,
+                "observed_end_ps": 9399.5,
+                "complete": true,
+                "mean": -18079.715717775
+              },
+              {
+                "start_ps": 9400.0,
+                "end_ps": 9600.0,
+                "relative_end_ns": -0.4,
+                "sample_count": 400,
+                "observed_start_ps": 9400.0,
+                "observed_end_ps": 9599.5,
+                "complete": true,
+                "mean": -18081.3258593625
+              },
+              {
+                "start_ps": 9600.0,
+                "end_ps": 9800.0,
+                "relative_end_ns": -0.2,
+                "sample_count": 400,
+                "observed_start_ps": 9600.0,
+                "observed_end_ps": 9799.5,
+                "complete": true,
+                "mean": -18109.3555517475
+              },
+              {
+                "start_ps": 9800.0,
+                "end_ps": 10000.0,
+                "relative_end_ns": 0.0,
+                "sample_count": 401,
+                "observed_start_ps": 9800.0,
+                "observed_end_ps": 10000.0,
+                "complete": true,
+                "mean": -18058.188011411472
+              }
+            ]
+          }
+        }
+      },
+      "source_artifacts": {
+        "config.json": {
+          "sha256": "2f2420c74d868b982676e0de1164e7d45b1252b1ede5292509e1fbf0c01f2202",
+          "size_bytes": 2169
+        },
+        "eq.mdp": {
+          "sha256": "669d9e47c004415cd1ae720fad202e7c4bd3ddc63cae12a78efc635242c6b469",
+          "size_bytes": 868
+        },
+        "eq.edr": {
+          "sha256": "bc78d610c335ae9d0e1a72c113cc64390d5e860fff25b7e0403d39332228851c",
+          "size_bytes": 12481352
+        },
+        "eq.log": {
+          "sha256": "762f0ef9f6b21ab2a6e0f9b9e85a1f53f2f0bef33a13fcda1041a98c40420156",
+          "size_bytes": 13527883
+        },
+        "eq.cpt": {
+          "sha256": "4943d8bf322e0c015237b85818650399b12b455225996a2704c4102015d3fb48",
+          "size_bytes": 39424
+        },
+        "eq.gro": {
+          "sha256": "a4c6ebeaa84410c1475c48309316da932fed063687306f1a7f8244437089a7dd",
+          "size_bytes": 107688
+        },
+        "eq.tpr": {
+          "sha256": "c246f0a5180e868d4459c0fcceadbdf5736234914822310b4ac2e97fb0ba4716",
+          "size_bytes": 46408
+        },
+        "run_manifest.json": {
+          "sha256": "0356c52ccf44bc0e3d762f57e74168a97b5ae18b603589bfad4ffe96cb2ec913",
+          "size_bytes": 42265
+        }
+      },
+      "extracted_artifacts": {
+        "temp.xvg": {
+          "sha256": "6de694322cbd1ea42d08bc7a6abc26d6b429bb6b7543c574f41479efbc82e0ea",
+          "size_bytes": 500689
+        },
+        "potential.xvg": {
+          "sha256": "4198f62969dd50d6a85e88401f7701d3fc89b7083efa71cb9662d4c34ca4d821",
+          "size_bytes": 560700
+        },
+        "density.xvg": {
+          "sha256": "d01133969965e08346a3477d253680ab3210f43a042e2b4d9d6b86d639811f4d",
+          "size_bytes": 510453
+        },
+        "pressure.xvg": {
+          "sha256": "fec923e027ae34c5fcb54e9ecc7423d3e29a92e21b837e2ca33f8491226e6128",
+          "size_bytes": 519863
+        }
+      },
+      "originals_unchanged": true,
+      "passed": true
+    },
+    "early_eq": {
+      "expected_accepted": false,
+      "accepted": false,
+      "production_permission": false,
+      "gromacs_version": "2025.0",
+      "managed_auxiliary_execution": true,
+      "managed_process_count": 1,
+      "expected_end_ps": 12000.0,
+      "observed_end": {
+        "step": 1469200,
+        "time_ps": 734.6
+      },
+      "acceptance_issues": [
+        "EQ 未正常完成或实际结束步数、时间与协议不一致"
+      ],
+      "series": {},
+      "source_artifacts": {
+        "config.json": {
+          "sha256": "2e593dac2b8a6c49e44456c768da8bc8a8ab703f859e2204f0f8e253584a591d",
+          "size_bytes": 2174
+        },
+        "eq.mdp": {
+          "sha256": "180657bd97fa9274d2e72cabc5b45f84d587bfc064f5963e508aba060b5a9d91",
+          "size_bytes": 869
+        },
+        "eq.edr": {
+          "sha256": "ce5d0fe705fa48ca64f8a1c63c01c8ceb3f03713fc91a6a67441a2d34877e533",
+          "size_bytes": 1835288
+        },
+        "eq.log": {
+          "sha256": "c12abe66b350d3fbe208289f6caa6eb0794081f50363669b1af864c1af5163a5",
+          "size_bytes": 2009934
+        },
+        "eq.cpt": {
+          "sha256": "8a5cd5f4ba9d765c2e1fae3ad87894f1ab481d3373364787191d058e4332748f",
+          "size_bytes": 133984
+        },
+        "eq.gro": null,
+        "eq.tpr": {
+          "sha256": "354e1813e64478a2bde989a91ac6cb1b9cd23f1f1e325e6e40522dbe775ec798",
+          "size_bytes": 140356
+        },
+        "run_manifest.json": {
+          "sha256": "9d60fee27eea07f1f312569bb563d4eb58885c4e9ab566791cdbfb8533e722ba",
+          "size_bytes": 41248
+        }
+      },
+      "extracted_artifacts": {},
+      "originals_unchanged": true,
+      "passed": true
+    }
+  },
+  "passed": true,
+  "regressions": {
+    "eq_protocol_execution": {
+      "passed": 173,
+      "skipped": 0,
+      "duration_s": 2.18,
+      "output": {
+        "sha256": "ab173687e45f79843006d18242464cb83383cfa2271ebcc20575c5a0b1d58359",
+        "size_bytes": 260
+      }
+    },
+    "pytest_default": {
+      "passed": 1232,
+      "skipped": 10,
+      "duration_s": 18.71,
+      "output": {
+        "sha256": "3251cc99c82d583622b1f969544ae5815d14bded82acc373a4df756de303a003",
+        "size_bytes": 1910
+      }
+    }
+  }
+}

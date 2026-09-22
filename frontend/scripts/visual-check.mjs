@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
@@ -17,6 +18,22 @@ const snapshot = {
   status_event_id: `${runId}:status:running:4:none:none`,
   live_summary: "正在执行第 4 步。",
 };
+const proposalPlan = {
+  version: 1,
+  structure: [{ name: "Li", count: 100, optimization_level: "b3lyp/6-311+g(d,p)", solvent: "Acetone", solvent_source: "builtin", scrf_override: "覆盖原始 SCRF（含多行设置）" }],
+  environment: { charge_scale: "0.80", initial_density: "0.70 g/cm3", total_molecules: 100 },
+  md_steps: [
+    { label: "EM", meta: "能量最小化" },
+    { label: "EQ · 升温（heat）", meta: "NPT · 2 ns · 298K→500K" },
+    { label: "EQ · 高温恒温（hold_high）", meta: "NPT · 1 ns · 500K→500K" },
+    { label: "EQ · 降至过渡温度（cool_transition）", meta: "NPT · 2 ns · 500K→400K" },
+    { label: "EQ · 过渡恒温（hold_transition）", meta: "NPT · 1 ns · 400K→400K" },
+    { label: "EQ · 降至目标温度（cool_target）", meta: "NPT · 2 ns · 400K→298K" },
+    { label: "EQ · 目标恒温（hold_target）", meta: "NPT · 2 ns · 298K→298K" },
+    { label: "PROD", meta: "NPT · 10 ns · 298K→298K" },
+  ],
+};
+const proposalSummary = `[[WILLY_PLAN_DATA:${JSON.stringify(proposalPlan)}]]\n**模拟方案确认**\n\n下一步将开始结构优化。\n\n确认无误后回复“运行”即可开始。\n若参数有误请提出，我会更新方案。`;
 const server = createServer(async (request, response) => {
   const pathname = new URL(request.url, "http://127.0.0.1").pathname;
   const candidate = resolve(root, `.${pathname}`);
@@ -33,10 +50,50 @@ const server = createServer(async (request, response) => {
 });
 
 async function installApiFixtures(page) {
+  const fixtures = {
+    solvents: [
+      { name: "Water", epsilon: "78.3553", epsinf: null, source: "builtin", manual: false },
+      { name: "default_1", epsilon: "10", epsinf: "1.5", source: "manual", manual: true },
+    ],
+    molecules: [
+      { name: "EC", input_suffixes: [".gjf", ".inp"] },
+      { name: "Li", input_suffixes: [".inp"] },
+    ],
+    mutations: [],
+    registrations: [],
+  };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const send = (json, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(json) });
+    if (!["GET", "HEAD"].includes(request.method())) fixtures.mutations.push({ path: url.pathname, method: request.method() });
+    if (url.pathname === "/api/solvents" && request.method() === "GET") {
+      const query = (url.searchParams.get("query") || "").trim().toLowerCase();
+      const match = fixtures.solvents.find((record) => record.name.toLowerCase() === query) || null;
+      return send({ match, candidates: match ? [match] : fixtures.solvents.filter((record) => record.name.toLowerCase().includes(query)) });
+    }
+    if (url.pathname === "/api/solvents" && request.method() === "POST") {
+      const body = JSON.parse(request.postData() || "{}");
+      fixtures.registrations.push(body);
+      let name = typeof body.name === "string" ? body.name.trim() : "";
+      if (!name) {
+        let index = 1;
+        while (fixtures.solvents.some((record) => record.name.toLowerCase() === `default_${index}`)) index += 1;
+        name = `default_${index}`;
+      }
+      if (fixtures.solvents.some((record) => record.name.toLowerCase() === name.toLowerCase())) {
+        return send({ detail: `溶剂名已存在（大小写不敏感精确匹配）: ${name}` }, 400);
+      }
+      const epsilon = Number(body.epsilon);
+      const epsinf = Number(body.epsinf);
+      if (!Number.isFinite(epsilon) || !Number.isFinite(epsinf) || epsilon < epsinf || epsinf < 1) {
+        return send({ detail: "必须满足 epsilon >= epsinf >= 1" }, 400);
+      }
+      const solvent = { name, epsilon: String(body.epsilon), epsinf: String(body.epsinf), source: "manual", manual: true };
+      fixtures.solvents.push(solvent);
+      return send({ ok: true, solvent });
+    }
+    if (url.pathname === "/api/molecules" && request.method() === "GET") return send({ molecules: fixtures.molecules });
     if (url.pathname === "/api/workspace") return send({ run_id: runId, snapshot });
     if (url.pathname === "/api/runs" && request.method() === "GET") {
       return send({ active_run_id: runId, runs: [
@@ -48,7 +105,7 @@ async function installApiFixtures(page) {
       return send({ run_id: runId, snapshot, messages: [
         { role: "assistant", content: "已恢复该工程的运行历史。" },
         { role: "assistant", content: "第 1 步「结构优化」已完成。", _run_assistant_event_kind: "step_completed" },
-        { role: "assistant", content: snapshot.live_summary, _run_assistant_event_kind: "status" },
+        { role: "assistant", content: snapshot.live_summary, _run_assistant_event_kind: "status", _run_assistant_event_active: true },
       ] });
     }
     if (url.pathname === `/api/runs/${runId}/updates`) {
@@ -64,7 +121,13 @@ async function installApiFixtures(page) {
       });
     }
     if (url.pathname === "/api/proposal/chat" && request.method() === "POST") {
-      return send({ text: "方案助理响应", run_id: runId });
+      return send({ text: proposalSummary, proposalId: "plan__visual" });
+    }
+    if (url.pathname === "/api/proposals/plan__visual" && request.method() === "GET") {
+      return send({
+        workspace: { workspace_id: "plan__visual", kind: "plan" },
+        messages: [{ role: "assistant", content: proposalSummary }],
+      });
     }
     if (url.pathname === `/api/runs/${runId}/chat` && request.method() === "POST") {
       const body = JSON.parse(request.postData() || "{}");
@@ -84,7 +147,7 @@ async function installApiFixtures(page) {
       return send({
         run_id: runId,
         manifest: { filename: "run_manifest.json", truncated: false, content: '{\n  "schema_version": 2,\n  "run_id": "md__202608260002"\n}' },
-        events: { filename: "events.jsonl", truncated: false, content: '{"kind":"status_updated","state":"running"}' },
+        config: { filename: "config.json", truncated: false, content: '{\n  "ion_charge_scale": 0.80,\n  "md": {\n    "eq": { "target_temperature": 298 }\n  }\n}' },
       });
     }
     if (url.pathname === "/api/proposal/upload" && request.method() === "POST") {
@@ -105,6 +168,120 @@ async function installApiFixtures(page) {
     }
     return send({ detail: "fixture route not configured" }, 404);
   });
+  return fixtures;
+}
+
+async function checkSolventModal(page, fixtures, label) {
+  const beforeMutations = fixtures.mutations.length;
+  const beforeRegistrations = fixtures.registrations.length;
+  const originalRecords = structuredClone(fixtures.solvents);
+  const proposalInput = page.locator("#proposal-composer-input");
+  const originalDraft = await proposalInput.inputValue();
+  const draft = "暂存草稿：查询或登记隐式溶剂不应提交此消息";
+  await proposalInput.fill(draft);
+  const originalPlan = await page.locator(".proposal-plan").allTextContents();
+  const originalMessages = await page.locator(".assistant-surface.active .message-copy").allTextContents();
+  const trigger = page.getByRole("button", { name: "登记隐式溶剂/溶剂库", exact: true });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "Gaussian 隐式溶剂库", exact: true });
+  const results = dialog.getByRole("region", { name: "隐式溶剂查询结果", exact: true });
+  const queryForm = dialog.getByRole("form", { name: "查询隐式溶剂", exact: true });
+  const registrationForm = dialog.getByRole("form", { name: "登记自定义隐式溶剂", exact: true });
+  await results.getByText("Water", { exact: true }).waitFor();
+  await results.getByText("Gaussian 内置", { exact: true }).waitFor();
+  await results.getByText("78.3553", { exact: true }).waitFor();
+  await results.getByText("未提供", { exact: true }).waitFor();
+  assert.ok((await registrationForm.textContent()).includes("仅Eps/EpsInf的介电近似，不是完整SMD参数化"));
+  assert.equal(await dialog.evaluate((element) => element.closest("form")), null, "modal must not be nested in the chat composer form");
+  await queryForm.getByLabel("隐式溶剂名称或关键词", { exact: true }).fill("water");
+  await queryForm.getByRole("button", { name: "查询隐式溶剂", exact: true }).click();
+  await results.getByText("精确匹配", { exact: true }).waitFor();
+  assert.equal(await results.locator(".solvent-record").count(), 1);
+  assert.equal(await results.locator(".solvent-record strong").textContent(), "Water");
+
+  await registrationForm.getByLabel("name（可选）", { exact: true }).fill("");
+  await registrationForm.getByLabel("epsilon", { exact: true }).fill("20.00");
+  await registrationForm.getByLabel("epsinf", { exact: true }).fill("1.80");
+  const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/solvents" && response.request().method() === "POST");
+  await registrationForm.getByRole("button", { name: "仅登记隐式溶剂", exact: true }).click();
+  assert.equal((await responsePromise).status(), 200);
+  await registrationForm.getByText("已登记 default_2，可在方案助理中指定使用。", { exact: true }).waitFor();
+  await results.getByText("default_2", { exact: true }).waitFor();
+  await results.getByText("自定义", { exact: true }).waitFor();
+  assert.deepEqual(fixtures.registrations[beforeRegistrations], { name: null, epsilon: "20.00", epsinf: "1.80" });
+  assert.equal(await registrationForm.getByLabel("name（可选）", { exact: true }).inputValue(), "");
+  assert.equal(await registrationForm.getByLabel("epsilon", { exact: true }).inputValue(), "");
+  assert.equal(await registrationForm.getByLabel("epsinf", { exact: true }).inputValue(), "");
+
+  for (const name of ["wAtEr", "DEFAULT_2"]) {
+    await registrationForm.getByLabel("name（可选）", { exact: true }).fill(name);
+    await registrationForm.getByLabel("epsilon", { exact: true }).fill("40");
+    await registrationForm.getByLabel("epsinf", { exact: true }).fill("2");
+    const conflictPromise = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/solvents" && response.request().method() === "POST");
+    await registrationForm.getByRole("button", { name: "仅登记隐式溶剂", exact: true }).click();
+    assert.equal((await conflictPromise).status(), 400);
+    await registrationForm.getByRole("alert").filter({ hasText: name }).waitFor();
+    assert.match(await registrationForm.getByRole("alert").textContent(), /溶剂名已存在.*不会自动重复登记/);
+    assert.equal(await registrationForm.getByLabel("name（可选）", { exact: true }).inputValue(), name);
+    assert.equal(await registrationForm.getByLabel("epsilon", { exact: true }).inputValue(), "40");
+    assert.equal(await registrationForm.locator(".solvent-success").count(), 0);
+  }
+  assert.deepEqual(fixtures.solvents.slice(0, originalRecords.length), originalRecords, "conflicts must not overwrite existing records");
+  assert.equal(fixtures.solvents.length, originalRecords.length + 1);
+  assert.equal(fixtures.solvents.at(-1).epsilon, "20.00");
+  const bounds = await dialog.boundingBox();
+  assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= page.viewportSize().width, "solvent dialog must fit the viewport");
+  await page.screenshot({ path: `/tmp/willy-app-solvents-${label}.png`, fullPage: true });
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await trigger.evaluate((element) => element === document.activeElement), true, "closing must restore focus");
+
+  await trigger.click();
+  await results.getByText("default_2", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await proposalInput.inputValue(), draft);
+  assert.deepEqual(await page.locator(".proposal-plan").allTextContents(), originalPlan);
+  assert.deepEqual(await page.locator(".assistant-surface.active .message-copy").allTextContents(), originalMessages);
+  assert.equal(await page.getByRole("tab", { name: "方案助理", exact: true }).getAttribute("aria-selected"), "true");
+  assert.equal(fixtures.registrations.length - beforeRegistrations, 3, "registration must not auto-retry");
+  assert.deepEqual(fixtures.mutations.slice(beforeMutations), Array.from({ length: 3 }, () => ({ path: "/api/solvents", method: "POST" })), "modal must not mutate projects or submit chat");
+  await proposalInput.fill(originalDraft);
+  console.log(`PASS ${label} solvent modal: builtin query, default numbering, conflicts, close/Escape, read-only project boundary`);
+}
+
+async function checkMoleculeCatalogDialog(page, fixtures, label) {
+  const beforeMutations = fixtures.mutations.length;
+  const proposalInput = page.locator("#proposal-composer-input");
+  const originalDraft = await proposalInput.inputValue();
+  const draft = "暂存草稿：查看分子库不应提交此消息";
+  await proposalInput.fill(draft);
+  const originalMessages = await page.locator(".assistant-surface.active .message-copy").allTextContents();
+  const trigger = page.getByRole("button", { name: "上传分子结构/分子库", exact: true });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "上传分子结构 / 分子库", exact: true });
+  const results = dialog.getByRole("region", { name: "当前分子库", exact: true });
+  await results.getByText("分子库 · 2 项", { exact: true }).waitFor();
+  await results.getByText("EC", { exact: true }).waitFor();
+  await results.getByText("GJF · INP", { exact: true }).waitFor();
+  await results.getByText("Li", { exact: true }).waitFor();
+  assert.equal(await dialog.evaluate((element) => element.closest("form")), null, "molecule modal must not be nested in the chat composer form");
+  const bounds = await dialog.boundingBox();
+  assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= page.viewportSize().width, "molecule dialog must fit the viewport");
+  await page.screenshot({ path: `/tmp/willy-app-molecules-${label}.png`, fullPage: true });
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await trigger.evaluate((element) => element === document.activeElement), true, "closing must restore molecule trigger focus");
+
+  await trigger.click();
+  await results.getByText("EC", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await proposalInput.inputValue(), draft);
+  assert.deepEqual(await page.locator(".assistant-surface.active .message-copy").allTextContents(), originalMessages);
+  assert.equal(fixtures.mutations.length, beforeMutations, "opening molecule library must not mutate projects or submit chat");
+  await proposalInput.fill(originalDraft);
+  console.log(`PASS ${label} molecule dialog: current library, viewport fit, close/Escape, read-only project boundary`);
 }
 
 await new Promise((resolveListen) => server.listen(4175, "127.0.0.1", resolveListen));
@@ -113,8 +290,10 @@ try {
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 940 }, deviceScaleFactor: 1 });
   const errors = [];
   desktop.on("pageerror", (error) => errors.push(error.message));
-  await installApiFixtures(desktop);
+  const desktopFixtures = await installApiFixtures(desktop);
   await desktop.goto("http://127.0.0.1:4175", { waitUntil: "networkidle" });
+  await checkSolventModal(desktop, desktopFixtures, "desktop");
+  await checkMoleculeCatalogDialog(desktop, desktopFixtures, "desktop");
 
   await desktop.getByRole("button", { name: "收起详情" }).click();
   const drawerToggle = desktop.getByRole("button", { name: "展开详情" });
@@ -202,7 +381,10 @@ try {
   const welcomeBox = await desktop.locator(".proposal-welcome").boundingBox();
   const threadBox = await desktop.locator(".assistant-surface.active .thread-content").boundingBox();
   if (!welcomeBox || !threadBox || Math.abs(welcomeBox.x + welcomeBox.width / 2 - (threadBox.x + threadBox.width / 2)) > 2) throw new Error("proposal welcome is not horizontally centered");
-  await desktop.getByRole("button", { name: "上传结构", exact: true }).waitFor();
+  await desktop.getByRole("button", { name: "上传分子结构/分子库", exact: true }).waitFor();
+  await desktop.getByRole("button", { name: "上传分子结构/分子库", exact: true }).click();
+  const moleculeDialog = desktop.getByRole("dialog", { name: "上传分子结构 / 分子库", exact: true });
+  await moleculeDialog.getByRole("button", { name: "选择并上传分子结构", exact: true }).click();
   await desktop.locator('input[type="file"]').setInputFiles({
     name: "Li+.inp",
     mimeType: "text/plain",
@@ -293,9 +475,10 @@ try {
   await logsTab.click();
   if (await logsTab.getAttribute("aria-selected") !== "true") throw new Error("logs tab did not activate");
   await desktop.getByLabel("Manifest 内容").waitFor();
-  await desktop.getByLabel("Events 内容").waitFor();
+  await desktop.getByLabel("Config JSON 内容").waitFor();
   if (await desktop.getByLabel("Manifest 内容").textContent() !== '{\n  "schema_version": 2,\n  "run_id": "md__202608260002"\n}') throw new Error("manifest record was not rendered");
-  if (await desktop.getByLabel("Events 内容").textContent() !== '{"kind":"status_updated","state":"running"}') throw new Error("events record was not rendered");
+  if (await desktop.getByLabel("Config JSON 内容").textContent() !== '{\n  "ion_charge_scale": 0.80,\n  "md": {\n    "eq": { "target_temperature": 298 }\n  }\n}') throw new Error("config.json record was not rendered");
+  if (await desktop.getByText("events.jsonl", { exact: true }).count()) throw new Error("events record is still exposed in the logs view");
   const logColumns = desktop.locator(".log-column");
   const logColumnBoxes = await logColumns.evaluateAll((columns) => columns.map((column) => column.getBoundingClientRect()));
   if (await logColumns.count() !== 2 || logColumnBoxes[0].x >= logColumnBoxes[1].x) throw new Error("logs are not arranged in two columns");
@@ -303,6 +486,30 @@ try {
   await proposalTab.click();
   const proposalInput = desktop.locator("#proposal-composer-input");
   if (await proposalInput.getAttribute("placeholder") !== "输入模拟体系、项目简介、分子库查询") throw new Error("proposal placeholder mismatch");
+  await proposalInput.fill("请展示 EQ 过程");
+  const proposalRestored = desktop.waitForResponse((response) => new URL(response.url()).pathname === "/api/proposals/plan__visual");
+  await desktop.getByRole("button", { name: "发送" }).first().click();
+  await proposalRestored;
+  await desktop.locator('[aria-label="模拟方案"]').waitFor();
+  if (await desktop.locator(".proposal-plan-card").count() !== 3) throw new Error("proposal overview does not contain three core cards");
+  if (await desktop.locator(".proposal-plan-row").count() !== 12) throw new Error("proposal plan does not contain structure, environment, EM, EQ, and PROD rows");
+  await desktop.locator('[aria-label="MD 模拟流程"]').waitFor();
+  await desktop.getByText("NPT · 1 ns · 500K→500K", { exact: true }).waitFor();
+  await desktop.locator(".proposal-plan-row-main span").filter({ hasText: "b3lyp/6-311+g(d,p)" }).waitFor();
+  assert.match(await desktop.locator(".proposal-plan-card").first().textContent(), /SMD: Acetone（builtin）.*覆盖原始 SCRF/);
+  await desktop.getByText("确认无误后回复“运行”即可开始。", { exact: true }).waitFor();
+  const proposalTypography = await desktop.locator(".proposal-plan").evaluate((plan) => ({
+    heading: getComputedStyle(plan.querySelector(".proposal-plan-heading")).fontSize,
+    index: getComputedStyle(plan.querySelector(".proposal-plan-index")).fontSize,
+    rowNumber: getComputedStyle(plan.querySelector(".proposal-plan-row-number")).fontSize,
+    rowLabel: getComputedStyle(plan.querySelector(".proposal-plan-row-main strong")).fontSize,
+    rowMeta: getComputedStyle(plan.querySelector(".proposal-plan-row-main span")).fontSize,
+    confirmation: getComputedStyle(document.querySelector(".proposal-confirmation")).fontSize,
+  }));
+  if (JSON.stringify(proposalTypography) !== JSON.stringify({ heading: "13px", index: "10px", rowNumber: "11px", rowLabel: "12px", rowMeta: "11px", confirmation: "13px" })) {
+    throw new Error(`proposal typography mismatch: ${JSON.stringify(proposalTypography)}`);
+  }
+  await desktop.screenshot({ path: "/tmp/willy-app-proposal.png", fullPage: true });
 
   const statusSummaryMaxHeight = await desktop.locator(".status-summary").evaluate((element) => getComputedStyle(element).maxHeight);
   if (Number.parseInt(statusSummaryMaxHeight, 10) < 220) throw new Error(`current status area is too short: ${statusSummaryMaxHeight}`);
@@ -324,19 +531,32 @@ try {
   }
 
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
-  await installApiFixtures(mobile);
+  mobile.on("pageerror", (error) => errors.push(error.message));
+  const mobileFixtures = await installApiFixtures(mobile);
   await mobile.goto("http://127.0.0.1:4175", { waitUntil: "networkidle" });
+  await checkSolventModal(mobile, mobileFixtures, "mobile");
+  await checkMoleculeCatalogDialog(mobile, mobileFixtures, "mobile");
   await mobile.screenshot({ path: "/tmp/willy-app-mobile.png", fullPage: true });
   await mobile.getByRole("button", { name: "展开详情" }).click();
   await mobile.getByText("LOCAL WORKSPACE", { exact: true }).waitFor();
+  await mobile.locator(".mobile-brand").getByRole("button", { name: "展开详情", exact: true }).click();
+  await mobile.getByRole("tab", { name: "方案助理", exact: true }).click();
+  const mobileProposalInput = mobile.locator("#proposal-composer-input");
+  await mobileProposalInput.fill("建立 Li 模拟方案");
+  const mobileProposalRestored = mobile.waitForResponse((response) => new URL(response.url()).pathname === "/api/proposals/plan__visual");
+  await mobile.getByRole("button", { name: "发送" }).first().click();
+  await mobileProposalRestored;
+  await mobile.locator('[aria-label="模拟方案"]').waitFor();
+  await mobile.getByRole("button", { name: "展开详情" }).click();
   const mobileResult = await mobile.evaluate(() => ({
     width: document.documentElement.scrollWidth,
     viewport: window.innerWidth,
     sidebarVisible: getComputedStyle(document.querySelector(".sidebar")).display !== "none",
     drawerOpen: document.querySelector(".detail-drawer")?.getAttribute("aria-hidden") === "false",
+    cards: document.querySelectorAll(".proposal-plan-card").length,
   }));
-  if (mobileResult.width > mobileResult.viewport || mobileResult.sidebarVisible || !mobileResult.drawerOpen) {
-    throw new Error(`mobile validation failed: ${JSON.stringify(mobileResult)}`);
+  if (errors.length || mobileResult.width > mobileResult.viewport || mobileResult.sidebarVisible || !mobileResult.drawerOpen || mobileResult.cards !== 3) {
+    throw new Error(`mobile validation failed: ${JSON.stringify({ errors, mobileResult })}`);
   }
   console.log(JSON.stringify({ desktop: desktopResult, mobile: mobileResult }));
 } finally {

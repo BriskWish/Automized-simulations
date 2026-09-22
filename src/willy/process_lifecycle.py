@@ -86,6 +86,13 @@ class ProcessTerminationController:
         if self.phase not in {"running", "killed"}:
             self.phase = "finished"
 
+    def force_kill(self, reason: str) -> None:
+        """Enforce a hard deadline even when only group members remain."""
+        self.reason = str(reason)[:80]
+        self.requested_at = time.monotonic()
+        self.phase_started_at = self.requested_at
+        self._signal(signal.SIGKILL, "killed")
+
     def _is_finished(self) -> bool:
         try:
             return self.process.poll() is not None
@@ -177,6 +184,8 @@ def run_managed_command(
     started_at = time.monotonic()
     last_heartbeat_at = started_at
     if audit_dir is not None:
+        from willy.run_processes import track_process
+        track_process(audit_dir, process)
         append_structured_event(
             audit_dir,
             "process_started",

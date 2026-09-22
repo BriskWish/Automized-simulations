@@ -14,6 +14,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 import json
+import math
 
 from willy.config_store import write_json
 
@@ -221,7 +222,7 @@ def validate_md_config(md: object) -> ProtocolValidation:
         if total_eq_ns < 7 - 1e-9 or total_eq_ns > 100 + 1e-9:
             issues.append(f"EQ 六段总时长 {total_eq_ns:g} ns 必须在 7-100 ns")
     acceptance = eq["acceptance"]
-    _in_range(issues, "md.eq.acceptance.window_ns", acceptance["window_ns"], 0.000001, 100, positive=True)
+    _in_range(issues, "md.eq.acceptance.window_ns", acceptance["window_ns"], 1, 1, positive=True)
     _in_range(
         issues,
         "md.eq.acceptance.temperature_abs_tolerance_k",
@@ -502,6 +503,9 @@ def _in_range(
         numeric = float(value)
     except (TypeError, ValueError):
         issues.append(f"{name} 必须是数值")
+        return
+    if not math.isfinite(numeric):
+        issues.append(f"{name} 必须是有限数值")
         return
     if integer and not numeric.is_integer():
         issues.append(f"{name} 必须是整数")

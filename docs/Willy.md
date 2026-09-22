@@ -28,8 +28,9 @@ Willy 是本机部署的受限分子动力学工作流编排器。LLM 负责解�
 | 拓扑 | `topology/` | Sobtop/GAFF-UFF 或 LigParGen/BOSS OPLS-AA 参数化与组装。 |
 | 模拟 | `simulation/` | MDP、Packmol、GROMACS 和阶段验收。 |
 | 运行 | `run_registry.py`、`run_store.py`、`pipeline_state.py` | run 隔离、公开状态、事务、审计和恢复约束。 |
+| 运行环境 | `python_runtime.py`、`pipeline_launch.py`、`env_registry.py` | Web Python 版本与依赖检查、父解释器一致启动、启动锁和科学工具发现。 |
 
-Agent 只能调用所属层的白名单 function-calling 工具。运行助理只读；`/resume`、`/fork`、`/switch` 和停止由服务端确定性控制层处理。
+Agent 只能调用所属层的白名单 function-calling 工具。运行助理普通问答只读；`/resume`、`/fork`、`/inputs`、`/switch` 和停止走受控入口。`/inputs` 只授权 LLM 从目录事实中选择文件与消费步骤，格式、路径与新哈希由服务端检查。原样续跑不改参；参数变化创建完整上下文独立分支，重做前归档旧产物。
 
 ## 运行事实
 

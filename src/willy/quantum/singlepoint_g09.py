@@ -14,6 +14,7 @@ from willy.errors import StepResult, StepError, ErrorKind
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import extract_xyz
+from willy.quantum.smd_solvents import SMDSolventError, apply_scrf_snapshot
 
 SP_BASIS = "b3lyp/def2TZVP"
 
@@ -26,6 +27,8 @@ def run(
     name: str = None,
     mem: str = "5GB",
     nproc: int = 8,
+    solvent: str = "gas",
+    solvent_ref: dict | None = None,
 ) -> StepResult:
     """G09 single-point at b3lyp/def2TZVP → *_opt.fchk.
 
@@ -75,10 +78,19 @@ def run(
     xyz_lines = xyz_content.strip().split("\n")
     coords = "\n".join(xyz_lines[2:]) if len(xyz_lines) > 2 else ""
 
+    route = f"# {SP_BASIS} SP"
+    try:
+        route, trailer, solvent_snapshot = apply_scrf_snapshot(route, solvent, solvent_ref)
+    except SMDSolventError as exc:
+        return StepResult(
+            step_name="sp_g09", step_index=2, success=False,
+            error=StepError(ErrorKind.INPUT_CONTRACT, str(exc)),
+            duration_s=_time.time() - _start,
+        )
     gjf_content = f"""%mem={mem}
 %nprocshared={nproc}
 %chk={opt_name}.chk
-# {SP_BASIS} SP
+{route}
 
 {name}_opt
 
@@ -86,6 +98,8 @@ def run(
 {coords}
 
 """
+    if trailer:
+        gjf_content = gjf_content.rstrip() + "\n\n" + trailer + "\n"
 
     gjf_path = Path(workdir) / f"{opt_name}.gjf"
     gjf_path.write_text(gjf_content)
@@ -178,4 +192,5 @@ def run(
         outputs={"fchk": str(opt_fchk)},
         artifacts=[str(opt_fchk)],
         duration_s=_time.time() - _start,
+        extra={"solvent": solvent_snapshot},
     )

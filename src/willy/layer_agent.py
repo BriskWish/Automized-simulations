@@ -787,6 +787,19 @@ class LayerAgent:
                     "restart_step": decision.restart_step,
                 },
             }, ensure_ascii=False)
+        if declaration.effect is not ActionEffect.READ_ONLY:
+            from willy.step_contracts import CONTRACT_FILENAME, validate_step_inputs
+
+            if (Path(run_dir) / CONTRACT_FILENAME).exists():
+                try:
+                    validate_step_inputs(run_dir, step_result.step_index)
+                except (OSError, ValueError) as exc:
+                    return json.dumps({
+                        "_step_result": True, "success": False,
+                        "step_name": step_result.step_name, "step_index": step_result.step_index,
+                        "error_kind": ErrorKind.INPUT_CONTRACT.value, "error_message": str(exc),
+                        "extra": {"policy_denied": True},
+                    }, ensure_ascii=False)
         tool_result = self.handle_tool(tool_name, args)
         self._record_execution(validated, decision, tool_result, attempt=ctx.attempts)
         return tool_result

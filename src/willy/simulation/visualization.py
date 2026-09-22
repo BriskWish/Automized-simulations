@@ -20,12 +20,12 @@ import subprocess
 import threading
 
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
-from willy.process_lifecycle import run_managed_command
+from willy.simulation.gmx_process import GMX_AUX_TIMEOUT_S, run_gmx_auxiliary
 
 
 VIEWER_DIRECTORY = "visualization"
 VISUALIZATION_STAGES = frozenset({"em", "eq", "prod"})
-_CONVERSION_TIMEOUT_S = 60
+_CONVERSION_TIMEOUT_S = GMX_AUX_TIMEOUT_S
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -133,7 +133,7 @@ def convert_stage_gro_to_pdb(
         except EnvironmentRegistryError:
             return VisualizationConversionResult(stage, False, reason="gmx_unavailable")
 
-        result = run_managed_command(
+        result = run_gmx_auxiliary(
             [str(gmx.executable), "editconf", "-f", str(source), "-o", str(temporary)],
             cwd=directory,
             timeout=_CONVERSION_TIMEOUT_S,

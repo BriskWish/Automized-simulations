@@ -35,11 +35,13 @@ def _proposal(**overrides) -> ActionProposal:
 
 def test_default_catalog_covers_every_schema_and_declares_effects():
     catalog = build_default_tool_catalog()
-    assert len(catalog.declarations()) == 50
+    assert len(catalog.declarations()) == 52
     names = {declaration.tool_name for declaration in catalog.declarations()}
-    assert len(names) == 50
+    assert len(names) == 52
     assert all(isinstance(declaration.effect, ActionEffect) for declaration in catalog.declarations())
     assert catalog.require("tools_get_status_run").is_read_only
+    assert catalog.require("tools_lookup_solvent").is_read_only
+    assert catalog.require("tools_register_solvent").requires_confirmation
     assert catalog.require("tools_retry_eq").requires_confirmation
     assert catalog.require("tools_modify_config_topology").requires_fork
     assert not catalog.require("tools_skip_molecule_topology").enabled

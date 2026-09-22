@@ -6,8 +6,20 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
+
 from willy.dependency_preflight import run_dependency_preflight
 from willy.env_registry import AVAILABLE, MISSING, ResolvedTool, TOOL_SPECS
+
+
+@pytest.fixture(autouse=True)
+def available_python_runtime(monkeypatch):
+    report = {
+        "ready": True, "python_version": "3.12.3", "supported_python": "3.10--3.12",
+        "dependencies": [{"name": "Willy", "status": "available"}], "error": "",
+    }
+    monkeypatch.setattr("willy.dependency_preflight.check_python_runtime", lambda: report)
+    return report
 
 
 def _vendor_sobtop(root: Path) -> None:
@@ -53,6 +65,8 @@ def test_preflight_accepts_one_complete_route_per_group_and_persists_gmx(tmp_pat
 
     assert report["advisory"] is True
     assert report["ready"] is True
+    assert report["runtime"]["ready"] is True
+    assert "沿用父进程解释器" in report["markdown"]
     assert [group["ready"] for group in report["groups"]] == [True, True, True]
     assert "当前依赖满足完成完整 MD 流程的最小链路" in report["markdown"]
     assert "G16（满足；来源：path）" in report["markdown"]
@@ -66,6 +80,24 @@ def test_preflight_accepts_one_complete_route_per_group_and_persists_gmx(tmp_pat
     assert "WILLY_GMX_BIN=" in dotenv
     assert "WILLY_MULTIWFN_BIN" not in dotenv
     assert stat.S_IMODE((tmp_path / ".env").stat().st_mode) == 0o600
+
+
+def test_preflight_reports_python_failure_without_persisting_an_interpreter(
+    tmp_path, monkeypatch, available_python_runtime,
+):
+    _vendor_sobtop(tmp_path)
+    available = {"g16", "formchk", "multiwfn", "gmx", "packmol"}
+    monkeypatch.setattr("willy.dependency_preflight.resolve_tool", _resolver(available, tmp_path))
+    available_python_runtime.update({"ready": False, "error": "当前 Python 依赖不可用。"})
+
+    report = run_dependency_preflight(tmp_path)
+
+    assert all(group["ready"] for group in report["groups"])
+    assert report["ready"] is False
+    assert report["advisory"] is True
+    assert report["recommendations"][0] == "当前 Python 依赖不可用。"
+    assert "Python 运行时：3.12.3（不满足" in report["markdown"]
+    assert "PYTHON" not in (tmp_path / ".env").read_text()
 
 
 def test_preflight_does_not_override_existing_willy_values_or_missing_tools(tmp_path, monkeypatch):

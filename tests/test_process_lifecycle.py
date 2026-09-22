@@ -42,6 +42,20 @@ def test_termination_escalates_the_process_group(monkeypatch):
     assert controller.reason == "timeout"
 
 
+def test_force_kill_signals_group_even_after_leader_exits(monkeypatch):
+    sent = []
+    monkeypatch.setattr("willy.process_lifecycle.os.killpg", lambda pid, sig: sent.append((pid, sig)))
+    process = _Process()
+    process.returncode = 0
+    controller = ProcessTerminationController(process)
+
+    controller.force_kill("timeout")
+
+    assert sent == [(1234, signal.SIGKILL)]
+    assert controller.phase == "killed"
+    assert controller.reason == "timeout"
+
+
 def test_lifecycle_record_excludes_command_paths(tmp_path, monkeypatch):
     monkeypatch.setattr("willy.process_lifecycle.os.killpg", lambda *_args: None)
     process = _Process()

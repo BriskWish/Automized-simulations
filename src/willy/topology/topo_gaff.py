@@ -224,6 +224,14 @@ def make_itp_gro(inp: SobtopInput, output_dir: str | None = None) -> StepResult:
                 validation.duration_s = time.monotonic() - start
                 return validation
 
+            if Path(inp.chg).with_suffix(".charge_scaling.json").is_file():
+                from willy.quantum.charge_files import validate_itp_charge_transfer
+
+                try:
+                    validate_itp_charge_transfer(Path(inp.chg), vendor_outputs["itp"])
+                except (OSError, ValueError) as exc:
+                    return _failure(inp, start, str(exc), kind=ErrorKind.INPUT_CONTRACT)
+
             shutil.copy2(vendor_outputs["itp"], run_outputs["itp"])
             shutil.copy2(vendor_outputs["gro"], run_outputs["gro"])
             if result.returncode == 24:

@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_NODE_VERSION = "22.16.0"
 NODE_DIST_URL = "https://nodejs.org/dist"
-SUPPORTED_PYTHON = (3, 10), (3, 12)
+SUPPORTED_PYTHON = runpy.run_path(str(ROOT / "src" / "willy" / "python_runtime.py"))["SUPPORTED_PYTHON"]
 
 
 class BootstrapError(RuntimeError):

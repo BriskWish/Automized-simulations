@@ -23,6 +23,7 @@ from willy.execution_resources import resolve_nproc
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.errors import StepResult, StepError, ErrorKind
 from willy.process_lifecycle import run_managed_command
+from willy.quantum.smd_solvents import SMDSolventError, apply_scrf_snapshot
 
 
 # ── 常量 ──
@@ -61,6 +62,7 @@ def _parse_gjf(gjf_path: Path) -> dict:
 
     chk_line = ""
     route = ""
+    route_complete = False
     title = ""
     charge_spin = ""
     coords_start = 0
@@ -77,6 +79,13 @@ def _parse_gjf(gjf_path: Path) -> dict:
         # route 行（# 开头）
         if s.startswith("#") and route == "":
             route = s
+            continue
+
+        if route and not route_complete:
+            if s:
+                route += " " + s
+            else:
+                route_complete = True
             continue
 
         # 跳过 %mem, %nprocshared, %cpu 等（后面会统一添加）
@@ -127,7 +136,10 @@ def _parse_gjf(gjf_path: Path) -> dict:
 def _build_gjf(parsed: dict, basis: str, mem: str,
                nproc: Optional[int], name: str,
                scf_options: str = "",
-               opt_options: str = "") -> str:
+               opt_options: str = "",
+               solvent: str | None = None,
+               solvent_ref: dict | None = None,
+               project_root: str | Path | None = None) -> str:
     """
     用解析结果 + 新参数重建 .gjf 内容。
     scf_options / opt_options 追加到 route card 末尾。
@@ -151,6 +163,9 @@ def _build_gjf(parsed: dict, basis: str, mem: str,
         route_new = route_new.rstrip() + " " + scf_options
     if opt_options:
         route_new = route_new.rstrip() + " " + opt_options
+    trailer = ""
+    if solvent is not None:
+        route_new, trailer, _ = apply_scrf_snapshot(route_new, solvent, solvent_ref, project_root)
     lines.append(route_new)
     lines.append("")
 
@@ -164,6 +179,9 @@ def _build_gjf(parsed: dict, basis: str, mem: str,
     # coords
     lines.append(parsed["coords"])
     lines.append("")
+    if trailer:
+        lines.append(trailer.rstrip())
+        lines.append("")
     lines.append("")
 
     return "\n".join(lines)
@@ -218,6 +236,8 @@ def run_one(name: str, cfg: dict, defaults: dict,
     if cfg_overrides:
         cfg = {**cfg, **{k: v for k, v in cfg_overrides.items() if v is not None}}
     basis = cfg.get("basis", "b3lyp/6-311+g(d,p)")
+    solvent = cfg.get("solvent")
+    solvent_ref = cfg.get("solvent_ref")
     mem = cfg.get("mem") or defaults.get("mem", DEFAULT_MEM)
     nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc", DEFAULT_NPROC), DEFAULT_NPROC)
 
@@ -229,9 +249,21 @@ def run_one(name: str, cfg: dict, defaults: dict,
 
     # ── 修改 .gjf ──
     parsed = _parse_gjf(gjf_path)
-    new_gjf = _build_gjf(parsed, basis, mem, nproc, name,
-                         scf_options=scf_options,
-                         opt_options=opt_options)
+    try:
+        new_gjf = _build_gjf(
+            parsed, basis, mem, nproc, name,
+            scf_options=scf_options,
+            opt_options=opt_options,
+            solvent=solvent,
+            solvent_ref=solvent_ref,
+            project_root=None,
+        )
+    except SMDSolventError as exc:
+        return StepResult(
+            step_name="struct_g16", step_index=1, success=False,
+            error=StepError(kind=ErrorKind.INPUT_CONTRACT, message=str(exc)),
+            duration_s=time.time() - t0,
+        )
 
     # 写入临时文件（不覆盖原始）
     work_gjf = std / f"{name}_run.gjf"
@@ -336,6 +368,7 @@ def run_one(name: str, cfg: dict, defaults: dict,
         outputs={"fchk": str(fchk_path)},
         artifacts=[str(fchk_path)],
         duration_s=time.time() - t0,
+        extra={"solvent": solvent} if solvent is not None else {},
     )
 
 

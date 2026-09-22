@@ -4,24 +4,37 @@ from __future__ import annotations
 
 import base64
 import binascii
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 import json
 import math
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
-from typing import Any, Mapping
-
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-import uvicorn
+from typing import Any, Iterator, Mapping
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+from willy.python_runtime import PythonRuntimeError, require_python_runtime
+
+try:
+    _python_runtime = require_python_runtime()
+except PythonRuntimeError as exc:
+    raise SystemExit(f"Willy 启动检查失败：{exc}") from None
+
+if __name__ == "__main__" and sys.argv[1:] == ["--check-runtime"]:
+    print(f"Python {_python_runtime['python_version']}：运行时与依赖检查通过。")
+    raise SystemExit(0)
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
 
 from willy import frontend_api
 from willy.agent_config import chat
@@ -55,7 +68,20 @@ from willy.structure_uploads import (
 
 DIST = ROOT / "frontend" / "dist"
 OFFICIAL_ACCOUNT_QR = ROOT / "assets" / "qrcode_for_gh_7df1329939c6_258.jpg"
-app = FastAPI(title="Willy assistant-ui")
+
+
+@asynccontextmanager
+async def _workbench_lifespan(_application: FastAPI):
+    """Recover stale snapshots before the workbench serves them.
+
+    This only terminates an already-unowned transient state after the existing
+    ETA/output heartbeat grace period. It never starts or resumes a run.
+    """
+    frontend_api.reconcile_stale_pipeline_states(source="service_startup")
+    yield
+
+
+app = FastAPI(title="Willy assistant-ui", lifespan=_workbench_lifespan)
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _LAUNCHED_RUN_RE = re.compile(r"(?:^|\n)运行：(?P<run_id>md__\d{12})(?:\n|$)")
 _RUN_STATUS_EVENT_KIND = "_run_assistant_event_kind"
@@ -68,6 +94,18 @@ _DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _PENDING_ACTION_CONFIRMATION_RE = re.compile(
     r"^(?:确认|确认(?:调参|重跑|方案)|同意(?:调参|重跑|方案)|批准(?:调参|重跑|方案))$"
 )
+_ORIGINAL_PARAMETER_RESUME_RE = re.compile(
+    r"^(?:/resume|(?:按)?原参数(?:续跑|重跑|继续)|不改参数(?:继续|续跑|重跑))[。！!]*$"
+)
+_PENDING_ACTION_REVISION_RE = re.compile(
+    r"^(?:请)?(?:把|将)\s*\S.*?\s*(?:改为|改成|设置为)\s*\S.*$"
+)
+_PENDING_ACTION_DISCUSSION_RE = re.compile(
+    r"[?？;；。\n\r\"'“”‘’]|不|别|勿|没|无需|无须|禁止|取消|吗|么|呢|是否|能|会|可否|"
+    r"可以|什么|如何|怎么|为何|为什么|合理|合适|可行|意味着|意思|"
+    r"如果|假如|比如|例如|讨论|考虑|还是|或者|应该|觉得|认为|听说|据说|似乎"
+)
+_PENDING_ACTION_BINDING_FIELDS = ("action_id", "state_revision", "config_fingerprint")
 _RUN_HISTORY_WELCOME = {
     "role": "assistant",
     "content": (
@@ -246,56 +284,77 @@ def _normalized_display_name(value: object) -> str:
     return normalized
 
 
-def _read_run_record(
-    run_dir: Path,
-    *,
-    filenames: tuple[str, ...],
-    record_name: str,
-    tail_when_truncated: bool,
-) -> dict[str, Any]:
-    """Read one fixed, run-local audit record without exposing arbitrary files."""
-    path = next((run_dir / name for name in filenames if (run_dir / name).is_file()), None)
-    if path is None:
+@contextmanager
+def _open_run_logs_directory(run_id: str) -> Iterator[int]:
+    """Pin the selected directory without following run or md_run symlinks."""
+    with ExitStack() as stack:
+        directory_fd = None
+        try:
+            for name in (Path(frontend_api.ROOT).resolve(), "md_run", run_id):
+                directory_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                stack.callback(os.close, directory_fd)
+        except (OSError, RuntimeError):
+            raise HTTPException(status_code=404, detail="未找到该工程") from None
+        yield directory_fd
+
+
+def _read_run_record_bytes(
+    directory_fd: int, filename: str, *, allow_truncated: bool = False,
+) -> bytes | None:
+    """Read a bounded regular file relative to an already-pinned run directory."""
+    if filename not in {"config.json", "run_manifest.json", "manifest.json"}:
+        raise HTTPException(status_code=404, detail="未找到该记录")
+    try:
+        record_fd = os.open(
+            filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise HTTPException(status_code=503, detail=f"{filename} 记录暂时无法读取") from None
+    try:
+        with os.fdopen(record_fd, "rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise HTTPException(status_code=503, detail=f"{filename} 不是常规记录文件")
+            if metadata.st_size > _MAX_LOG_RECORD_BYTES and not allow_truncated:
+                raise HTTPException(status_code=503, detail=f"{filename} 记录过大，无法安全显示")
+            payload = handle.read(_MAX_LOG_RECORD_BYTES + 1)
+    except OSError:
+        raise HTTPException(status_code=503, detail=f"{filename} 记录暂时无法读取") from None
+    if len(payload) > _MAX_LOG_RECORD_BYTES and not allow_truncated:
+        raise HTTPException(status_code=503, detail=f"{filename} 记录过大，无法安全显示")
+    return payload
+
+
+def _read_run_record(directory_fd: int) -> dict[str, Any]:
+    """Read the legacy manifest with its existing bounded text presentation."""
+    payload = _read_run_record_bytes(directory_fd, "manifest.json", allow_truncated=True)
+    if payload is None:
         return {
-            "filename": filenames[0],
-            "content": f"当前工程尚无 {record_name} 记录。",
+            "filename": "manifest.json",
+            "content": "当前工程尚无 manifest 记录。",
             "truncated": False,
         }
-    try:
-        size = path.stat().st_size
-        truncated = size > _MAX_LOG_RECORD_BYTES
-        with path.open("rb") as handle:
-            if truncated and tail_when_truncated:
-                handle.seek(size - _MAX_LOG_RECORD_BYTES)
-            payload = handle.read(_MAX_LOG_RECORD_BYTES)
-    except OSError:
-        raise HTTPException(status_code=503, detail=f"{record_name} 记录暂时无法读取") from None
-    content = payload.decode("utf-8", errors="replace")
-    if truncated and tail_when_truncated:
-        # Do not start a JSONL view in the middle of an event line.
-        separator = content.find("\n")
-        if separator >= 0:
-            content = content[separator + 1:]
-        content = f"[记录过大，仅显示最后 {_MAX_LOG_RECORD_BYTES // 1024} KiB]\n{content}"
-    elif truncated:
+    truncated = len(payload) > _MAX_LOG_RECORD_BYTES
+    content = payload[:_MAX_LOG_RECORD_BYTES].decode("utf-8", errors="replace")
+    if truncated:
         content = f"[记录过大，仅显示前 {_MAX_LOG_RECORD_BYTES // 1024} KiB]\n{content}"
-    return {"filename": path.name, "content": content, "truncated": truncated}
+    return {"filename": "manifest.json", "content": content, "truncated": truncated}
 
 
-def _read_public_manifest_record(run_dir: Path) -> dict[str, Any]:
+def _read_public_manifest_record(directory_fd: int) -> dict[str, Any]:
     """Project only the public registry section from a schema-v2 manifest."""
-    v2_path = run_dir / "run_manifest.json"
-    if not v2_path.is_file():
-        return _read_run_record(
-            run_dir,
-            filenames=("manifest.json",),
-            record_name="manifest",
-            tail_when_truncated=False,
-        )
+    payload = _read_run_record_bytes(directory_fd, "run_manifest.json")
+    if payload is None:
+        return _read_run_record(directory_fd)
     try:
-        with v2_path.open(encoding="utf-8") as handle:
-            manifest = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+        manifest = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeError, RecursionError):
         raise HTTPException(status_code=503, detail="manifest 记录暂时无法读取") from None
     sections = manifest.get("sections") if isinstance(manifest, Mapping) else None
     registry = sections.get("registry") if isinstance(sections, Mapping) else None
@@ -313,17 +372,92 @@ def _read_public_manifest_record(run_dir: Path) -> dict[str, Any]:
         visible = encoded[:_MAX_LOG_RECORD_BYTES].decode("utf-8", errors="ignore")
         content = f"[公开 manifest 记录过大，仅显示前 {_MAX_LOG_RECORD_BYTES // 1024} KiB]\n{visible}"
     return {
-        "filename": v2_path.name,
+        "filename": "run_manifest.json",
         "content": content,
         "truncated": truncated,
     }
 
 
+def _public_log_config_value(value: Any) -> Any:
+    """Remove private credential and connection fields at every nesting level."""
+    if isinstance(value, dict):
+        public = {}
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+            if normalized in {
+                "key", "user", "username", "host", "hostname", "port", "url",
+                "env", "environment", "headers", "proxy", "proxies", "llm",
+                "connection", "connections", "remote", "login",
+            } or any(marker in normalized for marker in (
+                "apikey", "token", "secret", "password", "passwd", "credential",
+                "auth", "private", "accesskey", "clientkey", "ssh", "cookie",
+                "baseurl", "endpoint",
+            )):
+                continue
+            public[key] = _public_log_config_value(item)
+        return public
+    if isinstance(value, list):
+        return [_public_log_config_value(item) for item in value]
+    return value
+
+
+def _finite_log_config_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("config 包含非有限数值")
+    return number
+
+
+def _read_public_config_record(directory_fd: int) -> dict[str, Any]:
+    """Format only the selected run's public science configuration, never defaults."""
+    payload = _read_run_record_bytes(directory_fd, "config.json")
+    if payload is None:
+        raise HTTPException(status_code=503, detail="当前工程缺少 config.json")
+    try:
+        config = json.loads(
+            payload.decode("utf-8"), parse_float=_finite_log_config_number,
+            parse_constant=_finite_log_config_number,
+        )
+        if not isinstance(config, dict) or not config:
+            raise ValueError("config 必须是非空对象")
+        public = _public_log_config_value({
+            key: value for key, value in config.items() if key in {
+                "schema_version", "backend", "defaults", "molecules", "residues",
+                "md", "topology", "box", "ion_compensation", "non_neutral_confirmed",
+                "ion_charge_scale", "forcefield", "force_field", "execution",
+            }
+        })
+        execution = public.get("execution")
+        if isinstance(execution, dict):
+            public["execution"] = {
+                key: value for key, value in execution.items() if key == "stop_after_stage"
+                and isinstance(value, (str, type(None)))
+            }
+            if isinstance(execution.get("md"), dict):
+                public["execution"]["md"] = {
+                    key: value for key, value in execution["md"].items()
+                    if key in {"backend", "profile", "retain_remote_run"}
+                    and isinstance(value, (str, bool, type(None)))
+                }
+        if not public:
+            raise ValueError("config 缺少公开配置")
+        content = json.dumps(public, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        if len(content.encode("utf-8")) > _MAX_LOG_RECORD_BYTES:
+            raise HTTPException(status_code=503, detail="config.json 记录过大，无法安全显示")
+    except (ValueError, UnicodeError, RecursionError):
+        raise HTTPException(status_code=503, detail="当前工程 config.json 为空或无效") from None
+    return {"filename": "config.json", "content": content, "truncated": False}
+
+
 def _public_snapshot(run_id: str | None) -> dict[str, Any]:
     """Return the existing panel contract plus stable, display-only run facts."""
+    fault_review = frontend_api.refresh_run_fault(run_id)
     snapshot = dict(frontend_api.get_run_panel_snapshot(run_id))
+    if fault_review:
+        snapshot["fault_review"] = fault_review
     snapshot.setdefault("run_id", run_id)
     state = "await"
+    revision = None
     step: int | None = None
     done_steps: list[int] = []
     if isinstance(run_id, str):
@@ -332,7 +466,10 @@ def _public_snapshot(run_id: str | None) -> dict[str, Any]:
         except RunRegistryError:
             status = {}
         value = status.get("state")
+        if isinstance(status.get("fault"), dict):
+            snapshot["fault"] = status["fault"]
         state = value if isinstance(value, str) and value else "unknown"
+        revision = status.get("state_revision")
         candidate_step = status.get("step")
         if isinstance(candidate_step, int) and not isinstance(candidate_step, bool):
             step = candidate_step
@@ -352,6 +489,7 @@ def _public_snapshot(run_id: str | None) -> dict[str, Any]:
             snapshot["live_summary"] = "工程正在准备中，将从第 1 步开始。"
     completed = sorted(set(done_steps))
     snapshot["state"] = state
+    snapshot["state_revision"] = revision
     snapshot["step"] = step
     snapshot["phase"] = "准备中" if state == "preparing" else _step_label(step)
     snapshot["progress"] = _display_progress(state, step, completed)
@@ -494,7 +632,11 @@ def _pending_action_event(snapshot: Mapping[str, object]) -> dict[str, str] | No
     """Render the public EQ recovery proposal as a durable run-assistant turn."""
     action = snapshot.get("pending_action")
     run_id = snapshot.get("run_id")
-    if not isinstance(action, Mapping) or not isinstance(run_id, str):
+    if (
+        snapshot.get("state") != "awaiting_confirmation"
+        or not isinstance(action, Mapping)
+        or not isinstance(run_id, str)
+    ):
         return None
     action_id = action.get("action_id")
     summary = action.get("summary")
@@ -631,11 +773,19 @@ def _merge_status_into_history(
     snapshot: Mapping[str, object],
 ) -> list[dict[str, str]]:
     """Persist completed steps and exactly one current status notice."""
+    pending_event = _pending_action_event(snapshot)
     merged = [
         dict(message)
         for message in history
         if isinstance(message, Mapping)
         and message.get(_RUN_STATUS_EVENT_KIND) not in {"status", "completion_artifacts"}
+        and (
+            message.get(_RUN_STATUS_EVENT_KIND) != "pending_action"
+            or (
+                pending_event is not None
+                and message.get(_RUN_STATUS_EVENT_ID) == pending_event["event_id"]
+            )
+        )
     ]
     known_ids = {
         message.get(_RUN_STATUS_EVENT_ID)
@@ -660,7 +810,6 @@ def _merge_status_into_history(
         _RUN_STATUS_EVENT_ID: status["event_id"],
         _RUN_STATUS_EVENT_ACTIVE: status["active"],
     }
-    pending_event = _pending_action_event(snapshot)
     completion_artifacts_event = _completion_artifacts_event(snapshot)
     if pending_event is None:
         error_event = _error_event(snapshot)
@@ -711,6 +860,7 @@ def _merge_status_into_history(
             },
         ])
     else:
+        merged[pending_index]["content"] = pending_event["content"]
         merged.insert(pending_index, status_message)
     return merged
 
@@ -732,13 +882,71 @@ def _follow_controlled_run(run_id: str, reply: str) -> str:
     return match.group(1) if match else run_id
 
 
-def _run_chat_response(run_id: str, history: list[dict[str, str]]) -> dict[str, Any]:
-    snapshot = _public_snapshot(run_id)
+def _run_chat_response(
+    run_id: str,
+    history: list[dict[str, str]],
+    *,
+    snapshot: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    if snapshot is None:
+        snapshot = _public_snapshot(run_id)
     return {
         "run_id": run_id,
         "messages": history,
         "snapshot": snapshot,
     }
+
+
+def _save_run_chat_exchange(
+    run_id: str,
+    history: list[dict[str, str]],
+    message: str,
+    reply: str,
+) -> dict[str, Any]:
+    """Persist an exchange and project its notices from the response snapshot."""
+    history = history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": reply},
+    ]
+    snapshot = _public_snapshot(run_id)
+    history = _merge_status_into_history(history, snapshot)
+    _save_run_history(run_id, history)
+    response = _run_chat_response(run_id, history, snapshot=snapshot)
+    response["text"] = reply
+    return response
+
+
+def _resume_original_parameters(
+    run_id: str,
+    submitted: Mapping[str, object],
+    snapshot: Mapping[str, object],
+) -> str:
+    """Check the browser revision before resuming this run without a proposal."""
+    revision = submitted.get("state_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise HTTPException(status_code=400, detail="续跑请求缺少有效的 state_revision")
+    current_revision = snapshot.get("state_revision")
+    if (
+        isinstance(current_revision, bool)
+        or not isinstance(current_revision, int)
+        or current_revision != revision
+    ):
+        raise HTTPException(status_code=409, detail="工程状态已更新，请刷新后重新续跑")
+    if snapshot.get("state") not in {"aborted", "awaiting_confirmation", "escalated"}:
+        raise HTTPException(status_code=409, detail="当前工程状态不允许原参数续跑")
+    return frontend_api.resume_aborted_run(run_id, state_revision=revision)
+
+
+def _pending_action_revision_request(message: str) -> str | None:
+    """Accept narrow editing imperatives, never questions or negated requests."""
+    message = message.rstrip("。！!")
+    if _PENDING_ACTION_DISCUSSION_RE.search(message):
+        return None
+    explicit = re.fullmatch(r"(?:请)?修改方案[：:]\s*(\S.*)", message)
+    request = explicit.group(1) if explicit else message
+    if explicit or _PENDING_ACTION_REVISION_RE.fullmatch(message):
+        return request.strip()
+    return None
 
 
 def _is_pending_action_confirmation(message: object) -> bool:
@@ -748,11 +956,11 @@ def _is_pending_action_confirmation(message: object) -> bool:
     )
 
 
-def _confirm_waiting_pending_action(
+def _waiting_pending_action(
     run_id: str,
     submitted: Mapping[str, object] | None = None,
-) -> str | None:
-    """Confirm one current EQ action only while its run is awaiting approval.
+) -> Mapping[str, object] | None:
+    """Validate one current EQ action only while its run is awaiting approval.
 
     ``get_pending_action`` is intentionally state-scoped: it returns no action
     outside ``awaiting_confirmation``.  The direct browser control additionally
@@ -761,6 +969,8 @@ def _confirm_waiting_pending_action(
     """
     action = frontend_api.get_pending_action(run_id)
     if not isinstance(action, Mapping):
+        if submitted is not None:
+            raise HTTPException(status_code=409, detail="当前没有有效的待确认方案")
         return None
     action_id = action.get("action_id")
     revision = action.get("state_revision")
@@ -773,7 +983,10 @@ def _confirm_waiting_pending_action(
         or revision < 0
         or not isinstance(fingerprint, str)
         or not fingerprint
+        or action.get("run_id", run_id) != run_id
     ):
+        if submitted is not None:
+            raise HTTPException(status_code=409, detail="当前没有有效的待确认方案")
         return None
     if submitted is not None:
         submitted_action_id = submitted.get("action_id")
@@ -781,22 +994,54 @@ def _confirm_waiting_pending_action(
         submitted_fingerprint = submitted.get("config_fingerprint")
         if (
             not isinstance(submitted_action_id, str)
+            or not submitted_action_id
             or isinstance(submitted_revision, bool)
             or not isinstance(submitted_revision, int)
+            or submitted_revision < 0
             or not isinstance(submitted_fingerprint, str)
+            or not submitted_fingerprint
         ):
-            raise HTTPException(status_code=400, detail="确认请求缺少受控方案标识")
+            raise HTTPException(status_code=400, detail="请求缺少有效的受控方案标识")
         if (
             submitted_action_id != action_id
             or submitted_revision != revision
             or submitted_fingerprint != fingerprint
         ):
             raise HTTPException(status_code=409, detail="待确认方案已更新，请刷新后重新确认")
+    return action
+
+
+def _confirm_waiting_pending_action(
+    run_id: str,
+    submitted: Mapping[str, object] | None = None,
+) -> str | None:
+    action = _waiting_pending_action(run_id, submitted)
+    if action is None:
+        return None
     return frontend_api.confirm_pending_action(
-        action_id,
+        action["action_id"],
         run_id,
-        state_revision=revision,
-        config_fingerprint=fingerprint,
+        state_revision=action["state_revision"],
+        config_fingerprint=action["config_fingerprint"],
+    )
+
+
+def _revise_waiting_pending_action(
+    run_id: str,
+    request: str,
+    submitted: Mapping[str, object] | None = None,
+) -> str | None:
+    if len(" ".join(request.split())) > 600:
+        raise HTTPException(status_code=400, detail="调整要求超过长度限制")
+    action = _waiting_pending_action(run_id, submitted)
+    if action is None:
+        return None
+    return frontend_api.revise_pending_action(
+        action["action_id"],
+        request,
+        run_id,
+        state_revision=action["state_revision"],
+        config_fingerprint=action["config_fingerprint"],
     )
 
 
@@ -939,22 +1184,14 @@ def delete_local_task_item(item_id: str, payload: dict[str, Any] | None = None) 
 
 @app.get("/api/runs/{run_id}/logs")
 def run_logs(run_id: str) -> dict[str, Any]:
-    """Return the selected project's fixed manifest and event audit records."""
+    """Return the selected project's public manifest and frozen configuration."""
     canonical_id = _safe_run_id(run_id)
-    try:
-        run_dir = RunRegistry(frontend_api.ROOT).resolve_run_id(canonical_id)
-    except RunRegistryError:
-        raise HTTPException(status_code=404, detail="未找到该工程") from None
-    return {
-        "run_id": canonical_id,
-        "manifest": _read_public_manifest_record(run_dir),
-        "events": _read_run_record(
-            run_dir,
-            filenames=("events.jsonl", "events.json"),
-            record_name="events",
-            tail_when_truncated=True,
-        ),
-    }
+    with _open_run_logs_directory(canonical_id) as directory_fd:
+        return {
+            "run_id": canonical_id,
+            "manifest": _read_public_manifest_record(directory_fd),
+            "config": _read_public_config_record(directory_fd),
+        }
 
 
 @app.post("/api/proposals/default")
@@ -1094,6 +1331,22 @@ def proposal_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 pending_plan = None
     except ProposalWorkspaceError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Persist the user's turn before entering the LLM boundary.  A proposal
+    # request can outlive the selected workspace in the browser, and an LLM
+    # timeout/error must not erase the draft conversation on a later switch.
+    request_history = [*history, {"role": "user", "content": latest_user}]
+    if not is_run_context:
+        try:
+            save_workspace_conversation(
+                frontend_api.ROOT,
+                proposal_id,
+                messages=request_history,
+                pending_plan=pending_plan if isinstance(pending_plan, Mapping) else None,
+            )
+        except ProposalWorkspaceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     prior_run_id = frontend_api.latest_run_id()
     updates = list(chat(
         latest_user,
@@ -1107,7 +1360,7 @@ def proposal_chat(payload: dict[str, Any]) -> dict[str, Any]:
         persisted_history = updates[-1][1]
     else:
         reply = "暂时没有生成新的回复。"
-        persisted_history = history
+        persisted_history = request_history
     launched_run_id = _launched_run_id(reply)
     if launched_run_id is not None:
         save_formalized_conversation(
@@ -1173,6 +1426,32 @@ def configuration() -> dict[str, Any]:
     }
 
 
+@app.get("/api/solvents")
+def solvents(query: str = Query(default="", max_length=128)) -> dict[str, Any]:
+    """Query the Gaussian SMD solvent catalog without mutating it."""
+    return frontend_api.get_solvent_catalog(query)
+
+
+@app.get("/api/molecules")
+def molecules() -> dict[str, Any]:
+    """List auditable raw quantum inputs for the proposal molecule library."""
+    return {"molecules": frontend_api.get_proposal_molecule_catalog()}
+
+
+@app.post("/api/solvents")
+def register_solvent(payload: dict[str, Any]) -> dict[str, Any]:
+    """Register one user-provided Gaussian Generic SMD solvent."""
+    from willy.quantum.smd_solvents import SMDSolventError, register_manual_solvent
+    try:
+        record = register_manual_solvent(
+            payload.get("name"), payload.get("epsilon"), payload.get("epsinf"),
+            project_root=frontend_api.ROOT,
+        )
+    except SMDSolventError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "solvent": record.as_dict()}
+
+
 @app.post("/api/config/test")
 def test_configuration(payload: dict[str, Any]) -> dict[str, Any]:
     """Probe one submitted LLM configuration without persisting it."""
@@ -1214,7 +1493,7 @@ def get_run_chat(run_id: str) -> dict[str, Any]:
     snapshot = _public_snapshot(canonical_id)
     history = _merge_status_into_history(_run_history(canonical_id), snapshot)
     _save_run_history(canonical_id, history)
-    return _run_chat_response(canonical_id, history)
+    return _run_chat_response(canonical_id, history, snapshot=snapshot)
 
 
 @app.post("/api/runs/{run_id}/chat")
@@ -1228,12 +1507,28 @@ def run_chat(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="message 超过长度限制")
     message = message.strip()
 
+    original_resume = bool(_ORIGINAL_PARAMETER_RESUME_RE.fullmatch(message))
+    if original_resume:
+        frontend_api.reconcile_stale_pipeline_state(canonical_id, source="resume_request")
     snapshot = _public_snapshot(canonical_id)
     history = _merge_status_into_history(_run_history(canonical_id), snapshot)
+    if original_resume:
+        submitted = payload if "state_revision" in payload else snapshot
+        reply = _resume_original_parameters(canonical_id, submitted, snapshot)
+        return _save_run_chat_exchange(canonical_id, history, message, reply)
+    submitted_action = (
+        payload if any(field in payload for field in _PENDING_ACTION_BINDING_FIELDS) else None
+    )
+    revision_request = _pending_action_revision_request(message)
+    if revision_request is not None:
+        reply = _revise_waiting_pending_action(canonical_id, revision_request, submitted_action)
+        if reply is None:
+            reply = "当前没有有效的待确认方案，未修改参数或启动工程。"
+        return _save_run_chat_exchange(canonical_id, history, message, reply)
     # Text confirmation is a narrow state-machine command, not an LLM intent:
     # outside awaiting_confirmation it deliberately falls through as dialogue.
     control_reply = (
-        _confirm_waiting_pending_action(canonical_id)
+        _confirm_waiting_pending_action(canonical_id, submitted_action)
         if _is_pending_action_confirmation(message)
         else None
     )
@@ -1265,16 +1560,50 @@ def run_chat(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             reply = "运行助理暂时不可用，请稍后重试。"
 
-    history.extend([
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": reply},
-    ])
-    final_snapshot = _public_snapshot(target_run_id)
-    history = _merge_status_into_history(history, final_snapshot)
-    _save_run_history(target_run_id, history)
-    response = _run_chat_response(target_run_id, history)
-    response["text"] = reply
-    return response
+    return _save_run_chat_exchange(target_run_id, history, message, reply)
+
+
+@app.post("/api/runs/{run_id}/resume")
+def resume_run(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Resume the same project with its frozen parameters, never a pending plan."""
+    canonical_id = _safe_run_id(run_id)
+    snapshot = _public_snapshot(canonical_id)
+    reply = _resume_original_parameters(canonical_id, payload, snapshot)
+    return _save_run_chat_exchange(
+        canonical_id, _run_history(canonical_id), "原参数续跑", reply,
+    )
+
+
+@app.post("/api/runs/{run_id}/fault/complete")
+def complete_run_fault(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Declare human completion of one fault; never approve or start a rerun."""
+    from willy.run_registry import RunStateConflict
+
+    canonical_id = _safe_run_id(run_id)
+    if type(payload.get("state_revision")) is not int or not isinstance(payload.get("fault_id"), str):
+        raise HTTPException(status_code=400, detail="请求缺少故障标识和状态版本")
+    try:
+        result = frontend_api.refresh_run_fault(canonical_id, declaration=payload)
+    except RunStateConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    reply = "人工处理已记录，工程已回到已中止；未启动计算。" if result.get("status") == "resolved" else "处理结果尚未通过复查，工程继续保持故障状态；未启动计算。"
+    return _save_run_chat_exchange(canonical_id, _run_history(canonical_id), "已完成人工处理，复查故障", reply)
+
+
+@app.post("/api/runs/{run_id}/pending-action/revise")
+def revise_run_pending_action(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Replace the bound proposal without confirming it or starting a run."""
+    canonical_id = _safe_run_id(run_id)
+    request = payload.get("request")
+    if not isinstance(request, str) or not request.strip():
+        raise HTTPException(status_code=400, detail="request 必须是非空文本")
+    request = request.strip()
+    reply = _revise_waiting_pending_action(canonical_id, request, payload)
+    if reply is None:
+        raise HTTPException(status_code=409, detail="当前没有有效的待确认方案")
+    return _save_run_chat_exchange(
+        canonical_id, _run_history(canonical_id), f"修改方案：{request}", reply,
+    )
 
 
 @app.post("/api/runs/{run_id}/pending-action/confirm")
@@ -1290,15 +1619,10 @@ def confirm_run_pending_action(run_id: str, payload: dict[str, Any]) -> dict[str
             status_code=409,
             detail="当前工程不在等待确认状态，未执行重跑操作",
         )
-    history.extend([
-        {"role": "user", "content": "确认调参"},
-        {"role": "assistant", "content": reply},
-    ])
-    history = _merge_status_into_history(history, _public_snapshot(canonical_id))
-    _save_run_history(canonical_id, history)
-    response = _run_chat_response(canonical_id, history)
-    response["text"] = reply
-    return response
+    target_run_id = _safe_run_id(_follow_controlled_run(canonical_id, reply))
+    if target_run_id != canonical_id:
+        history = _run_history(target_run_id)
+    return _save_run_chat_exchange(target_run_id, history, "确认调参", reply)
 
 
 @app.post("/api/runs/{run_id}/stop")

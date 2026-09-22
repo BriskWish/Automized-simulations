@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 import json
 import os
+import subprocess
+import sys
 import time
 import pytest
 
@@ -599,6 +601,37 @@ class TestOplsExecutor:
         assert observed["csh_target"] == tmp_root / "csh"
         assert observed["path"].split(":", 1)[0] == observed["pythonpath"].split(":", 1)[0]
         assert not Path(observed["path"].split(":", 1)[0]).exists()
+
+    def test_babel_wrapper_keeps_parent_python_with_spaces_and_unrelated_path(self, tmp_path, monkeypatch):
+        from willy import python_runtime
+        from willy.topology import topo_opls
+
+        interpreter = tmp_path / "python environment" / "python"
+        interpreter.parent.mkdir()
+        interpreter.symlink_to(sys.executable)
+        monkeypatch.setattr(python_runtime.sys, "executable", str(interpreter))
+        monkeypatch.setattr(topo_opls, "LIGPARGEN_TMP_DIR", tmp_path)
+        obabel = tmp_path / "Open Babel"
+        obabel.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+        obabel.chmod(0o755)
+        other_bin = tmp_path / "other-bin"
+        other_bin.mkdir()
+        wrong_python = other_bin / "python3"
+        wrong_python.write_text("#!/bin/sh\nexit 87\n")
+        wrong_python.chmod(0o755)
+
+        environment = topo_opls._prepare_ligpargen_child_env({}, "SOL_probe", obabel, Path("/bin/sh"))
+        wrapper = Path(environment["PATH"]) / "babel"
+        result = subprocess.run(
+            [str(wrapper), "-imol2", "input molecule.mol2", "-omol", "output molecule.mol"],
+            env={"PATH": str(other_bin)}, capture_output=True, text=True, timeout=10, check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [
+            "-imol2", "input molecule.mol2", "-omol", "-O", "output molecule.mol",
+        ]
+        assert "/usr/bin/env python3" not in wrapper.read_text()
 
     def test_startup_oserror_is_a_dependency_step_result(self, tmp_path, monkeypatch):
         topo_opls, _ = self._patch_ligpargen(tmp_path, monkeypatch)

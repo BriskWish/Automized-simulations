@@ -1,0 +1,45 @@
+{
+  "checked_at": "2026-09-21T14:32:54.063481+00:00",
+  "passed": true,
+  "scope": "G16 EC optimization and Generic/Read dielectric syntax, not full SMD parameter calibration",
+  "resources": {
+    "nproc": 1,
+    "mem": "1GB",
+    "timeout_s": 300
+  },
+  "solvent": {
+    "name": "Generic_validation",
+    "epsilon": "20",
+    "epsinf": "1.8",
+    "source": "manual",
+    "manual": true
+  },
+  "input": "%mem=1GB\n%nprocshared=1\n%chk=ec_generic.chk\n#p B3LYP/6-31G(d) Opt=(MaxCycles=100) SCF=XQC SCRF=(SMD,Solvent=Generic,Read)\n\nEC\n\n0 1\n C                 -0.00000000   -0.76514391   -1.30081817\n C                  0.00000000    0.76514391   -1.30081817\n H                  0.77322822   -1.20641424   -1.92757304\n H                 -0.97438220   -1.18610121   -1.56072180\n H                  0.97438220    1.18610121   -1.56072180\n H                 -0.77322822    1.20641424   -1.92757304\n C                  0.00000000   -0.00000000    0.85174276\n O                 -0.28487200    1.07905192    0.07234524\n O                  0.28487200   -1.07905192    0.07234524\n O                  0.00000000    0.00000000    2.03980342\n\nEps=20\nEpsInf=1.8\n\n",
+  "input_sha256": "a9d3baeb62d3f82848c060ece9d1df9e820e21bed32e91c398d96b6115e94af6",
+  "log_sha256": "44adc7aa41b2f62183c988a0ca9bfddcdcdf8b05659620eca50a4b4ff0f18cbd",
+  "checks": {
+    "exit_success": true,
+    "optimization_completed": true,
+    "normal_termination": true,
+    "no_error_termination": true,
+    "generic_solvent": true,
+    "epsilon_applied": true,
+    "epsinf_applied": true
+  },
+  "evidence": [
+    "Solvent              : Generic,",
+    "Eps                           =  20.000000",
+    "Eps(infinity)                 =   1.800000",
+    "Solvent              : Generic,",
+    "Eps                           =  20.000000",
+    "Eps(infinity)                 =   1.800000",
+    "Solvent              : Generic,",
+    "Eps                           =  20.000000",
+    "Eps(infinity)                 =   1.800000",
+    "Solvent              : Generic,",
+    "Eps                           =  20.000000",
+    "Eps(infinity)                 =   1.800000",
+    "Optimization completed.",
+    "Normal termination of Gaussian 16 at Mon Sep 21 22:32:54 2026."
+  ]
+}

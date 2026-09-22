@@ -306,6 +306,40 @@ class RunRegistry:
         self.append_event(directory, f"{action}_{outcome}", details)
         self._update_index(directory, manifest)
 
+    def record_interruption_recovery(
+        self,
+        run_id: str,
+        *,
+        source: str,
+        stage: str | None,
+    ) -> None:
+        """Record a bounded stale-process recovery in the registry manifest.
+
+        This audit deliberately carries only the recovery source and the
+        public MD stage. Process IDs, paths, commands, parameter values and
+        engine output remain outside the manifest.
+        """
+        if source not in {"stale_reconciliation", "service_startup", "resume_request"}:
+            raise ValueError("中断恢复来源无效")
+        if stage not in {None, "em", "eq", "prod"}:
+            raise ValueError("中断恢复阶段无效")
+        directory = self.resolve_run_id(run_id)
+        record = {
+            "recorded_at": _now(),
+            "source": source,
+            "stage": stage or "",
+            "outcome": "aborted",
+        }
+        with self._status_lock(directory):
+            manifest = self._read_registry_manifest(directory)
+            history = manifest.get("interruption_history", [])
+            history = list(history) if isinstance(history, list) else []
+            history.append(record)
+            manifest["interruption_history"] = history[-32:]
+            manifest["updated_at"] = _now()
+            self._write_registry_manifest(directory, manifest)
+        self._update_index(directory, manifest)
+
     @staticmethod
     def _load_unified_manifest(directory: Path) -> dict[str, Any] | None:
         """Return v2 metadata only when this run has opted into it.
@@ -425,12 +459,15 @@ class RunRegistry:
         status: Mapping[str, Any],
         event_type: str,
         event_details: Mapping[str, Any] | None = None,
+        pending_action: Mapping[str, Any] | None = None,
+        fault_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically persist one legal control transition from a known revision."""
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
             raise ValueError("expected_revision 必须是非负整数")
         directory = self._validate_run_directory(run_dir)
-        with self._status_lock(directory):
+        with self._status_lock(directory), run_transaction(directory) as store:
+            store.recover_pending_bundle()
             current = self._read_current_status(directory)
             actual_revision = _state_revision(current.get("state_revision"))
             if actual_revision != expected_revision:
@@ -444,6 +481,24 @@ class RunRegistry:
                 raise RunRegistryError(str(exc)) from exc
             payload = self._public_status_payload(status, directory.name)
             payload["state_revision"] = actual_revision + 1
+            writes = {STATUS_FILENAME: payload}
+            if fault_context is not None:
+                from willy.run_faults import FAULT_CONTEXT
+                if fault_context.get("run_id") != directory.name or fault_context.get("fault_id") != payload.get("fault", {}).get("fault_id"):
+                    raise RunStateConflict("故障记录与运行状态不一致")
+                writes[FAULT_CONTEXT] = dict(fault_context)
+            if pending_action is not None:
+                public_action = payload.get("extra", {}).get("pending_action", {})
+                if (
+                    current_state != "awaiting_confirmation"
+                    or payload.get("state") != "awaiting_confirmation"
+                    or pending_action.get("run_id") != directory.name
+                    or pending_action.get("state") != "pending"
+                    or not isinstance(pending_action.get("action_id"), str)
+                    or pending_action.get("action_id") != public_action.get("action_id")
+                ):
+                    raise RunStateConflict("待确认方案与运行状态不一致")
+                writes["pending_action.json"] = dict(pending_action)
             details = self._status_summary(payload)
             if event_details:
                 details["audit"] = {
@@ -454,19 +509,18 @@ class RunRegistry:
                         "evidence_age_s", "checked_revision", "grace_s",
                     }
                 }
-            with run_transaction(directory) as store:
-                store.commit_bundle(
-                    operation="compare_and_swap_status",
-                    json_writes={STATUS_FILENAME: payload},
-                    jsonl_appends={} if event_type == "runtime_heartbeat" else {
-                        EVENTS_FILENAME: [{
-                            "timestamp": _now(),
-                            "event_type": event_type,
-                            "run_id": directory.name,
-                            "details": details,
-                        }],
-                    },
-                )
+            store.commit_bundle(
+                operation="compare_and_swap_status",
+                json_writes=writes,
+                jsonl_appends={} if event_type == "runtime_heartbeat" else {
+                    EVENTS_FILENAME: [{
+                        "timestamp": _now(),
+                        "event_type": event_type,
+                        "run_id": directory.name,
+                        "details": details,
+                    }],
+                },
+            )
         try:
             manifest = self._read_registry_manifest(directory)
             self._update_index(directory, manifest, status=payload)
@@ -514,6 +568,10 @@ class RunRegistry:
         if expected_revision is not None and expected_revision != current_revision:
             raise RunStateConflict("运行状态已更新，请刷新后重试")
         updated = dict(current)
+        if state == "stopping" and current.get("error_kind") and not current.get("fault"):
+            from willy.run_faults import new_fault, FAULT_KINDS
+            if current["error_kind"] in FAULT_KINDS:
+                updated["fault"] = new_fault(current, phase="execution", error_kind=current["error_kind"])
         updated.update({
             "state": state,
             "error": "",
@@ -779,9 +837,14 @@ class RunRegistry:
     def get_run_status(self, run_id: str, *, reconcile: bool = True) -> dict[str, Any]:
         directory = self.resolve_run_id(run_id)
         status_file = directory / STATUS_FILENAME
-        if not status_file.is_file():
-            return {"run_id": run_id, "state": "unknown", "message": "该 run 尚未写入状态快照"}
-        status = self._read_json(status_file, "运行状态")
+        try:
+            with run_transaction(directory) as store:
+                store.recover_pending_bundle()
+                if not status_file.is_file():
+                    return {"run_id": run_id, "state": "unknown", "message": "该 run 尚未写入状态快照"}
+                status = self._read_json(status_file, "运行状态")
+        except (OSError, ValueError) as exc:
+            raise RunRegistryError("运行状态事务不可读取或恢复") from exc
         if reconcile:
             status = self._reconcile_active_simulation_stage(directory, status)
         status["run_id"] = run_id
@@ -1238,6 +1301,7 @@ class RunRegistry:
         return safe
 
     def _status_summary(self, status: Mapping[str, Any]) -> dict[str, Any]:
+        from willy.run_faults import public_fault
         summary = {
             "state": status.get("state", ""),
             "state_revision": _state_revision(status.get("state_revision")),
@@ -1250,6 +1314,8 @@ class RunRegistry:
             "done_steps": status.get("done_steps", []),
         }
         pending_action = self._public_pending_action(status.get("extra", {}))
+        if public_fault(status.get("fault")):
+            summary["fault"] = public_fault(status["fault"])
         if pending_action:
             summary["pending_action"] = pending_action
         completion_scope = self._public_completion_scope(status.get("extra", {}))
@@ -1282,6 +1348,7 @@ class RunRegistry:
 
     def _public_status_payload(self, status: Mapping[str, Any], run_id: str) -> dict[str, Any]:
         """Strip agent internals, raw output, absolute paths, and free text."""
+        from willy.run_faults import public_fault
         extra: dict[str, Any] = {"run_id": run_id}
         pending_action = self._public_pending_action(status.get("extra", {}))
         if pending_action:
@@ -1294,6 +1361,7 @@ class RunRegistry:
             extra["completion_scope"] = completion_scope
         return {
             "run_id": run_id,
+            **({"fault": public_fault(status["fault"])} if public_fault(status.get("fault")) else {}),
             "state": status.get("state", "unknown"),
             "step": status.get("step", 0),
             "step_label": status.get("step_label", ""),

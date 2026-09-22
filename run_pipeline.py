@@ -70,6 +70,14 @@ def _parse_args(argv: list[str]) -> tuple[bool, str, Path | None, int | None, st
     return no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id, resume_from_step
 
 
+def _record_runner_fault(run_dir: Path, phase: str, exception: Exception, kind: str = "unexpected_exception") -> None:
+    try:
+        from willy.run_faults import record_fault
+        record_fault(ROOT, run_dir.name, phase=phase, error_kind=kind, exception=exception)
+    except Exception:
+        print("故障状态无法写入，请检查本地运行记录。", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         no_llm, backend, run_dir, lock_fd, launch_token, pending_action_id, resume_from_step = _parse_args(argv or sys.argv[1:])
@@ -79,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
 
     reservation = None
     try:
+        from willy.controlled_launch import wait_for_launch_permission
+        wait_for_launch_permission()
         if lock_fd is None:
             reservation = reserve_pipeline_launch(ROOT)
             run_dir = reservation.run_dir
@@ -89,13 +99,16 @@ def main(argv: list[str] | None = None) -> int:
         write_startup_audit(ROOT, "lock_conflict")
         print("已有任务运行")
         return 1
-    except PipelineLaunchError:
+    except (PipelineLaunchError, OSError, ValueError):
+        if lock_fd is not None:
+            os.close(lock_fd)
         write_startup_audit(ROOT, "failed")
         print("启动失败")
         return 1
 
     success = False
     orchestrator = None
+    exit_code = 1
 
     def _abort_on_signal(_signum, _frame) -> None:
         raise KeyboardInterrupt
@@ -114,17 +127,29 @@ def main(argv: list[str] | None = None) -> int:
             controlled_resume_step=resume_from_step or 0,
         )
         success = orchestrator.run(run_dir=run_dir)
-        return 0 if success else 1
+        exit_code = 0 if success else 1
     except KeyboardInterrupt:
-        if orchestrator is not None:
-            orchestrator.abort_from_signal()
-        return 130
+        try:
+            if orchestrator is not None:
+                orchestrator.abort_from_signal()
+            exit_code = 130
+        except Exception as exc:
+            _record_runner_fault(run_dir, "stopping", exc, "stop_failed")
+    except Exception as exc:
+        _record_runner_fault(run_dir, "initialization", exc)
     finally:
-        for sig, handler in previous_handlers.items():
-            signal.signal(sig, handler)
-        if not success and (orchestrator is None or orchestrator._run_dir is None):
-            write_startup_audit(ROOT, "failed")
-        reservation.release()
+        try:
+            try:
+                for sig, handler in previous_handlers.items():
+                    signal.signal(sig, handler)
+                if not success and (orchestrator is None or orchestrator._run_dir is None):
+                    write_startup_audit(ROOT, "failed")
+            finally:
+                reservation.release()
+        except Exception as exc:
+            _record_runner_fault(run_dir, "cleanup", exc, "cleanup_failed")
+            exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":

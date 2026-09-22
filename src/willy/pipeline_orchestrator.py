@@ -154,6 +154,18 @@ class PipelineOrchestrator:
     # ============================================================
 
     def _build_steps(self, run_dir: Path) -> list[tuple]:
+        from willy.step_contracts import execute_step
+
+        guarded_steps = []
+        for index, (label, function, dependency, batch, layer) in enumerate(self._build_unchecked_steps(run_dir), 1):
+            def guarded(function=function, index=index, batch=batch):
+                result = execute_step(run_dir, index, function)
+                return [result] if batch and not isinstance(result, list) else result
+
+            guarded_steps.append((label, guarded, dependency, batch, layer))
+        return guarded_steps
+
+    def _build_unchecked_steps(self, run_dir: Path) -> list[tuple]:
         from willy.quantum.struct_g16 import run_all as g16_struct
         from willy.quantum.struct_g09 import run_all as g09_struct
         from willy.quantum.struct_orca import run_all as orca_struct
@@ -422,6 +434,8 @@ class PipelineOrchestrator:
                 agent.set_workspace(str(run_dir), str(config_snapshot))
         from willy.simulation.manifest import initialize_manifest
         initialize_manifest(run_dir, config_snapshot, random_seed=run_seed)
+        from willy.step_contracts import initialize_contracts
+        initialize_contracts(run_dir)
         from willy.run_provenance import create_or_refresh_provenance
         create_or_refresh_provenance(
             run_dir,
@@ -457,10 +471,26 @@ class PipelineOrchestrator:
     # ============================================================
 
     def run(self, run_dir: Optional[Path] = None) -> bool:
+        self._fault_phase = "initialization"
+        self._fault_module = None
+        try:
+            return self._run(run_dir)
+        except Exception as exc:
+            directory = self._run_dir or run_dir
+            if directory is not None:
+                try:
+                    from willy.run_faults import record_fault
+                    root = Path(directory).resolve().parent.parent
+                    record_fault(root, Path(directory).name, phase=self._fault_phase,
+                                 exception=exc, module=self._fault_module)
+                except (OSError, ValueError, RuntimeError):
+                    print("[orchestrator] 故障记录未能持久化，禁止自动继续；请检查本地运行状态。", file=sys.stderr)
+            return False
+
+    def _run(self, run_dir: Optional[Path] = None) -> bool:
         if self._confirmed_action_id:
-            if run_dir is None:
-                raise ValueError("确认后的 EQ 重跑必须提供原运行目录")
-            return self._run_confirmed_eq_action(Path(run_dir).resolve())
+            print("调参确认必须通过服务端创建独立分支，禁止覆盖原工程重跑")
+            return False
         # ── 断点续跑：复用上次运行目录 ──
         if run_dir is None:
             if self._resume_run_dir:
@@ -543,6 +573,8 @@ class PipelineOrchestrator:
                 message_code="step.started",
             )
 
+            self._fault_phase = "preflight"
+            self._fault_module = dep_module
             if dep_module:
                 try:
                     ensure(dep_module)
@@ -577,7 +609,9 @@ class PipelineOrchestrator:
 
             print(f"\n{'='*60}\n  {i}/{len(steps)} {label}\n{'='*60}")
 
+            self._fault_phase = "execution"
             result = func()
+            self._fault_phase = "acceptance"
             if self._abort_if_stop_requested(run_dir):
                 return False
             if is_batch:
@@ -586,11 +620,13 @@ class PipelineOrchestrator:
             else:
                 self._record_step_result(result, label)
 
+            self._fault_phase = "recovery"
             if is_batch:
                 ok = self._handle_batch_result(result, label, run_dir, accumulated_artifacts, layer_index, i)
             else:
                 ok = self._handle_single_result(result, label, run_dir, accumulated_artifacts, layer_index, i)
 
+            self._fault_phase = "acceptance"
             if ok:
                 if self._rerun_step == i:
                     self._rerun_step = None
@@ -599,6 +635,14 @@ class PipelineOrchestrator:
                     step_position = self._rollback_to_step
                     self._rollback_to_step = None
                     continue
+                try:
+                    from willy.step_contracts import accept_recovered_step
+
+                    accept_recovered_step(run_dir, i)
+                except (OSError, ValueError) as exc:
+                    self._sm.set_error(str(exc), ErrorKind.INPUT_CONTRACT.value)
+                    self._sm.transition(State.ABORTED)
+                    return False
                 completion_failure = self._completion_contract_failure(i, run_dir)
                 if completion_failure is not None:
                     self._record_step_result(completion_failure, label)
@@ -659,11 +703,18 @@ class PipelineOrchestrator:
         self._run_registry = registry
         self._sm.bind_status_path(run_dir / "status.json")
         self._sm.bind_observer(self._record_run_status)
-        if not config_path.is_file():
-            raise ValueError("恢复运行缺少配置快照")
+        status = registry.get_run_status(run_dir.name, reconcile=False)
+        if status.get("state") != State.RETRYING.value:
+            raise ValueError("恢复运行未进入受控重试状态")
+        self._sm.restore_for_controlled_resume(status)
         manifest = registry._read_registry_manifest(run_dir)
         if manifest.get("backend") != self.backend:
             raise ValueError("恢复运行的后端与冻结配置不一致")
+        from willy.resume_admission import validate_resume_admission
+        validate_resume_admission(
+            run_dir, backend=self.backend, status=status,
+            restart_step=self._controlled_resume_step,
+        )
         # A normal resume preserves its existing MD manifest.  An early fork
         # from the original rollout could contain only the registry section,
         # which is not a valid MD manifest for the MDP metadata writer.
@@ -682,10 +733,6 @@ class PipelineOrchestrator:
                 initialize_manifest(run_dir, config_path, random_seed=int(raw_seed))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"恢复运行的 MD manifest 无效: {exc}") from exc
-        status = registry.get_run_status(run_dir.name, reconcile=False)
-        if status.get("state") != State.RETRYING.value:
-            raise ValueError("恢复运行未进入受控重试状态")
-        self._sm.restore_for_controlled_resume(status)
         self._sm.invalidate_for_controlled_restart(self._controlled_resume_step)
         for agent in self._agents.values():
             if agent is not None and hasattr(agent, "set_workspace"):
@@ -919,6 +966,12 @@ class PipelineOrchestrator:
 
     def _abort_if_stop_requested(self, run_dir: Path) -> bool:
         """Consume a persisted user request before an error can enter retry logic."""
+        if self._run_registry is not None:
+            try:
+                if self._run_registry.get_run_status(run_dir.name, reconcile=False).get("state") == "escalated":
+                    return True
+            except (OSError, RunRegistryError):
+                pass
         try:
             from willy.simulation.manifest import clear_stop_request, stop_requested
             if not stop_requested(run_dir):
@@ -1677,7 +1730,7 @@ class PipelineOrchestrator:
         step_index: int,
         run_dir: Path,
     ) -> StepResult | None:
-        """Remove only named, regenerateable artifacts before accepting PROD.
+        """Archive only named, regenerateable artifacts before accepting PROD.
 
         The cleanup is intentionally limited to direct children of the current
         run directory.  Names come from its frozen configuration so stage
@@ -1708,9 +1761,10 @@ class PipelineOrchestrator:
                 for suffix in (".chg", ".chk", ".gro", ".log", "_opt.chk", "_opt.log")
             ]
             paths.extend(run_dir.glob("*_out.mdp"))
-            for path in paths:
-                if path.is_file():
-                    path.unlink()
+            from uuid import uuid4
+            from willy.step_contracts import archive_files
+
+            archive_files(run_dir, {path for path in paths if path.is_file()}, f"prod-cleanup-{uuid4().hex}", step=10)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return StepResult(
                 step_name="prod",
@@ -2070,7 +2124,7 @@ def _g16_sp_and_mol2(config_path: str, on_progress=None,
         nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
         sr = sp_run(
             fchk_path, charge=charge, spin=spin, workdir=str(workspace),
-            mem=mem, nproc=nproc,
+            mem=mem, nproc=nproc, solvent=cfg.get("solvent", "gas"), solvent_ref=cfg.get("solvent_ref"),
         )
         if sr.success:
             opt_fchk = sr.outputs["fchk"]
@@ -2124,7 +2178,7 @@ def _g09_sp_and_mol2(config_path: str, on_progress=None,
         nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
         sr = sp_run(
             fchk_path, charge=charge, spin=spin, workdir=str(workspace),
-            mem=mem, nproc=nproc,
+            mem=mem, nproc=nproc, solvent=cfg.get("solvent", "gas"), solvent_ref=cfg.get("solvent_ref"),
         )
         if sr.success:
             opt_fchk = sr.outputs["fchk"]

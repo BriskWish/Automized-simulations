@@ -71,13 +71,15 @@ def test_pending_action_applies_only_its_validated_fields(tmp_path):
         ],
     })
 
-    applied = apply_pending_action(run_dir, action["action_id"])
-    config = json.loads((run_dir / "config.json").read_text())
+    from willy.branching import preview_repair_config
+    before = (run_dir / "config.json").read_bytes()
+    applied, config = preview_repair_config(run_dir, action["action_id"])
 
-    assert applied["state"] == "applied"
+    assert applied["state"] == "pending"
+    assert (run_dir / "config.json").read_bytes() == before
     assert config["md"]["dt"] == 0.0005
     assert config["md"]["eq"]["segments_ns"]["hold_target"] == 4.0
-    with pytest.raises(PendingActionError, match="已失效"):
+    with pytest.raises(PendingActionError, match="不能写回父工程"):
         apply_pending_action(run_dir, action["action_id"])
 
 

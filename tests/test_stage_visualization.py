@@ -39,6 +39,7 @@ def _install_editconf_stub(monkeypatch, *, mutate_source=False):
     monkeypatch.setattr(visualization, "build_tool_env", lambda _tool_id: {})
 
     def fake_run(command, *, cwd, timeout, env, run_dir):
+        assert timeout == 20
         assert command[1:3] == ["editconf", "-f"]
         source = command[3]
         output = command[command.index("-o") + 1]
@@ -51,7 +52,7 @@ def _install_editconf_stub(monkeypatch, *, mutate_source=False):
         )
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(visualization, "run_managed_command", fake_run)
+    monkeypatch.setattr(visualization, "run_gmx_auxiliary", fake_run)
 
 
 def test_stage_visualization_converts_gro_after_acceptance(tmp_path, monkeypatch):

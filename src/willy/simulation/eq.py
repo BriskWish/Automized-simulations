@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import math
 
 from willy._paths import get_project_root
 from willy.errors import ErrorKind, StepError, StepResult
@@ -15,6 +16,7 @@ from willy.simulation._gmx_utils import (
     record_stage_execution,
 )
 from willy.simulation.manifest import ManifestError
+from willy.simulation.eq_acceptance import EQ_ACCEPTANCE_POLICY, EQ_WINDOW_NS, EQCoverageError, EQWindow
 from willy.simulation.mdp import load_mdp_config
 from willy.step_registry import EQ_STEP
 
@@ -95,8 +97,20 @@ def _contract_failure(message: str) -> StepResult:
     )
 
 
-def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temperature: float) -> tuple[dict, list[str]]:
+def _acceptance_details(
+    cwd: Path, hold_ns: float, acceptance: dict, target_temperature: float,
+    *, window: EQWindow | None = None,
+) -> tuple[dict, list[str]]:
     window_ns = float(acceptance["window_ns"])
+    if not all(math.isfinite(float(value)) for value in (
+        hold_ns, window_ns, target_temperature,
+        acceptance["temperature_abs_tolerance_k"],
+        acceptance["max_potential_relative_slope_per_ns"],
+    )):
+        return {
+            "auto_acceptance": False,
+            "reason": "EQ 验收参数必须为有限数值",
+        }, ["EQ 验收参数必须为有限数值"]
     if hold_ns < window_ns:
         return {
             "auto_acceptance": False,
@@ -104,6 +118,13 @@ def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temp
             "hold_target_ns": hold_ns,
             "acceptance_window_ns": window_ns,
         }, ["最终 298 K 保温段短于 EQ 验收窗口，禁止自动判定已平衡"]
+
+    try:
+        if window is None or window_ns != EQ_WINDOW_NS:
+            raise EQCoverageError("EQ 五段验收必须具有已验证的最后 1 ns 时间协议")
+        completion = window.completion(cwd / "eq.log")
+    except EQCoverageError as exc:
+        return {"auto_acceptance": False, "reason": str(exc)}, [str(exc)]
 
     series = {
         "density": ("Density", cwd / "density.xvg"),
@@ -113,6 +134,8 @@ def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temp
     }
     details = {
         "auto_acceptance": True,
+        "acceptance_policy": EQ_ACCEPTANCE_POLICY,
+        "completion": completion,
         "hold_target_ns": hold_ns,
         "acceptance_window_ns": window_ns,
         "series": {},
@@ -125,11 +148,11 @@ def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temp
             if key in {"temperature", "potential"}:
                 issues.append(f"无法提取 {term} 能量项")
             continue
-        stats = analyze_final_window(output, window_ns * 1000.0)
+        stats = analyze_final_window(output, window_ns * 1000.0, coverage=window)
         details["series"][key] = stats
         if not stats.get("ok"):
-            if key in {"temperature", "potential"}:
-                issues.append(f"{term} 的最终窗口采样不足")
+            details["auto_acceptance"] = False
+            issues.append(f"{term} 的最终窗口不可验收：{stats.get('reason', '采样不足')}")
             continue
         if key == "potential" and stats["relative_slope_per_ns"] > float(
             acceptance["max_potential_relative_slope_per_ns"]
@@ -140,6 +163,7 @@ def _acceptance_details(cwd: Path, hold_ns: float, acceptance: dict, target_temp
         float(temperature["mean"]) - target_temperature
     ) > float(acceptance["temperature_abs_tolerance_k"]):
         issues.append("最终温度均值偏离目标温度")
+    details["auto_acceptance"] = not issues
     return details, issues
 
 
@@ -170,6 +194,16 @@ def run_eq(
         )
     except (ManifestError, OSError, ValueError) as exc:
         return _contract_failure(f"EQ 输入契约不满足: {exc}")
+
+    try:
+        window = EQWindow.from_mdp(
+            preparation.inputs.mdp, preparation.metadata,
+            float(configuration.values["eq"]["target_temperature"]),
+        )
+    except EQCoverageError as exc:
+        result = _contract_failure(str(exc))
+        record_stage_execution(preparation, success=False, error=result.error)
+        return result
 
     gmx_result = grompp_and_mdrun(
         "eq", cwd,
@@ -208,6 +242,7 @@ def run_eq(
         hold_ns,
         eq["acceptance"],
         float(eq["target_temperature"]),
+        window=window,
     )
     outputs = dict(gmx_result.outputs)
     artifacts = list(gmx_result.artifacts)
@@ -237,7 +272,7 @@ def run_eq(
         error=StepError(
             ErrorKind.EQUILIBRATION_FAILED,
             "EQ 验收未通过: " + "; ".join(issues),
-            hint="检查最终目标温度均值和势能线性斜率",
+            hint="检查 EQ 正常结束、最后 1 ns 五段覆盖以及整体温度均值和势能线性斜率",
         ),
         outputs=outputs,
         artifacts=artifacts,

@@ -4,11 +4,12 @@ pipeline_state.py
 流水线状态机 —— 管理执行状态、写入共享状态文件供前端轮询。
 
 状态流转:
-  IDLE → RUNNING → RETRYING → RUNNING → ... → DONE
-                      ↓                    ↑
-                   ESCALATED ───────────────┘
-                      ↓
-                   ABORTED
+  IDLE → RUNNING ⇄ RETRYING → RUNNING → DONE
+  RUNNING / RETRYING → AWAITING_CONFIRMATION → RETRYING
+  RUNNING / RETRYING → ESCALATED → ABORTED → AWAITING_CONFIRMATION
+  RUNNING / RETRYING / AWAITING_CONFIRMATION → STOPPING → ABORTED
+  非完成状态的执行或控制故障 → ESCALATED；人工处理后复查 → ABORTED，不自动续跑。
+  确认调参方案创建独立子工程，不将父工程直接切换为 RUNNING。
 
 用法:
   sm = PipelineStateMachine()
@@ -75,15 +76,15 @@ _ALLOWED_TRANSITIONS: dict[State, frozenset[State]] = {
         State.ESCALATED, State.ABORTED,
     }),
     State.AWAITING_CONFIRMATION: frozenset({
-        State.RETRYING, State.STOPPING, State.ABORTED,
+        State.RETRYING, State.STOPPING, State.ABORTED, State.ESCALATED,
     }),
-    State.STOPPING: frozenset({State.ABORTED}),
+    State.STOPPING: frozenset({State.ABORTED, State.ESCALATED}),
     State.ESCALATED: frozenset({State.ABORTED}),
     State.DONE: frozenset(),
     # A user may explicitly re-open an interrupted run through the bounded
     # Run Assistant control path.  It must first become awaiting_confirmation;
     # no direct aborted -> running/retrying transition is permitted.
-    State.ABORTED: frozenset({State.AWAITING_CONFIRMATION}),
+    State.ABORTED: frozenset({State.AWAITING_CONFIRMATION, State.ESCALATED}),
 }
 
 
@@ -117,6 +118,7 @@ class PipelineStatus:
     actions: list[str] = field(default_factory=list)  # Agent 已尝试的动作
     adjustments: list[dict[str, str]] = field(default_factory=list)  # 已应用的安全配置差异
     escalation: dict = field(default_factory=dict)     # escalation 详情
+    fault: dict = field(default_factory=dict)
     started_at: str = ""              # ISO timestamp
     updated_at: str = ""              # ISO timestamp
     state_revision: int = 0           # Monotonic revision for compare-and-write control
@@ -211,6 +213,11 @@ class PipelineStateMachine:
 
     def _set_state(self, state: State) -> None:
         validate_state_transition(self._status.state, state)
+        if state == State.ESCALATED and self._status.state != State.ESCALATED.value:
+            from willy.run_faults import FAULT_KINDS, new_fault
+            kind = self._status.error_kind if self._status.error_kind in FAULT_KINDS else "unknown"
+            phase = "stopping" if self._status.state == State.STOPPING.value else "recovery"
+            self._status.fault = new_fault(self._status.__dict__, phase=phase, error_kind=kind)
         self._status.state = state.value
 
     def transition(self, state: State, **kwargs):
@@ -457,7 +464,7 @@ class PipelineStateMachine:
                             # A stop request advanced the status externally;
                             # the runner may only finalize that request.
                             self._status.state_revision = persisted_revision
-                        elif persisted_state in {State.STOPPING.value, State.ABORTED.value}:
+                        elif persisted_state in {State.STOPPING.value, State.ABORTED.value, State.ESCALATED.value}:
                             self._adopt_persisted_status(persisted)
                             return
                         else:
@@ -503,12 +510,13 @@ class PipelineStateMachine:
         revision = _state_revision(values.get("state_revision"))
         values["state_revision"] = revision
         state = values.get("state")
-        if state not in {State.STOPPING.value, State.ABORTED.value}:
+        if state not in {State.STOPPING.value, State.ABORTED.value, State.ESCALATED.value}:
             raise StateRevisionConflict("外部状态快照无效")
         self._status = PipelineStatus(**values)
 
     def _public_payload(self) -> dict:
         """Return the safe state persisted for UI polling and run audit."""
+        from willy.run_faults import public_fault
         status = self._status
         extra = {}
         if status.extra.get("run_id"):
@@ -521,6 +529,7 @@ class PipelineStateMachine:
             extra["completion_scope"] = completion_scope
         return {
             "state": status.state,
+            **({"fault": public_fault(status.fault)} if public_fault(status.fault) else {}),
             "step": status.step,
             "step_label": status.step_label,
             "layer": status.layer,

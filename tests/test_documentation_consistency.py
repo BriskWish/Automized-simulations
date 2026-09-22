@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
 
 
@@ -61,3 +62,43 @@ def test_registry_assigns_owners_to_current_acceptance_documents() -> None:
         rows = [line for line in registry.splitlines() if document in line and line.startswith("|")]
         assert len(rows) == 1
         assert owner in rows[0]
+
+
+def test_eq_coverage_contract_replaces_plan_and_has_sanitized_evidence() -> None:
+    from willy.simulation.eq_acceptance import EQ_ACCEPTANCE_POLICY
+
+    report = json.loads((ROOT / "tests/reports/audits/g09_eq_coverage_20260906.json").read_text())
+    assert report["policy"] == EQ_ACCEPTANCE_POLICY and report["passed"] is True
+    for case in report["cases"].values():
+        assert case["originals_unchanged"] is True
+        assert case["accepted"] == case["production_permission"] == case["expected_accepted"]
+        assert case["managed_auxiliary_execution"] is True
+    text = json.dumps(report, ensure_ascii=False)
+    for forbidden in ("/home/", "/tmp/", "md_run/", "raw_output", "stderr", "api_key", "api-key", "Bearer "):
+        assert forbidden not in text
+    revision = (ROOT / "docs/revision.md").read_text()
+    assert "EQ 最后 1 ns 五段覆盖验收" not in revision
+    gaps = (ROOT / "docs/project_gap_analysis.md").read_text()
+    open_items, closed_items = gaps.split("## 已关闭项", 1)
+    assert "| G-09 |" not in open_items and "| G-09 |" in closed_items
+    assert EQ_ACCEPTANCE_POLICY in (ROOT / "docs/simulation.md").read_text()
+
+
+def test_charge_policy_documents_match_the_runtime_tolerance() -> None:
+    from willy.simulation._gmx_utils import GROMPP_NET_CHARGE_TOLERANCE_E
+
+    tolerance = f"{GROMPP_NET_CHARGE_TOLERANCE_E:g} e"
+    for document in (
+        "README.md", "PROJECT_OVERVIEW.md", "docs/ERR_WARN_Build.md",
+        "docs/quantum.md", "docs/simulation.md",
+    ):
+        content = (ROOT / document).read_text(encoding="utf-8")
+        assert f"{tolerance}`" in content, document
+        assert "grompp" in content and "Ewald" in content, document
+        if document != "README.md":
+            assert "charge_imbalance" in content, document
+
+    boundary = f"[-{tolerance}, +{tolerance}]"
+    for document in ("docs/ERR_WARN_Build.md", "docs/simulation.md"):
+        content = (ROOT / document).read_text(encoding="utf-8")
+        assert boundary in content, document

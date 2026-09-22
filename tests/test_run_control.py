@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +16,7 @@ from willy.run_control import (
     validate_fork_changes,
 )
 from willy.run_registry import RunRegistry
-from willy.simulation.manifest import load_manifest
+from willy.simulation.manifest import initialize_manifest, load_manifest, record_stage_result
 from willy.simulation.mdp import build_all
 from willy.simulation.protocol import default_md_config
 
@@ -43,11 +45,27 @@ def _aborted_run(
     (directory / "topol.top").write_text("; parent upstream output\n", encoding="utf-8")
     registry = RunRegistry(tmp_path)
     registry.register_run(directory, backend="g16", total_steps=10)
+    initialize_manifest(
+        directory, directory / "config.json", random_seed=1,
+        versions={"gromacs": "test", "packmol": "test"},
+    )
+    for filename in ("Li.itp", "Li.gro", "model.pdb", "em.mdp", "eq.mdp", "prod.mdp"):
+        (directory / filename).write_text("fixture input\n", encoding="utf-8")
+    for stage, stage_step in (("em", 8), ("eq", 9)):
+        if step > stage_step:
+            outputs = {}
+            for suffix in ("tpr", "gro", "xtc", "edr", "cpt"):
+                path = directory / f"{stage}.{suffix}"
+                path.write_text("accepted output\n", encoding="utf-8")
+                outputs[suffix] = str(path)
+            record_stage_result(directory, stage, success=True, contract={}, outputs=outputs)
     registry.record_status(directory, {
         "state": state, "step": step,
         "step_label": "GROMACS 能量最小化", "layer": "simulation",
         "activity": {}, "done_steps": list(range(1, step)),
     }, "run_aborted")
+    from tests.run_contract_fixture import seed_contracts
+    seed_contracts(directory)
     return registry, directory
 
 
@@ -133,7 +151,7 @@ def test_switch_rejects_an_unknown_but_well_formed_run(tmp_path, monkeypatch):
     assert reply == "工程切换失败：指定运行不存在或已不可读取。"
 
 
-def test_fork_parameter_must_belong_to_stopped_or_later_step():
+def test_fork_invalidates_from_parameter_owner_even_before_stop():
     command = parse_run_control_command("/fork md.eq.tau_p=3")
     assert command is not None
     accepted = validate_fork_changes(_config(), command.changes, stopped_at=8)
@@ -142,8 +160,7 @@ def test_fork_parameter_must_belong_to_stopped_or_later_step():
 
     too_early = parse_run_control_command("/fork md.dt=0.002")
     assert too_early is not None
-    with pytest.raises(RunControlError, match="早于上次停止"):
-        validate_fork_changes(_config(), too_early.changes, stopped_at=8)
+    assert validate_fork_changes(_config(), too_early.changes, stopped_at=8).restart_step == 6
 
 
 def test_resume_reuses_same_run_from_last_safe_step_and_audits(tmp_path, monkeypatch):
@@ -167,13 +184,51 @@ def test_resume_reuses_same_run_from_last_safe_step_and_audits(tmp_path, monkeyp
     assert status["step"] == 8
     assert status["done_steps"] == list(range(1, 8))
     args, kwargs = spawned[0]
+    assert args[:3] == [sys.executable, str(tmp_path / "run_pipeline.py"), "g16"]
     assert args[-2:] == ["--resume-from-step", "8"]
-    assert kwargs["pass_fds"] == (19,)
+    assert kwargs["pass_fds"][0] == 19
+    assert len(kwargs["pass_fds"]) == 2
     manifest = RunRegistry(tmp_path)._read_registry_manifest(directory)
     assert manifest["control_history"][-1]["outcome"] == "launched"
     events = (directory / "events.jsonl").read_text(encoding="utf-8")
     assert "resume_intent_accepted" in events
     assert "controlled_retry_started" in events
+    assert "resume_launched" in events
+
+
+def test_resume_reconciles_a_stale_running_run_before_same_directory_replay(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    registry, directory = _aborted_run(tmp_path, step=9, state="running")
+    stale_status = registry.get_run_status(directory.name, reconcile=False)
+    stale_status.update({
+        "activity": {
+            "tool": "GROMACS", "operation": "运行模拟",
+            "target_type": "stage", "target": "eq", "current": 2, "total": 2,
+        },
+        "updated_at": "2026-08-14T00:00:00+00:00",
+    })
+    registry.record_status(directory, stale_status, "runtime_heartbeat")
+    reservation = _Reservation(directory)
+    spawned = []
+    monkeypatch.setattr(frontend_api, "is_pipeline_running", lambda: False)
+    monkeypatch.setattr(frontend_api, "reserve_existing_run_launch", lambda *_args: reservation)
+    monkeypatch.setattr(
+        frontend_api.subprocess, "Popen",
+        lambda args, **kwargs: spawned.append((args, kwargs)) or _Process(),
+    )
+    monkeypatch.setattr(frontend_api.threading, "Thread", _IdleThread)
+
+    reply = frontend_api.run_assistant_control_command(directory.name, "/resume")
+
+    assert "已接受 /resume" in reply
+    assert reservation.run_dir == directory
+    assert spawned[0][0][-2:] == ["--resume-from-step", "9"]
+    status = RunRegistry(tmp_path).get_run_status(directory.name, reconcile=False)
+    assert status["state"] == "retrying"
+    assert status["done_steps"] == list(range(1, 9))
+    events = (directory / "events.jsonl").read_text(encoding="utf-8")
+    assert "run_aborted_after_process_exit" in events
+    assert '"source": "resume_request"' in events
     assert "resume_launched" in events
 
 
@@ -211,7 +266,7 @@ def test_orchestrator_binds_controlled_resume_without_reinitializing_workspace(t
     assert load_manifest(directory)["schema_version"] == 1
 
 
-def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp_path, monkeypatch):
+def test_fork_inherits_context_without_mutating_parent(tmp_path, monkeypatch):
     import willy.simulation.manifest as simulation_manifest
 
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
@@ -237,6 +292,7 @@ def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp
         lambda args, **kwargs: spawned.append((args, kwargs)) or _Process(),
     )
     monkeypatch.setattr(frontend_api.threading, "Thread", _IdleThread)
+    parent_before = {path.name: path.read_bytes() for path in parent.iterdir() if path.is_file()}
 
     reply = frontend_api.run_assistant_control_command(parent.name, "/fork md.eq.tau_p=3")
 
@@ -244,10 +300,9 @@ def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp
     assert json.loads((parent / "config.json").read_text())["md"]["eq"]["tau_p"] == 2.0
     assert json.loads((child / "config.json").read_text())["md"]["eq"]["tau_p"] == 3
     assert (child / "topol.top").read_text() == "; parent upstream output\n"
-    assert not (child / "em.tpr").exists()
-    assert not (child / "eq.cpt").exists()
-    assert not (child / "model.pdb").exists()
-    assert not (child / "run_assistant_history.json").exists()
+    for name in ("em.tpr", "eq.cpt", "model.pdb", "run_assistant_history.json"):
+        assert (child / name).is_file()
+        assert (child / name).stat().st_ino != (parent / name).stat().st_ino
     assert load_manifest(child)["schema_version"] == 1
     assert build_all(str(child / "config.json"), str(child)).success
     assert load_manifest(child)["protocol"]["mdp"]["stages"]["prod"]["nsteps"] > 0
@@ -261,13 +316,45 @@ def test_fork_creates_isolated_child_with_parent_audit_and_modified_snapshot(tmp
     assert "fork_intent_accepted" in (child / "events.jsonl").read_text()
     assert "controlled_retry_started" in (child / "events.jsonl").read_text()
     args, _kwargs = spawned[0]
+    assert args[:3] == [sys.executable, str(tmp_path / "run_pipeline.py"), "g16"]
     assert args[-2:] == ["--resume-from-step", "6"]
-    parent_manifest = RunRegistry(tmp_path)._read_registry_manifest(parent)
-    assert parent_manifest["control_history"][-1]["action"] == "fork"
-    assert "fork_accepted" in (parent / "events.jsonl").read_text()
+    assert {name: (parent / name).read_bytes() for name in parent_before} == parent_before
 
 
-def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypatch):
+def test_controlled_child_uses_parent_python_when_path_points_elsewhere(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    other_bin = tmp_path / "other python"
+    other_bin.mkdir()
+    wrong_python = other_bin / "python3"
+    wrong_python.write_text("#!/bin/sh\nexit 87\n", encoding="utf-8")
+    wrong_python.chmod(0o755)
+    monkeypatch.setenv("PATH", str(other_bin))
+    result_path = tmp_path / "child.json"
+    (tmp_path / "run_pipeline.py").write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "descriptor = int(sys.argv[sys.argv.index('--lock-fd') + 1])\n"
+        "os.fstat(descriptor)\n"
+        f"Path({str(result_path)!r}).write_text(json.dumps(sys.executable))\n",
+        encoding="utf-8",
+    )
+    descriptor = os.open(tmp_path / "launch.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        reservation = SimpleNamespace(run_dir=tmp_path, fd=descriptor, token="probe-token")
+        process = frontend_api._spawn_controlled_run(reservation, backend="g16", restart_step=9)
+        try:
+            assert process.wait(timeout=10) == 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    finally:
+        os.close(descriptor)
+    assert json.loads(result_path.read_text()) == sys.executable
+
+
+@pytest.mark.parametrize("source_state", ("aborted", "escalated"))
+def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypatch, source_state):
     import willy.agent_config as agent_config
 
     class Replies:
@@ -277,7 +364,7 @@ def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypa
             ))])
 
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
-    _registry, parent = _aborted_run(tmp_path, step=9)
+    _registry, parent = _aborted_run(tmp_path, step=9, state=source_state)
     monkeypatch.setattr(
         agent_config,
         "_DS",
@@ -291,26 +378,26 @@ def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypa
 
     assert "待确认 fork 方案" in reply
     status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
-    assert status["state"] == "awaiting_confirmation"
+    assert status["state"] == source_state
     proposal = frontend_api.get_pending_fork(parent.name)
     assert proposal is not None, status
     assert proposal["changes"] == [{"path": "md.eq.tau_p", "value": 1}]
     assert not list((tmp_path / "md_run").glob("md__20260814000[2-9]"))
     events = (parent / "events.jsonl").read_text(encoding="utf-8")
-    assert "fork_proposal_created" in events
-    assert "fork_proposed" in events
+    assert "fork_proposal_created" not in events
+    assert "fork_proposed" not in events
 
 
-def test_natural_language_fork_rejects_non_aborted_child_with_state_reason(tmp_path, monkeypatch):
+def test_natural_language_fork_rejects_running_child_with_state_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
-    _registry, directory = _aborted_run(tmp_path, state="escalated")
+    _registry, directory = _aborted_run(tmp_path, state="running")
 
     reply = frontend_api.run_assistant_control_command(
         directory.name, "/fork eq阶段的tau_p改为1"
     )
 
     assert "当前工程不能创建 fork" in reply
-    assert "运行不处于可控中止状态" in reply
+    assert "父工程仍在运行或尚未到可分支状态" in reply
     assert "path=value" not in reply
 
 
@@ -363,19 +450,18 @@ def test_confirmed_natural_language_fork_creates_child_only_after_approval(tmp_p
     assert frontend_api.get_pending_fork(parent.name) is None
     parent_status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
     assert parent_status["state"] == "aborted"
-    assert "fork_proposal_confirmed" in (parent / "events.jsonl").read_text(encoding="utf-8")
+    assert "fork_proposal_confirmed" not in (parent / "events.jsonl").read_text(encoding="utf-8")
 
 
-def test_rejected_early_fork_returns_parent_to_awaiting_confirmation(tmp_path, monkeypatch):
+def test_rejected_fork_keeps_parent_state_and_history(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     _registry, directory = _aborted_run(tmp_path)
 
-    reply = frontend_api.run_assistant_control_command(directory.name, "/fork md.dt=0.002")
+    before = (directory / "run_manifest.json").read_bytes()
+    reply = frontend_api.run_assistant_control_command(directory.name, "/fork md.dt=-1")
 
-    assert "被拒绝" in reply
+    assert "分支未启动" in reply
     status = RunRegistry(tmp_path).get_run_status(directory.name, reconcile=False)
-    assert status["state"] == "awaiting_confirmation"
+    assert status["state"] == "aborted"
     assert status["done_steps"] == list(range(1, 8))
-    manifest = RunRegistry(tmp_path)._read_registry_manifest(directory)
-    assert manifest["control_history"][-1]["outcome"] == "rejected"
-    assert "fork_rejected_awaiting" in (directory / "events.jsonl").read_text()
+    assert (directory / "run_manifest.json").read_bytes() == before

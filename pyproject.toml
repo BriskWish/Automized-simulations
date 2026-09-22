@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "willy"
-version = "0.6.0"
+version = "0.7.0"
 description = "AI-driven MD simulation automation pipeline"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "cryptography>=42",
     "fastapi>=0.115",

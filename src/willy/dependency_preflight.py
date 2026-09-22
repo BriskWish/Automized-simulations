@@ -16,6 +16,7 @@ from typing import Iterable, TypedDict
 from willy._paths import get_project_root
 from willy.env_registry import AVAILABLE, ResolvedTool, resolve_tool
 from willy.execution_resources import default_nproc, local_cpu_count
+from willy.python_runtime import PythonRuntimeReport, check_python_runtime
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class DependencyPreflightReport(TypedDict):
     written_defaults: list[str]
     persistence_warning: str
     resources: "ResourcePreflightReport"
+    runtime: PythonRuntimeReport
     markdown: str
 
 
@@ -326,8 +328,17 @@ def _markdown(
     written_defaults: list[str],
     persistence_warning: str,
     resources: ResourcePreflightReport,
+    runtime: PythonRuntimeReport,
 ) -> str:
     lines = ["### 本机依赖预检", "此结果仅供参考，不会阻止本地任务启动。"]
+    runtime_status = "满足" if runtime["ready"] else "不满足"
+    lines.append(
+        f"Python 运行时：{runtime['python_version']}（{runtime_status}；"
+        f"支持 {runtime['supported_python']}；沿用父进程解释器）。"
+    )
+    for dependency in runtime["dependencies"]:
+        dependency_status = "满足" if dependency["status"] == "available" else "不满足"
+        lines.append(f"- {dependency['name']}（{dependency_status}）")
     lines.append(
         "本机资源：检测到 "
         f"{resources['cpu_count']} 个 CPU 核；未显式指定时将使用 "
@@ -387,7 +398,10 @@ def run_dependency_preflight(project_root: str | Path | None = None) -> Dependen
         if tool_id not in resolved:
             resolved[tool_id] = resolve_tool(tool_id, project_root=root)
     written_defaults, persistence_warning = _persist_discovered_defaults(root, resolved.values())
-    ready = all(group["ready"] for group in groups)
+    runtime = check_python_runtime()
+    if not runtime["ready"]:
+        recommendations.insert(0, runtime["error"])
+    ready = runtime["ready"] and all(group["ready"] for group in groups)
     cpu_count = local_cpu_count()
     resources: ResourcePreflightReport = {
         "cpu_count": cpu_count,
@@ -402,6 +416,7 @@ def run_dependency_preflight(project_root: str | Path | None = None) -> Dependen
         "written_defaults": written_defaults,
         "persistence_warning": persistence_warning,
         "resources": resources,
+        "runtime": runtime,
         "markdown": _markdown(
             groups,
             ready,
@@ -409,5 +424,6 @@ def run_dependency_preflight(project_root: str | Path | None = None) -> Dependen
             written_defaults,
             persistence_warning,
             resources,
+            runtime,
         ),
     }

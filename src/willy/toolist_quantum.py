@@ -359,18 +359,21 @@ def handle_quantum_tool_call(
             return _json.dumps(sr.to_dict(), ensure_ascii=False)
 
         from willy.quantum.chg_resp import make_chg
-        charge, spin = 0, 1
+        charge, spin, factor = 0, 1, 1.0
         try:
             with active_config.open() as f:
                 config = _json.load(f)
             mol_cfg = config.get("molecules", {}).get(name, {})
             charge = mol_cfg.get("charge", 0)
             spin = mol_cfg.get("spin", 1)
-        except Exception:
-            pass
+            from willy.charge_scaling import validate_ion_charge_scale
+            factor = validate_ion_charge_scale(config.get("ion_charge_scale", 1.0))
+        except (OSError, ValueError, TypeError, AttributeError):
+            sr = StepResult("chg_resp", 3, False, error=StepError(ErrorKind.CONFIG_INVALID, "重试必须读取有效的工程电荷修正配置"))
+            return _json.dumps(sr.to_dict(), ensure_ascii=False)
         charge = args.get("charge", charge)
         spin = args.get("spin", spin)
-        sr = make_chg(str(fchk_path), charge=charge, spin=spin, output_name=name)
+        sr = make_chg(str(fchk_path), charge=charge, spin=spin, output_name=name, ion_charge_scale=factor)
         return _json.dumps(sr.to_dict(), ensure_ascii=False)
 
     elif tool_name == "tools_diagnose_error_quantum":

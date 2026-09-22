@@ -690,6 +690,7 @@ def create_eq_pending_action(
     proposal: Mapping[str, Any] | None,
     requires_box_rebuild: bool = False,
     allow_fallback: bool = True,
+    persist: bool = True,
 ) -> dict[str, Any]:
     """Persist one validated EQ action without altering its config snapshot.
 
@@ -786,7 +787,8 @@ def create_eq_pending_action(
         pending_action_validated(action)
     except (TypeError, ValueError) as exc:
         raise PendingActionError("EQ 动作不符合通用动作契约") from exc
-    _atomic_write(directory / PENDING_ACTION_FILENAME, action)
+    if persist:
+        _atomic_write(directory / PENDING_ACTION_FILENAME, action)
     return action
 
 
@@ -795,6 +797,7 @@ def replace_eq_pending_action(
     *,
     action_id: str,
     proposal: Mapping[str, Any],
+    persist: bool = True,
 ) -> dict[str, Any]:
     """Replace one still-pending EQ proposal without touching ``config.json``.
 
@@ -813,6 +816,7 @@ def replace_eq_pending_action(
         proposal=proposal,
         requires_box_rebuild=current.get("restart_step") == PACKMOL_STEP,
         allow_fallback=False,
+        persist=persist,
     )
 
 
@@ -1042,34 +1046,5 @@ def select_pending_action_option(
 
 
 def apply_pending_action(run_dir: str | Path, action_id: str) -> dict[str, Any]:
-    """Apply exactly one validated action to its own frozen run config."""
-    directory = Path(run_dir)
-    with pending_action_lock(directory):
-        action = validate_pending_action_for_launch(directory, action_id)
-        pending_action_validated(action)
-        config_path = directory / "config.json"
-        updated = _load_config(config_path)
-        selected = _selected_option(action)
-        for adjustment in selected.get("adjustments", []):
-            if not isinstance(adjustment, Mapping):
-                raise PendingActionError("待确认方案修改项无效")
-            field = adjustment.get("field")
-            spec = _numeric_field_spec(field, updated)
-            if spec is not None:
-                path = spec[1]
-            elif isinstance(field, str) and field.startswith("eq_segment."):
-                segment = field.removeprefix("eq_segment.")
-                if segment not in EQ_SEGMENT_NAMES:
-                    raise PendingActionError("待确认方案修改项无效")
-                path = ("md", "eq", "segments_ns", segment)
-            else:
-                raise PendingActionError("待确认方案修改项无效")
-            _set_value(updated, path, adjustment.get("value"))
-        if validate_config(updated):
-            raise PendingActionError("待确认方案不能生成有效运行配置")
-        _atomic_write(config_path, updated)
-        action["state"] = "applied"
-        action["applied_at"] = _now()
-        action["applied_config_sha256"] = _config_fingerprint(config_path)
-        _atomic_write(directory / PENDING_ACTION_FILENAME, action)
-        return action
+    """Reject legacy in-place replay; confirmations must create child runs."""
+    raise PendingActionError("调参方案不能写回父工程，请确认方案以创建独立分支")

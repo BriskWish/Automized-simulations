@@ -6,6 +6,7 @@ Layer 0 — Config Agent 的工具定义与处理函数 + TF-IDF 向量检索。
 工具:
   tools_lookup_molecule, tools_resolve_compound, tools_lookup_md_defaults,
   tools_get_box_density, tools_lookup_basis_set, tools_refresh_structs,
+  tools_lookup_solvent, tools_register_solvent,
   tools_diagnose_error_config, tools_validate_config,
   tools_set_backend_quantum, tools_skip_molecule_global,
   tools_inspect_quantum_inputs
@@ -33,6 +34,36 @@ TOOLS = [
                     }
                 },
                 "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tools_lookup_solvent",
+            "description": "查询 Gaussian SMD 溶剂库。先精确匹配名称，未匹配时返回字符向量召回候选；结果包含 epsilon、epsinf、来源和是否人工添加。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Gaussian 溶剂名，例如 acetone、Water 或人工条目名"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tools_register_solvent",
+            "description": "登记一个人工 Gaussian Generic SMD 溶剂。名称必须与内置和人工库精确不重复；epsilon、epsinf 必须满足 epsilon >= epsinf >= 1。名称为空时自动使用 default_N。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "人工溶剂名；可省略以自动生成 default_N"},
+                    "epsilon": {"type": "number", "description": "介电常数"},
+                    "epsinf": {"type": "number", "description": "极限介电常数"}
+                },
+                "required": ["epsilon", "epsinf"]
             }
         }
     },
@@ -234,6 +265,8 @@ TOOL_META = {
     "tools_lookup_md_defaults":    {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_get_box_density":       {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_lookup_basis_set":      {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_lookup_solvent":         {"category": "query",      "mutating": False, "risk": "low", "effect": "read_only"},
+    "tools_register_solvent":       {"category": "config",     "mutating": True,  "risk": "medium", "effect": "requires_confirmation"},
     "tools_refresh_structs":       {"category": "refresh",    "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_diagnose_error_config": {"category": "diagnostic", "mutating": False, "risk": "low", "effect": "read_only"},
     "tools_validate_config":       {"category": "validation", "mutating": False, "risk": "low", "effect": "read_only"},
@@ -501,6 +534,20 @@ def handle_tool_call(tool_name: str, args: dict) -> str:
                             "available": ", ".join(_registry.get_all_names()),
                             "known_compounds": ", ".join(_COMPOUNDS.keys())},
                            ensure_ascii=False)
+
+    elif tool_name == "tools_lookup_solvent":
+        from willy.quantum.smd_solvents import lookup_solvent
+        return _json.dumps(lookup_solvent(args.get("name", "")), ensure_ascii=False)
+
+    elif tool_name == "tools_register_solvent":
+        from willy.quantum.smd_solvents import SMDSolventError, register_manual_solvent
+        try:
+            record = register_manual_solvent(
+                args.get("name"), args.get("epsilon"), args.get("epsinf"),
+            )
+        except SMDSolventError as exc:
+            return _json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        return _json.dumps({"ok": True, "solvent": record.as_dict()}, ensure_ascii=False)
 
     elif tool_name == "tools_resolve_compound":
         compound = args["compound"].strip()

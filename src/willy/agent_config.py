@@ -14,20 +14,32 @@ import subprocess
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from willy._paths import get_project_root
+from willy.charge_scaling import DEFAULT_ION_CHARGE_SCALE, validate_ion_charge_scale
+from willy.controlled_launch import LaunchCleanupError, handoff_controlled_process, spawn_gated_process
 from willy.execution_resources import normalize_config_nproc
 from willy.llm_config import DEFAULT_LLM_MODEL, LLMConfigError, configured_llm_client
-from willy.workflow_config import _available_residues, validate_config, apply_config
+from willy.workflow_config import _available_residues, validate_config, apply_config, molecule_solvent_settings
 from willy.remote_registry import RemoteRegistryError, parse_execution_md
 from willy.toolist_global import TOOLS, handle_tool_call
 from willy.structure_uploads import StructureUploadError, normalize_uploaded_structure
+from willy.simulation.protocol import (
+    EQ_SEGMENT_NAMES,
+    eq_annealing_points,
+    merge_v2_defaults,
+    require_valid_md_config,
+)
 from willy.quantum.input_audit import (
     QuantumInputAuditError,
     apply_audited_quantum_properties,
     audit_config_quantum_inputs,
     quantum_input_contract_issues,
+)
+from willy.quantum.smd_solvents import (
+    GAS_SOLVENT, list_solvents, lookup_solvent, register_manual_solvent, resolve_exact,
 )
 from willy.prompt_contract import (
     PROMPT_CONTRACT_VERSION,
@@ -37,6 +49,7 @@ from willy.prompt_contract import (
 from willy.pipeline_launch import (
     PipelineLockConflict,
     cleanup_finished_launch,
+    pipeline_command,
     reserve_pipeline_launch,
     write_startup_audit,
 )
@@ -57,6 +70,7 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案
 ```json
 {{
   "backend": "g16",
+  "ion_charge_scale": 1.0,
   "molecules": {{ "XXX": {{"charge": "<本次输入审计返回的整数>", "spin": "<本次输入审计返回的正整数>", "basis": "b3lyp/6-311+g(d,p)", "solvent": "acetone", "mem": "", "nproc": null}} }},
   "residues": {{ "XXX": 100 }},
   "md": {{
@@ -74,11 +88,17 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案
 ```
 - backend: 量子化学后端，默认 g16。用户说"用 G09""gaussian09" 时设为 g09；说"用 ORCA""orca" 时设为 orca。后端只能写入候选 JSON，不能调用写入型工具。
 - molecules/residues 的 key 必须用 struct/ 下的核心文件名: {molecules}。带电写法由注册表统一归一化，例如 Li+/Li⁺/锂离子 映射到 Li，上传的 Ca2+/Ca²⁺ 映射到 Ca，NO3-/NO₃⁻/硝酸根 映射到 NO3；最终 key 不含电荷符号。
+- solvent 按 molecules.<name>.solvent 保存；用户只指定一个溶剂时，默认统一应用到本次选中的全部分子。先调用 tools_lookup_solvent 精确确认库条目，未确认不得编造名称。gas 表示不启用 SMD。ORCA 当前不支持 SMD，只能使用 gas。
+- 溶剂选择在语义草案用 solvent_selection 表示：default 是所有选中分子的溶剂名，molecules 是按分子指定的覆盖映射。例如 {{"default":"Water","molecules":{{"Li":"gas"}}}}。未涉及溶剂时可省略；修改方案时保留未修改分子的溶剂。服务端绑定名称与 solvent_ref，优化和单点共同使用这两个字段，不得另造阶段级溶剂参数。
+- 不得调用 tools_register_solvent 或自行写溶剂库；用户可明确发送“登记溶剂 MyMix epsilon=20 epsinf=1.8”，或仅发送“epsilon=20 epsinf=1.8”由受控代码登记 default_N。登记本身不修改待确认方案，之后使用登记名称生成/修改方案。人工 Generic 仅有 Eps/EpsInf，属于介电近似，不是完整 SMD 参数化，必须明确提示。
 - **电荷和自旋不是默认值，也不能从知识库猜测。** 在输出任何完整候选 config 前，必须完成一次 `tools_inspect_quantum_inputs` 审计；g16/g09 只接受同名 `.gjf`，orca 只接受同名 `.inp`。工具返回的每个 `charge` 和 `spin` 是唯一可写入最终 JSON 的数值。语义草案阶段只能给出 backend 和 residues，服务端会在本轮审计上下文中固定其 backend/name/count 后进入强制审计阶段；这不是用户确认前的最终运行配置冻结。
 - 审计返回 `ok=false` 时返回阻塞 Error，不得输出可确认 config。`charge_balance=imbalanced` 时，除非用户已明确要求并在 JSON 中写入 `ion_compensation` 或 `non_neutral_confirmed=true`，否则返回 `charge_imbalance` Error，说明净电荷和缺失的配平信息；绝不能把任意分子改写为中性来绕过。
 - md 必须使用 schema_version=2；EQ 采用六段退火，PROD 只接受独立 duration_ns，PROD 温度必须等于 EQ target_temperature
 - 用户明确要求“额外输出全精度 TRR 轨迹”、"输出 TRR"或同义表述时，设 md.outputs.trr=true；未明确要求时保持 false
 - topology 默认使用 {{"backend":"sobtop","force_field":"gaff_uff"}}；用户明确要求 OPLS-AA/OPLSAA 时，设为 {{"backend":"oplsaa","force_field":"oplsaa"}}
+- 顶层 ion_charge_scale 默认 1.00，仅接受 0.60..1.00（含边界）、百分之一精度的有限数值；0.8、0.80、0.800 等价。拒绝 bool、字符串、非有限数值、超范围或超过两位有效小数，绝不能截断、舍入或擅自替换用户的非法请求。未要求修改时保留上一方案的缩放因子。
+- 该因子统一作用于所有净电荷非零组分的原子部分电荷，包括带电分子、基团和离子，不另分类型；中性组分保持不变。量子整数 charge 和 spin 必须原样保留，不参与缩放或电荷配平修改。非 sobtop 拓扑不消费 .chg，ion_charge_scale != 1.00 必须报 invalid_value，不得忽略或重复缩放。
+- 确认摘要必须显示两位小数的缩放因子，并逐段说明六段 EQ 的顺序、NPT 系综、时长及温度起止；恒温段也必须显示起止温度（如 500K→500K）。
 - 用户未指定盒边长或初始密度时，设置 `box.target_mass_density_g_cm3=0.7`；方案说明必须写“初始体积将由使用默认0.7g/cm3的密度猜测”。实际边长由建盒步骤从当前 `.itp` 的原子质量计算。用户明确指定边长时用 `box.box_size`，明确指定初始密度时用 `box.target_mass_density_g_cm3`。
 - 用户明确指定“使用 N 核/线程”时，将 N 写入 `defaults.nproc`；未指定时保持默认上限 8。只有明确要求某个分子单独使用不同核数时，才在该分子的 `nproc` 写覆盖值；该默认值同时控制本地 GROMACS 的 `mdrun -nt`，分子级覆盖控制该分子的量子结构优化和单点。服务端会在用户确认启动时扫描本机 CPU 核数：未显式指定时写入 `min(8, CPU核数)`，显式值超出本机容量时写回本机核数、提示用户并继续运行。
 - 未指定的参数用 tools_lookup_md_defaults 获取默认值
@@ -154,6 +174,7 @@ _PLAN_READ_ONLY_TOOL_NAMES = frozenset({
     "tools_lookup_md_defaults",
     "tools_get_box_density",
     "tools_lookup_basis_set",
+    "tools_lookup_solvent",
     "tools_refresh_structs",
     "tools_diagnose_error_config",
     "tools_validate_config",
@@ -326,6 +347,10 @@ def start_pipeline(
     if not isinstance(config, Mapping):
         write_startup_audit(ROOT, "failed")
         return PipelineLaunchReceipt("启动失败，请先生成有效的模拟方案。", None, "failed")
+    scale_issues = [issue for issue in validate_config(config) if "ion_charge_scale" in issue]
+    if scale_issues:
+        write_startup_audit(ROOT, "failed")
+        return PipelineLaunchReceipt("启动失败：" + "；".join(scale_issues), None, "failed")
     resource_plan = normalize_config_nproc(config)
     launch_config = resource_plan.config
     try:
@@ -376,44 +401,47 @@ def start_pipeline(
         # after confirmation, repeat validation, and launch-lock reservation.
         apply_config(launch_config)
         backend = launch_config.get("backend", "g16")
-        proc = subprocess.Popen(
-            [
-                "python3", "run_pipeline.py", backend,
+        proc = spawn_gated_process(
+            pipeline_command(
+                ROOT, backend,
                 "--run-dir", str(reservation.run_dir),
                 "--lock-fd", str(reservation.fd),
                 "--launch-token", reservation.token,
-            ],
-            cwd=str(ROOT),
-            start_new_session=True,
-            pass_fds=(reservation.fd,),
+            ),
+            cwd=ROOT, lock_fd=reservation.fd,
         )
-        reservation.mark_runner_started(proc.pid)
-        (ROOT / ".pipeline.pid").write_text(str(proc.pid))
-        reservation.detach_parent()
+
+        def _wait_then_cleanup():
+            proc.wait()
+            pid_file = ROOT / ".pipeline.pid"
+            try:
+                if pid_file.read_text().strip() == str(proc.pid):
+                    pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            cleanup_finished_launch(ROOT, reservation.run_id, reservation.token)
+
+        handoff_controlled_process(proc, reservation, ROOT, lambda: threading.Thread(target=_wait_then_cleanup, daemon=True).start())
+    except LaunchCleanupError:
+        return PipelineLaunchReceipt("启动交接失败，子进程尚未退出；已保留启动锁，禁止重复启动。", reservation.run_id, "failed")
     except Exception:
-        write_startup_audit(ROOT, "failed")
-        if formalized_plan and proposal_workspace_id is not None:
-            rollback_formalized_plan(
-                ROOT,
-                plan_id=proposal_workspace_id,
-                run_dir=reservation.run_dir,
-            )
-        reservation.release()
+        try:
+            if formalized_plan and proposal_workspace_id is not None:
+                rollback_formalized_plan(
+                    ROOT,
+                    plan_id=proposal_workspace_id,
+                    run_dir=reservation.run_dir,
+                )
+        finally:
+            reservation.release()
+        try:
+            write_startup_audit(ROOT, "failed")
+        except OSError:
+            pass
         if formalized_plan:
             return PipelineLaunchReceipt("启动失败，待确认方案已保留，可修正后重新确认。", None, "failed")
         return PipelineLaunchReceipt("启动失败，请检查配置后重试。", None, "failed")
 
-    def _wait_then_cleanup():
-        proc.wait()
-        pid_file = ROOT / ".pipeline.pid"
-        try:
-            if pid_file.read_text().strip() == str(proc.pid):
-                pid_file.unlink(missing_ok=True)
-        except OSError:
-            pass
-        cleanup_finished_launch(ROOT, reservation.run_id, reservation.token)
-
-    threading.Thread(target=_wait_then_cleanup, daemon=True).start()
     resource_notice = ""
     if resource_plan.warnings:
         resource_notice = "\n\n资源提示：" + "；".join(resource_plan.warnings)
@@ -459,7 +487,8 @@ def get_system_prompt(
         ),
         "strict_json": (
             "当前处于审计后的严格 JSON 输出阶段。不得调用工具；必须使用受控上下文中的"
-            "量子输入审计结果，且不得改变已审计 backend、residues、电荷或自旋。"
+            "量子输入审计结果，且不得改变已审计 backend、residues、电荷或自旋，"
+            "也不得改变服务端确定的 ion_charge_scale。"
         ),
     }.get(stage, "")
     return build_contract_system_prompt(
@@ -475,6 +504,232 @@ def get_system_prompt(
     )
 
 
+def _requested_ion_charge_scale(message: str) -> float | None:
+    """Validate explicit scale literals before a model can reinterpret them."""
+    label = (
+        r"ion_charge_scale|(?:ion[\s_-]*)?charge[\s_-]*scal(?:e|ing)(?:\s+factor)?"
+        r"|缩放(?:因子|系数|比例|倍率)?"
+    )
+    literal = (
+        r'''(?:"[^"\n]*"|'[^'\n]*'|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'''
+        r"|[+-]?(?:nan|inf(?:inity)?)|true|false|null|none|\[[^\]]*\]|\{[^}]*\})"
+    )
+    connector = (
+        r'''\s*(?:["'](?=\s*[:=：]))?\s*'''
+        r"(?:(?:[:=：]|调整|设置|选择|指定|等于|改|设|选|为|到|至|成|取|用|按|乘以|是|by|to)\s*)*"
+    )
+    patterns = (
+        rf"(?:{label}){connector}(?P<value>{literal})(?P<percent>\s*[%％])?",
+        rf"(?:电荷|charges?)\s*(?:按|乘以|乘|×|by)\s*(?P<value>{literal})(?P<percent>\s*[%％])?",
+        rf"(?P<value>{literal})(?P<percent>\s*[%％])?\s*倍\s*(?:的)?(?:部分|离子)?电荷",
+    )
+    requested: list[float] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, message, re.IGNORECASE):
+            token = match.group("value")
+            if re.match(r"[A-Za-z0-9_.%％/+*×-]", message[match.end():]):
+                raise ValueError("ion_charge_scale 必须是单个数值，不能是表达式或非法数值")
+            try:
+                numeric = Decimal(token)
+            except InvalidOperation:
+                raise ValueError("ion_charge_scale 必须是有限数值，不接受 bool、字符串或其他类型") from None
+            lower, upper = (Decimal("60"), Decimal("100")) if match.group("percent") else (Decimal("0.60"), Decimal("1.00"))
+            if not numeric.is_finite() or not lower <= numeric <= upper:
+                raise ValueError("ion_charge_scale 必须在 0.60..1.00（含边界），不允许截断越界")
+            numerator, denominator = numeric.as_integer_ratio()
+            if match.group("percent"):
+                denominator *= 100
+            if numerator * 100 % denominator:
+                raise ValueError("ion_charge_scale 仅允许百分之一精度，不能超过两位有效小数")
+            requested.append(validate_ion_charge_scale(numerator / denominator))
+    if not requested and re.search(
+        rf"(?:{label})\s*[\"']?\s*(?:[:=：]|调整|设置|选择|指定|等于|改|设|选|为|到|至|成|取|用)",
+        message,
+        re.IGNORECASE,
+    ):
+        raise ValueError("无法确定 ion_charge_scale，请明确提供 0.60..1.00 的数值")
+    if re.search(r"(?:取消|关闭|禁用|不做)(?:离子|部分|原子)?电荷缩放|电荷不缩放", message):
+        requested.append(DEFAULT_ION_CHARGE_SCALE)
+    if len(set(requested)) > 1:
+        raise ValueError("ion_charge_scale 存在多个不同请求值，请明确唯一的统一缩放因子")
+    return requested[0] if requested else None
+
+
+def _bind_ion_charge_scale(config: Mapping[str, object], expected: float) -> dict[str, object]:
+    """Bind model output to the validated request, previous plan, or default."""
+    scale = validate_ion_charge_scale(config.get("ion_charge_scale", expected))
+    if scale != expected:
+        raise ValueError(f"ion_charge_scale 必须保留本轮确定的 {expected:.2f}，模型不得擅自替换")
+    candidate = copy.deepcopy(dict(config))
+    candidate["ion_charge_scale"] = scale
+    return candidate
+
+
+_MANUAL_SMD_NOTICE = "手工 Generic 仅提供 Eps/EpsInf，属于介电近似；未补齐非电静力描述符，不是完整 SMD 参数化。"
+_SMD_PARAMETER_LABELS = {
+    "epsilon": "epsilon", "eps": "epsilon", "ε": "epsilon",
+    "介电常数": "epsilon", "静态介电常数": "epsilon",
+    "epsinf": "epsinf", "εinf": "epsinf", "ε_inf": "epsinf", "ε∞": "epsinf",
+    "极限介电常数": "epsinf", "光学介电常数": "epsinf", "高频介电常数": "epsinf",
+}
+_SMD_PARAMETER_FIELD = re.compile(
+    r"(?<!\w)(" + "|".join(re.escape(label) for label in sorted(_SMD_PARAMETER_LABELS, key=len, reverse=True))
+    + r")\s*(?:=|:|：|为|是)?\s*([^\s,，;；]+)", re.I,
+)
+
+
+def _solvent_catalog_reply(message: str) -> str | None:
+    """Handle explicit catalog commands without granting a model write access."""
+    text = message.strip().strip("。.!！")
+    if re.fullmatch(r"(?:请)?(?:当前|现在)?\s*(?:查询|查看|列出|有哪些|有什么)?\s*(?:所有|全部|可用|已登记|支持的)?(?:SMD\s*)?(?:溶剂(?:库|列表)?|solvents?)\s*(?:有哪些|有什么)?[?？]?", text, re.I):
+        records = list_solvents(ROOT)
+        return "已登记溶剂：" + "、".join(record.name for record in records) + "；gas 表示不启用 SMD。"
+    query = re.fullmatch(
+        r"(?:请)?(?:查询|查找|查一下|查|搜索)\s*(?:SMD\s*)?(?:溶剂(?:库)?|solvents?\b)\s*[：:]?\s*(.+?)\s*[?？]?",
+        text, re.I,
+    ) or re.fullmatch(r"溶剂库(?:里|中)?(?:有没有|有)\s*(.+?)\s*(?:吗|么)?[?？]?", text, re.I)
+    if query:
+        result = lookup_solvent(query[1].strip(), project_root=ROOT)
+        if result["match"]:
+            record = result["match"]
+            reply = f"精确匹配：{record['name']}；来源 {record['source']}；epsilon={record['epsilon']}；epsinf={record['epsinf']}。"
+            return reply + ("\n" + _MANUAL_SMD_NOTICE if record["source"] == "manual" else "")
+        return "未找到精确溶剂；候选：" + "、".join(record["name"] for record in result["candidates"]) + "。候选不会自动采用。"
+    if re.search(r"例如|比如|举例|示例|假设|如果|假如|不要|请勿|勿|无需|不必|暂不|先不|先别|别登记|别注册|不登记|不注册|[?？]", text):
+        return None
+    registration = re.fullmatch(r"(?:请)?(?:登记|注册|新增|添加)\s*(?:(?:人工|手工|SMD)\s*)?(?:溶剂)?\s*(.*)", text, re.I)
+    arguments = registration[1] if registration else text
+    fields = list(_SMD_PARAMETER_FIELD.finditer(arguments))
+    if not fields:
+        return None
+    remainder = _SMD_PARAMETER_FIELD.sub("", arguments).strip(" ,，;；:：")
+    name_match = re.fullmatch(r"(?:name\s*[=:：]|名称\s*[=:：为]?|命名为|名为)\s*[\"“]?([^\"”]+)[\"”]?", remainder, re.I)
+    if name_match:
+        solvent_name = name_match[1].strip()
+    elif (
+        registration and re.fullmatch(r"[\w.()+-]+", remainder)
+        and arguments[:fields[0].start()].strip(" ,，;；:：") == remainder
+    ):
+        solvent_name = remainder
+    elif not remainder:
+        solvent_name = None
+    else:
+        return None
+    values = {}
+    for field in fields:
+        key = _SMD_PARAMETER_LABELS[field[1].casefold()]
+        if key in values:
+            raise ValueError(f"{key} 重复，请每个参数只指定一次")
+        values[key] = field[2]
+    if set(values) != {"epsilon", "epsinf"}:
+        raise ValueError("登记溶剂必须同时明确给出 epsilon 和 epsinf")
+    record = register_manual_solvent(solvent_name, values["epsilon"], values["epsinf"], project_root=ROOT)
+    return (
+        f"已登记人工溶剂 {record.name}：epsilon={record.epsilon}，epsinf={record.epsinf}。\n"
+        f"{_MANUAL_SMD_NOTICE}\n登记未修改或确认模拟方案。可继续说“溶剂使用 {record.name}”，"
+        "默认应用全部选中分子；也可指定某个分子。"
+    )
+
+
+def _requested_global_solvent(message: str) -> str | None:
+    """Recognize an explicit global assignment, not a question or molecular override."""
+    matches = re.findall(
+        r"(?:^|[,，;；])\s*(?:请)?(?:(?:全部|所有)(?:选中)?分子(?:的)?\s*)?"
+        r"(?:SMD\s*)?(?:溶剂\s*(?:统一)?\s*(?:使用|用|改为|设为|设置为|为|=)|solvent\s*=)"
+        r"\s*([\w.()+-]+)\s*(?=$|[,，;；。])",
+        message.strip(), re.I,
+    )
+    if len({name.casefold() for name in matches}) > 1:
+        raise ValueError("全局溶剂指定重复且冲突，请改为按分子指定")
+    return matches[0] if matches else None
+
+
+def _prepare_plan_solvents(
+    config: Mapping[str, object], previous_config: Mapping[str, object] | None = None,
+    *, requested_default: str | None = None,
+) -> dict[str, object]:
+    """Resolve a read-only semantic selection; only explicit user commands register."""
+    result = copy.deepcopy(dict(config))
+    selection = result.pop("solvent_selection", {})
+    if not isinstance(selection, Mapping) or set(selection) - {"default", "molecules"}:
+        raise ValueError("solvent_selection 仅允许 default 和 molecules")
+    selection = dict(selection)
+    if requested_default is not None:
+        if "default" in selection and str(selection["default"]).strip().casefold() != requested_default.casefold():
+            raise ValueError("语义草案的全局溶剂与用户明确请求不一致")
+        selection["default"] = requested_default
+    overrides = selection.get("molecules", {})
+    if not isinstance(overrides, Mapping) or set(overrides) - set(result.get("residues", {})):
+        raise ValueError("溶剂覆盖必须对应本方案选中的分子")
+    molecules = result.get("molecules", {})
+    previous = (previous_config or {}).get("molecules", {})
+    if not isinstance(molecules, Mapping) or not isinstance(previous, Mapping):
+        raise ValueError("molecules 必须是对象")
+    active = bool(selection) or any(
+        isinstance(molecule, Mapping) and ("solvent" in molecule or "solvent_ref" in molecule)
+        for molecule in (*molecules.values(), *previous.values())
+    )
+    if not active:
+        return result
+    molecules = result.setdefault("molecules", {})
+    backend = str(result.get("backend", "g16")).strip().casefold()
+    for name in dict.fromkeys((*result.get("residues", {}), *molecules)):
+        molecule = molecules.setdefault(name, {})
+        if not isinstance(molecule, dict):
+            raise ValueError(f"molecules.{name} 必须是对象")
+        inherited = previous.get(name, {})
+        inherited = inherited if isinstance(inherited, Mapping) else {}
+        selected = overrides.get(name, selection.get("default"))
+        if name in overrides or ("default" in selection and name in result.get("residues", {})):
+            if "solvent" in molecule and str(molecule["solvent"]).strip().casefold() != str(selected).strip().casefold():
+                if str(molecule["solvent"]).strip().casefold() != str(inherited.get("solvent", "")).strip().casefold():
+                    raise ValueError(f"{name}: solvent 与语义溶剂选择冲突")
+                if "solvent_ref" in molecule and molecule["solvent_ref"] != inherited.get("solvent_ref"):
+                    raise ValueError(f"{name}: solvent_ref 不是原方案的快照")
+                molecule.pop("solvent_ref", None)
+            molecule["solvent"] = selected
+        elif "solvent" not in molecule and "solvent" in inherited:
+            molecule["solvent"] = inherited["solvent"]
+        same_as_previous = (
+            "solvent" in inherited
+            and str(molecule.get("solvent", "")).strip().casefold() == str(inherited["solvent"]).strip().casefold()
+        )
+        if same_as_previous and "solvent_ref" not in molecule and "solvent_ref" in inherited:
+            molecule["solvent_ref"] = copy.deepcopy(inherited["solvent_ref"])
+        if same_as_previous and "solvent_ref" in inherited and molecule.get("solvent_ref") != inherited["solvent_ref"]:
+            raise ValueError(f"{name}: 不得改写同名溶剂的已有快照；请登记新名称")
+        trusted_snapshot = same_as_previous and molecule.get("solvent_ref") == inherited.get("solvent_ref") and "solvent_ref" in inherited
+        solvent, snapshot = molecule_solvent_settings(
+            molecule, backend, project_root=ROOT, require_registered=not trusted_snapshot,
+        )
+        molecule.update(solvent=solvent, solvent_ref=snapshot)
+    return result
+
+
+def _bind_strict_solvents(config: Mapping[str, object], semantic: Mapping[str, object]) -> dict[str, object]:
+    """Prevent the no-tool stage from changing the server-bound solvent selection."""
+    if "solvent_selection" in config:
+        raise ValueError("最终配置不得再改写 solvent_selection")
+    result = copy.deepcopy(dict(config))
+    molecules = result.setdefault("molecules", {})
+    if not isinstance(molecules, dict):
+        raise ValueError("molecules 必须是对象")
+    for name, expected in semantic.get("molecules", {}).items():
+        if not isinstance(expected, Mapping):
+            raise ValueError(f"molecules.{name} 必须是对象")
+        if "solvent_ref" not in expected:
+            continue
+        molecule = molecules.setdefault(name, {})
+        if not isinstance(molecule, dict):
+            raise ValueError(f"molecules.{name} 必须是对象")
+        candidate = {**expected, **molecule}
+        solvent, snapshot = molecule_solvent_settings(candidate, str(result.get("backend", "g16")), project_root=ROOT)
+        if solvent.casefold() != expected["solvent"].casefold() or snapshot != expected["solvent_ref"]:
+            raise ValueError(f"{name}: 严格配置改变了已绑定的溶剂或快照")
+        molecule.update(solvent=solvent, solvent_ref=snapshot)
+    return _prepare_plan_solvents(result, semantic)
+
+
 def _config_outline(config: Mapping[str, object] | None) -> dict[str, object]:
     """Return only proposal fields that are meaningful to a revision request."""
     if not isinstance(config, Mapping):
@@ -482,7 +737,7 @@ def _config_outline(config: Mapping[str, object] | None) -> dict[str, object]:
     outline: dict[str, object] = {}
     for key in (
         "backend", "residues", "molecules", "md", "topology", "box", "defaults",
-        "ion_compensation", "non_neutral_confirmed",
+        "ion_compensation", "non_neutral_confirmed", "ion_charge_scale",
     ):
         if key in config:
             outline[key] = copy.deepcopy(config[key])
@@ -620,6 +875,12 @@ def _strict_config_context(
             "semantic_selection": {
                 "backend": semantic_draft.get("backend"),
                 "residues": semantic_draft.get("residues"),
+                "ion_charge_scale": semantic_draft.get("ion_charge_scale", DEFAULT_ION_CHARGE_SCALE),
+                "solvents": {
+                    name: {key: molecule[key] for key in ("solvent", "solvent_ref") if key in molecule}
+                    for name, molecule in semantic_draft.get("molecules", {}).items()
+                    if isinstance(molecule, Mapping)
+                },
             },
             "execution_boundary": execution_facts or "MD 仅使用服务端确认的本机执行边界",
         },
@@ -636,7 +897,7 @@ def _strict_config_context(
         allowed_actions=["输出一个严格 JSON 候选 config，或固定 error 对象。"],
         prohibited_actions=[
             "不得调用工具、输出 Markdown、启动流水线或修改执行边界",
-            "不得修改已审计的 backend、分子名、数量、电荷或自旋",
+            "不得修改已审计的 backend、分子名、数量、电荷或自旋，以及服务端绑定的 solvent/solvent_ref",
         ],
         remaining_budget={"remaining_model_calls": 1, "per_call_timeout_s": CONFIG_LLM_TIMEOUT_S},
         expected_output_format={
@@ -747,10 +1008,39 @@ def _llm_failure_notice(error: Exception) -> tuple[str, bool]:
 
 def summarize(cfg):
     r, md, mols = cfg.get("residues",{}), cfg.get("md",{}), cfg.get("molecules",{})
-    parts = []
+    md, _ = require_valid_md_config(merge_v2_defaults(md))
+    scale = validate_ion_charge_scale(cfg.get("ion_charge_scale", DEFAULT_ION_CHARGE_SCALE))
+    backend = str(cfg.get("backend", "g16")).strip().casefold()
+    structure = []
+    solvent_notes = []
+    from willy.quantum.smd_solvents import input_has_scrf
     for n, c in r.items():
-        chg = mols.get(n,{}).get("charge",0)
-        parts.append(f"{n} {c}" + (f"(电荷{chg:+d})" if chg else ""))
+        molecule = mols.get(n, {})
+        molecule = molecule if isinstance(molecule, Mapping) else {}
+        level = molecule.get("basis")
+        solvent_name, solvent_record = molecule_solvent_settings(molecule, backend, project_root=ROOT)
+        input_path = ROOT / "struct" / f"{n}.gjf"
+        original_scrf = input_has_scrf(input_path) if backend in {"g16", "g09"} else False
+        scrf_action = (
+            "覆盖原始 SCRF（含多行设置）" if original_scrf else "原始无 SCRF，将新增"
+        ) if solvent_name.casefold() != GAS_SOLVENT else (
+            "移除原始 SCRF（含多行设置），不启用 SMD" if original_scrf else "不启用 SMD"
+        )
+        solvent_notes.append(f"- {n}：{solvent_name}（{solvent_record['source']}）；{scrf_action}。优化/单点共享此名称与 solvent_ref。")
+        if solvent_record["source"] == "manual":
+            solvent_notes.append(f"  Eps={solvent_record['epsilon']}，EpsInf={solvent_record['epsinf']}。{_MANUAL_SMD_NOTICE}")
+        structure.append({
+            "name": str(n),
+            "count": int(c),
+            "optimization_level": level.strip() if isinstance(level, str) and level.strip() else "未指定",
+            "solvent": solvent_name,
+            "solvent_source": solvent_record["source"],
+            "scrf_override": scrf_action,
+        })
+        if solvent_record["source"] == "manual":
+            structure[-1]["solvent_note"] = (
+                f"Eps={solvent_record['epsilon']}，EpsInf={solvent_record['epsinf']}；{_MANUAL_SMD_NOTICE}"
+            )
     total = sum(r.values())
     box_config = cfg.get("box", {})
     box_config = box_config if isinstance(box_config, dict) else {}
@@ -759,61 +1049,57 @@ def summarize(cfg):
     legacy_density = box_config.get("packing_number_density_nm3")
     if explicit_box is not None:
         try:
-            box_note = f"盒子为正方体，指定边长 {float(explicit_box) / 10.0:.3f} nm"
+            density_display = f"指定盒边长 {float(explicit_box) / 10.0:.3f} nm"
         except (TypeError, ValueError):
-            box_note = "盒子边长将在建盒步骤校验"
+            density_display = "指定盒边长，待建盒校验"
     elif target_density is not None:
         try:
             density_value = float(target_density)
-            if density_value == 0.7:
-                box_note = "初始体积将由使用默认0.7g/cm3的密度猜测；实际边长将在建盒步骤由拓扑质量计算"
-            else:
-                box_note = f"初始体积将按目标质量密度 {density_value:g} g/cm3 猜测；实际边长将在建盒步骤由拓扑质量计算"
+            density_display = f"{density_value:.2f} g/cm3"
         except (TypeError, ValueError):
-            box_note = "初始体积将在建盒步骤由拓扑质量计算"
+            density_display = "待建盒步骤校验"
     elif legacy_density is not None:
-        box_note = f"初始体积将按历史分子数密度 {legacy_density} 分子/nm3 估算"
+        density_display = f"历史分子数密度 {legacy_density} 分子/nm3"
     else:
-        box_note = "初始体积将由使用默认0.7g/cm3的密度猜测；实际边长将在建盒步骤由拓扑质量计算"
-    eq = md.get("eq", {}) if isinstance(md.get("eq", {}), dict) else {}
-    prod = md.get("prod", {}) if isinstance(md.get("prod", {}), dict) else {}
-    segments = eq.get("segments_ns", {}) if isinstance(eq.get("segments_ns", {}), dict) else {}
-    t = eq.get("target_temperature", "?")
-    eq_ns = sum(float(value) for value in segments.values()) if segments else "?"
-    prod_ns = prod.get("duration_ns", "?")
-    trr_enabled = bool(md.get("outputs", {}).get("trr", False))
-    output_note = " | 额外输出全精度 TRR 轨迹" if trr_enabled else ""
-    topology = cfg.get("topology", {})
-    topology = topology if isinstance(topology, dict) else {}
-    force_field = "OPLS-AA" if topology.get("force_field") == "oplsaa" else "GAFF/UFF"
-    execution = cfg.get("execution", {})
-    execution = execution if isinstance(execution, Mapping) else {}
-    execution_md = execution.get("md", {})
-    execution_md = execution_md if isinstance(execution_md, Mapping) else {}
-    execution_backend = execution_md.get("backend", "local")
-    execution_profile = execution_md.get("profile")
-    if execution_backend == "ssh" and isinstance(execution_profile, str):
-        execution_note = f"SSH 远程 GROMACS（profile: {execution_profile}；前序步骤仍在本机）"
-    elif execution_backend == "slurm" and isinstance(execution_profile, str):
-        execution_note = f"Slurm 远程 GROMACS（profile: {execution_profile}；前序步骤仍在本机）"
-    else:
-        execution_note = "本机执行"
-    warnings = cfg.get("warnings", [])
-    warn_lines = ""
-    for w in warnings:
-        t2 = w.get("type","")
-        if t2 == "charge_imbalance": warn_lines += "\n⚠️ **电荷警告**: 体系不呈电中性"
-        elif t2 == "compute_heavy": warn_lines += f"\n⚠️ **算力警告**: 共 {total} 个分子, 远超常规 (推荐 <10000)"
-    return f"""**模拟方案确认**
+        density_display = "0.70 g/cm3"
+    eq = md["eq"]
+    t = eq["target_temperature"]
+    _, temperatures, actual_segments = eq_annealing_points(md)
+    segment_labels = ("升温", "高温恒温", "降至过渡温度", "过渡恒温", "降至目标温度", "目标恒温")
+    md_steps = [{"label": "EM", "meta": "能量最小化"}]
+    for index, (name, label) in enumerate(zip(EQ_SEGMENT_NAMES, segment_labels)):
+        duration = actual_segments[name]
+        requested_duration = float(eq["segments_ns"][name])
+        duration_note = f"{duration:.9g} ns"
+        if duration != requested_duration:
+            duration_note += f"（请求 {requested_duration:.9g} ns，按时间步对齐）"
+        md_steps.append({
+            "label": f"EQ · {label}（{name}）",
+            "meta": f"NPT · {duration_note} · {temperatures[index]:.9g}K→{temperatures[index + 1]:.9g}K",
+        })
+    prod_ns = md["prod"]["duration_ns"]
+    md_steps.append({"label": "PROD", "meta": f"NPT · {prod_ns:.9g} ns · {t:.9g}K→{t:.9g}K"})
+    card_data = {
+        "version": 1,
+        "structure": structure,
+        "environment": {
+            "charge_scale": f"{scale:.2f}",
+            "initial_density": density_display,
+            "total_molecules": int(total),
+        },
+        "md_steps": md_steps,
+    }
+    encoded_card_data = json.dumps(card_data, ensure_ascii=False, separators=(",", ":"))
+    solvent_summary = "\n".join(solvent_notes)
+    return f"""[[WILLY_PLAN_DATA:{encoded_card_data}]]
+**模拟方案确认**
 
-组成: {', '.join(parts)}
-共 {total} 个分子/残基/基团, {box_note}
-平衡温度 {t}K | 退火时长 {eq_ns} ns | 产出时长 {prod_ns} ns | 力场 {force_field}{output_note}{warn_lines}
-MD 执行：{execution_note}
+{solvent_summary}
 
 下一步将开始结构优化。
 
-确认无误后回复“运行”“开始运行”或“确认运行”即可开始。"""
+确认无误后回复“运行”即可开始。
+若参数有误请提出，我会更新方案。"""
 
 
 def _normalized_confirmation(message: str) -> str:
@@ -909,6 +1195,8 @@ _CONFIG_REVISION_MARKERS = (
     "密度", "温度", "时长", "时间步", "步长", "tau_p", "taup", "压浴",
     "热浴", "力场", "后端", "基组", "盒子", "边长", "trr", "g16", "g09", "orca",
     "opls", "gaff", "uff", "远程", "ssh", "slurm", "本机执行",
+    "ion_charge_scale", "电荷", "缩放", "charge scale", "charge_scale",
+    "溶剂使用", "溶剂用", "溶剂为", "solvent=", "solvent =",
 )
 def _is_config_replacement_request(message: str) -> bool:
     text = message.casefold().strip()
@@ -1375,6 +1663,27 @@ def chat(
         yield _emit(h, None if receipt.state == "started" else pending_plan)
         return
 
+    try:
+        solvent_reply = _solvent_catalog_reply(message)
+    except ValueError as exc:
+        solvent_reply = f"⚠️ 溶剂操作被拒绝：{exc}；未修改模拟方案。"
+    if solvent_reply is not None:
+        yield _emit(user_h + [{"role": "assistant", "content": solvent_reply}], pending_plan)
+        return
+
+    try:
+        requested_solvent = _requested_global_solvent(message)
+    except ValueError as exc:
+        yield _emit(user_h + [{"role": "assistant", "content": f"⚠️ 溶剂请求无效：{exc}"}], pending_plan)
+        return
+
+    try:
+        requested_scale = _requested_ion_charge_scale(message)
+    except ValueError as exc:
+        h = user_h + [{"role": "assistant", "content": f"⚠️ 缩放请求无效：{exc}；本轮未修改或生成方案。"}]
+        yield _emit(h, pending_plan)
+        return
+
     catalog_intent = _molecule_catalog_intent(message)
     if catalog_intent is not None:
         h = user_h + [{
@@ -1417,6 +1726,17 @@ def chat(
             return
     else:
         pending_plan = None
+
+    previous_config = pending_context["config"] if revision_mode and pending_context else {}
+    try:
+        expected_scale = validate_ion_charge_scale(
+            requested_scale if requested_scale is not None
+            else previous_config.get("ion_charge_scale", DEFAULT_ION_CHARGE_SCALE)
+        )
+    except ValueError as exc:
+        h = user_h + [{"role": "assistant", "content": f"⚠️ 当前方案缩放参数无效：{exc}"}]
+        yield _emit(h, pending_plan)
+        return
 
     yield "", user_h, user_h, pending_plan, "", _HIDE_BTN
 
@@ -1498,7 +1818,10 @@ def chat(
                             raw_args = json.loads(tool_call.function.arguments)
                             if not isinstance(raw_args, dict):
                                 raise ValueError("工具参数必须是对象")
-                            result_str = handle_tool_call(tool_call.function.name, raw_args)
+                            if tool_call.function.name == "tools_lookup_solvent":
+                                result_str = json.dumps(lookup_solvent(raw_args.get("name", ""), project_root=ROOT), ensure_ascii=False)
+                            else:
+                                result_str = handle_tool_call(tool_call.function.name, raw_args)
                         except (json.JSONDecodeError, TypeError, ValueError) as exc:
                             result_str = json.dumps(
                                 {"ok": False, "error": f"工具参数无效：{exc}"},
@@ -1542,6 +1865,20 @@ def chat(
 
             if semantic_draft is None:
                 continue
+
+            try:
+                semantic_draft = _bind_ion_charge_scale(semantic_draft, expected_scale)
+            except ValueError as exc:
+                h = user_h + [{"role": "assistant", "content": f"⚠️ 方案未通过缩放参数校验：{exc}"}]
+                yield _emit(h, pending_plan)
+                return
+
+            try:
+                semantic_draft = _prepare_plan_solvents(semantic_draft, previous_config, requested_default=requested_solvent)
+            except ValueError as exc:
+                h = user_h + [{"role": "assistant", "content": f"⚠️ 方案未通过溶剂校验：{exc}"}]
+                yield _emit(h, pending_plan)
+                return
 
             audit_request, audit_request_error = _normalize_quantum_audit_request(semantic_draft)
             if audit_request is None:
@@ -1642,11 +1979,23 @@ def chat(
                 }]
                 yield _emit(h, pending_plan)
                 return
+            try:
+                strict_config = _bind_ion_charge_scale(strict_config, expected_scale)
+            except ValueError as exc:
+                h = user_h + [{"role": "assistant", "content": f"⚠️ 方案未通过缩放参数校验：{exc}"}]
+                yield _emit(h, pending_plan)
+                return
             if not _audit_covers_candidate(audit_result, strict_config):
                 h = list(user_h) + [{
                     "role": "assistant",
                     "content": "⚠️ 方案未通过最终配置校验：最终配置的后端或组分与已审计输入不一致。",
                 }]
+                yield _emit(h, pending_plan)
+                return
+            try:
+                strict_config = _bind_strict_solvents(strict_config, semantic_draft)
+            except ValueError as exc:
+                h = user_h + [{"role": "assistant", "content": f"⚠️ 最终配置未通过溶剂校验：{exc}"}]
                 yield _emit(h, pending_plan)
                 return
             candidate_with_execution = _attach_trusted_execution(

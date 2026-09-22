@@ -1,8 +1,13 @@
 """Contracts for the primary assistant-ui entry point."""
 
+import asyncio
 import base64
+from copy import deepcopy
 import json
 from pathlib import Path
+
+from fastapi.testclient import TestClient
+import pytest
 
 import app
 from willy.run_registry import RunRegistry
@@ -22,6 +27,37 @@ def _record_run(root: Path, run_id: str, *, state: str, step: int) -> None:
 
 def test_app2_health_reports_the_independent_surface():
     assert app.health() == {"status": "ok", "surface": "assistant-ui"}
+
+
+def test_configuration_preflight_displays_the_runtime_report(monkeypatch):
+    report = {
+        "runtime": {"ready": True, "python_version": "3.12.3"},
+        "markdown": "Python 运行时：3.12.3（满足）\n沿用父进程解释器。",
+    }
+    monkeypatch.setattr(app.frontend_api, "run_local_dependency_preflight", lambda: report)
+
+    assert app.configuration_preflight() == report
+    source = (app.ROOT / "frontend" / "src" / "main.jsx").read_text()
+    styles = (app.ROOT / "frontend" / "src" / "styles.css").read_text()
+    assert "payload.markdown || payload.detail" in source
+    assert ".configuration-content .action-status { white-space: pre-wrap;" in styles
+
+
+def test_app_lifespan_reconciles_stale_runs_before_serving(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app.frontend_api,
+        "reconcile_stale_pipeline_states",
+        lambda **kwargs: calls.append(kwargs) or [],
+    )
+
+    async def enter_lifespan():
+        async with app._workbench_lifespan(app.app):
+            pass
+
+    asyncio.run(enter_lifespan())
+
+    assert calls == [{"source": "service_startup"}]
 
 
 def test_app2_proposal_surface_shows_a_thinking_buffer_while_a_request_runs():
@@ -135,6 +171,8 @@ def test_app2_declares_separate_proposal_and_run_assistant_routes():
         ("/api/runs", "GET"),
         ("/api/runs/{run_id}/chat", "GET"),
         ("/api/runs/{run_id}/chat", "POST"),
+        ("/api/runs/{run_id}/resume", "POST"),
+        ("/api/runs/{run_id}/pending-action/revise", "POST"),
         ("/api/runs/{run_id}/pending-action/confirm", "POST"),
         ("/api/runs/{run_id}/display-name", "PATCH"),
         ("/api/local-items/{item_id}", "DELETE"),
@@ -142,6 +180,7 @@ def test_app2_declares_separate_proposal_and_run_assistant_routes():
         ("/api/runs/{run_id}/stop", "POST"),
         ("/api/runs/{run_id}/updates", "GET"),
         ("/api/proposal/upload", "POST"),
+        ("/api/molecules", "GET"),
         ("/api/visualization", "GET"),
     }.issubset(routes)
 
@@ -151,10 +190,11 @@ def test_app2_pending_action_control_is_visible_only_while_awaiting_confirmation
 
     assert "function PendingActionConfirmation" in source
     assert 'state === "awaiting_confirmation"' in source
-    assert "/pending-action/confirm" in source
-    assert "action_id: action.action_id" in source
-    assert "state_revision: action.state_revision" in source
-    assert "config_fingerprint: action.config_fingerprint" in source
+    assert '`pending-action/${operation}`' in source
+    assert 'submit("confirm")' in source
+    assert "action_id: context.action.action_id" in source
+    assert "state_revision: context.action.state_revision" in source
+    assert "config_fingerprint: context.action.config_fingerprint" in source
 
 
 def test_app2_default_proposal_creates_or_restores_a_workspace_only_when_idle(tmp_path, monkeypatch):
@@ -249,20 +289,251 @@ def test_app2_display_name_rejects_non_ascii_label(tmp_path, monkeypatch):
         raise AssertionError("non-ASCII display names must be rejected")
 
 
-def test_app2_logs_expose_only_the_selected_run_audit_records(tmp_path, monkeypatch):
+@pytest.fixture
+def logs_run(tmp_path, monkeypatch):
     _record_run(tmp_path, RUN_ID, state="aborted", step=5)
     monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    run_dir = tmp_path / "md_run" / RUN_ID
+    (run_dir / "config.json").write_text(
+        json.dumps({"backend": "g16", "ion_charge_scale": 0.8}), encoding="utf-8",
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps({"backend": "orca", "ion_charge_scale": 0.4}), encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_app2_logs_expose_only_the_selected_run_manifest_and_config(logs_run, tmp_path):
+    before = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
 
     response = app.run_logs(RUN_ID)
 
+    assert set(response) == {"run_id", "manifest", "config"}
     assert response["run_id"] == RUN_ID
     assert response["manifest"]["filename"] == "run_manifest.json"
     assert json.loads(response["manifest"]["content"])["run_id"] == RUN_ID
-    assert response["events"]["filename"] == "events.jsonl"
-    assert "status_updated" in response["events"]["content"]
+    assert response["config"] == {
+        "filename": "config.json",
+        "content": '{\n  "backend": "g16",\n  "ion_charge_scale": 0.8\n}\n',
+        "truncated": False,
+    }
     assert response["manifest"]["truncated"] is False
-    assert response["events"]["truncated"] is False
     assert str(tmp_path) not in str(response)
+    assert before == {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+    registry = RunRegistry(tmp_path)
+    registry.append_event(logs_run, "logs_read_audit_check", {"state": "aborted"})
+    assert (logs_run / "events.jsonl").read_bytes().startswith(before[logs_run / "events.jsonl"][0])
+    assert "logs_read_audit_check" in (logs_run / "events.jsonl").read_text()
+    assert app.run_logs(RUN_ID) == response
+
+
+def test_app2_logs_preserve_science_fields_and_strip_nested_credentials(logs_run):
+    from willy.simulation.protocol import default_md_config
+
+    public = {
+        "backend": "g16", "ion_charge_scale": 0.75,
+        "defaults": {"mem": "5GB", "nproc": 8},
+        "molecules": {"Li": {"charge": 1, "spin": 1, "basis": "b3lyp", "solvent": "水"}},
+        "residues": {"Li": 10}, "md": default_md_config(),
+        "topology": {"backend": "sobtop", "force_field": "gaff_uff"},
+        "box": {"target_mass_density_g_cm3": 0.7},
+        "ion_compensation": {"enabled": True}, "non_neutral_confirmed": False,
+        "execution": {"md": {"backend": "local", "profile": None, "retain_remote_run": True}},
+    }
+    config = deepcopy(public)
+    config.update(api_key="TOP-SECRET", llm={"model": "PRIVATE-MODEL"}, private={"body": "PRIVATE-BODY"})
+    config["md"]["API_Key"] = "MD-SECRET"
+    config["md"]["eq"]["credentials"] = {"anything": "EQ-SECRET"}
+    config["molecules"]["Li"]["accessToken"] = "MOLECULE-SECRET"
+    config["defaults"]["Password"] = "DEFAULT-SECRET"
+    config["execution"]["md"].update(host="HOST-SECRET", command="COMMAND-SECRET")
+    config["execution"]["profiles"] = {"anything": "PROFILE-SECRET"}
+    config["topology"]["extensions"] = [{"charge": 0, "private_key": "LIST-SECRET"}]
+    public["topology"]["extensions"] = [{"charge": 0}]
+    config_path = logs_run / "config.json"
+    config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    before = config_path.read_bytes()
+
+    response = app.run_logs(RUN_ID)
+
+    assert json.loads(response["config"]["content"]) == public
+    assert "SECRET" not in str(response)
+    assert "PRIVATE" not in str(response)
+    assert "水" in response["config"]["content"]
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("payload", [
+    b"", b" \n\t", b"{}", b"[]", b"null", b'"text"', b"42", b"true", b"\xff",
+    b'{"backend":', b'{"backend":"g16",}', b'{"backend":"g16"} trailing',
+    b'{"md":{"dt":NaN}}', b'{"md":{"dt":Infinity}}', b'{"md":{"dt":-Infinity}}',
+    b'{"md":{"dt":1e999}}', b'{"backend":"\\ud800"}',
+    b'{"api_key":"PRIVATE-ONLY"}', b'{"md":' + b"[" * 1100 + b"0" + b"]" * 1100 + b"}",
+])
+def test_app2_logs_reject_empty_or_damaged_config_without_root_fallback(logs_run, payload):
+    (logs_run / "config.json").write_bytes(payload)
+
+    with pytest.raises(app.HTTPException) as raised:
+        app.run_logs(RUN_ID)
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "当前工程 config.json 为空或无效"
+    assert (logs_run / "config.json").read_bytes() == payload
+
+
+def test_app2_logs_reject_missing_config_without_root_fallback(logs_run):
+    (logs_run / "config.json").unlink()
+
+    with pytest.raises(app.HTTPException, match="config.json") as raised:
+        app.run_logs(RUN_ID)
+
+    assert raised.value.status_code == 503
+    assert not (logs_run / "config.json").exists()
+
+
+@pytest.mark.parametrize("formatted_only", [False, True])
+def test_app2_logs_reject_oversized_config_instead_of_truncating(logs_run, monkeypatch, formatted_only):
+    limit = 128
+    monkeypatch.setattr(app, "_MAX_LOG_RECORD_BYTES", limit)
+    (logs_run / "run_manifest.json").unlink()
+    payload = json.dumps({"md": [0] * 25}) if formatted_only else json.dumps({"backend": "g16", "md": "x" * limit})
+    assert (len(payload) <= limit) is formatted_only
+    (logs_run / "config.json").write_text(payload)
+
+    with pytest.raises(app.HTTPException, match="过大") as raised:
+        app.run_logs(RUN_ID)
+
+    assert raised.value.status_code == 503
+
+
+def test_app2_logs_bound_config_that_grows_after_stat(logs_run, monkeypatch):
+    original_fstat = app.os.fstat
+    config_path = logs_run / "config.json"
+    config_inode = config_path.stat().st_ino
+
+    def grow_after_stat(descriptor):
+        metadata = original_fstat(descriptor)
+        if metadata.st_ino == config_inode:
+            config_path.write_bytes(b" " * (app._MAX_LOG_RECORD_BYTES + 1))
+        return metadata
+
+    monkeypatch.setattr(app.os, "fstat", grow_after_stat)
+    with pytest.raises(app.HTTPException, match="过大"):
+        app.run_logs(RUN_ID)
+
+
+@pytest.mark.parametrize("run_id", ["", "..", "../config.json", "/tmp", "md/../other", "md\\other", "md__missing"])
+def test_app2_logs_reject_nonlocal_run_ids(logs_run, run_id):
+    with pytest.raises(app.HTTPException) as raised:
+        app.run_logs(run_id)
+
+    assert raised.value.status_code == 404
+
+
+@pytest.mark.parametrize("filename", ["config.json", "run_manifest.json", "manifest.json"])
+@pytest.mark.parametrize("target", ["outside", "same_run", "dangling"])
+def test_app2_logs_reject_record_symlinks(logs_run, tmp_path, filename, target):
+    if filename == "manifest.json":
+        (logs_run / "run_manifest.json").unlink()
+    path = logs_run / filename
+    path.unlink(missing_ok=True)
+    destination = logs_run / "other.json" if target == "same_run" else tmp_path / "private.json"
+    if target != "dangling":
+        destination.write_text('{"backend":"PRIVATE-CONTENT"}')
+    path.symlink_to(destination)
+
+    with pytest.raises(app.HTTPException) as raised:
+        app.run_logs(RUN_ID)
+
+    assert raised.value.status_code == 503
+    assert "PRIVATE-CONTENT" not in raised.value.detail
+    assert str(tmp_path) not in raised.value.detail
+
+
+@pytest.mark.parametrize("directory", ["run", "md_run"])
+def test_app2_logs_reject_directory_symlink_escape(logs_run, tmp_path, directory):
+    original = logs_run if directory == "run" else logs_run.parent
+    destination = tmp_path / "outside"
+    original.rename(destination)
+    original.symlink_to(destination, target_is_directory=True)
+
+    with pytest.raises(app.HTTPException) as raised:
+        app.run_logs(RUN_ID)
+
+    assert raised.value.status_code == 404
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_app2_logs_reject_nonregular_config_without_blocking(logs_run, kind):
+    config_path = logs_run / "config.json"
+    config_path.unlink()
+    if kind == "directory":
+        config_path.mkdir()
+    else:
+        app.os.mkfifo(config_path)
+
+    with pytest.raises(app.HTTPException) as raised:
+        app.run_logs(RUN_ID)
+
+    assert raised.value.status_code == 503
+
+
+def test_app2_logs_pin_directory_during_symlink_swap(logs_run, tmp_path, monkeypatch):
+    original_open = app.os.open
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    (other_run / "config.json").write_text('{"backend":"OTHER-RUN"}')
+
+    def swap_before_config_read(path, flags, *args, **kwargs):
+        if path == "config.json":
+            logs_run.rename(tmp_path / "pinned-run")
+            logs_run.symlink_to(other_run, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(app.os, "open", swap_before_config_read)
+
+    assert json.loads(app.run_logs(RUN_ID)["config"]["content"])["backend"] == "g16"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_app2_logs_keep_manifest_and_never_read_events(logs_run, tmp_path, legacy):
+    if legacy:
+        (logs_run / "run_manifest.json").unlink()
+        (logs_run / "manifest.json").write_text(json.dumps({"run_id": RUN_ID}))
+    else:
+        path = logs_run / "run_manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["sections"]["private"] = {"visibility": "private", "api_key": "PRIVATE-MANIFEST"}
+        path.write_text(json.dumps(manifest))
+    events_path = logs_run / "events.jsonl"
+    events_path.unlink()
+    events_path.symlink_to(tmp_path / "absent-events")
+
+    response = app.run_logs(RUN_ID)
+
+    assert response["manifest"]["filename"] == ("manifest.json" if legacy else "run_manifest.json")
+    assert json.loads(response["manifest"]["content"])["run_id"] == RUN_ID
+    assert "PRIVATE-MANIFEST" not in str(response)
+    assert events_path.is_symlink()
+    assert "events" not in response
+
+
+def test_app2_logs_http_contract_and_config_failure(logs_run, monkeypatch):
+    monkeypatch.setattr(app.frontend_api, "reconcile_stale_pipeline_states", lambda **kwargs: [])
+    with TestClient(app.app) as client:
+        response = client.get(f"/api/runs/{RUN_ID}/logs")
+        assert response.status_code == 200
+        assert set(response.json()) == {"run_id", "manifest", "config"}
+        (logs_run / "config.json").unlink()
+        response = client.get(f"/api/runs/{RUN_ID}/logs")
+        assert response.status_code == 503
+        assert response.json() == {"detail": "当前工程缺少 config.json"}
 
 
 def test_app2_proposal_upload_uses_the_existing_normalization_boundary(tmp_path, monkeypatch):
@@ -368,6 +639,26 @@ def test_app2_proposal_and_run_assistant_histories_are_isolated(tmp_path, monkey
     assert persisted[-1][0] == RUN_ID
 
 
+def test_app2_proposal_persists_user_turn_before_llm_returns(tmp_path, monkeypatch):
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    workspace = app.create_proposal_workspace()["workspace"]
+
+    def stalled_chat(*_args, **_kwargs):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(app, "chat", stalled_chat)
+
+    with pytest.raises(RuntimeError, match="llm unavailable"):
+        app.proposal_chat({
+            "proposalId": workspace["workspace_id"],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "建立 Li 体系"}]}],
+        })
+
+    assert app.get_workspace_history(tmp_path, workspace["workspace_id"]) == [
+        {"role": "user", "content": "建立 Li 体系"},
+    ]
+
+
 def test_app2_run_chat_confirms_only_the_current_awaiting_action(monkeypatch):
     action = {
         "run_id": RUN_ID,
@@ -439,6 +730,25 @@ def test_app2_run_chat_confirms_only_the_current_awaiting_action(monkeypatch):
     assert persisted[-1][0] == RUN_ID
 
 
+def test_pending_action_confirmation_follows_child_and_saves_only_child_history(monkeypatch):
+    child_id = "md__202609080002"
+    action = {"action_id": "fork-repair", "state_revision": 3, "config_fingerprint": "a" * 64}
+    saved = []
+    monkeypatch.setattr(app, "_safe_run_id", lambda run_id: run_id)
+    monkeypatch.setattr(app, "_public_snapshot", lambda run_id: {
+        "run_id": run_id, "state": "awaiting_confirmation" if run_id == RUN_ID else "retrying",
+        "step": 9, "done_steps": list(range(1, 9)), "pending_action": action if run_id == RUN_ID else None,
+    })
+    monkeypatch.setattr(app.frontend_api, "get_pending_action", lambda run_id: action)
+    monkeypatch.setattr(app.frontend_api, "get_run_assistant_history", lambda run_id: [{"role": "user", "content": "继承的对话"}])
+    monkeypatch.setattr(app.frontend_api, "save_run_assistant_history", lambda run_id, history: saved.append(run_id) or True)
+    monkeypatch.setattr(app.frontend_api, "confirm_pending_action", lambda *args, **kwargs: f"已创建 fork {child_id}；父工程不变。")
+    response = app.confirm_run_pending_action(RUN_ID, dict(action))
+    assert response["run_id"] == child_id
+    assert saved == [child_id]
+    assert any(message["content"] == "继承的对话" for message in response["messages"])
+
+
 def test_app2_pending_action_confirmation_endpoint_rejects_stale_browser_fields(monkeypatch):
     action = {
         "run_id": RUN_ID,
@@ -493,6 +803,309 @@ def test_app2_pending_action_confirmation_endpoint_rejects_stale_browser_fields(
 
     assert response["text"] == "已确认方案，当前进入重跑准备。"
     assert calls == [("eq-confirm-2", RUN_ID, 19, "b" * 64)]
+
+
+@pytest.fixture
+def recovery_ui(tmp_path, monkeypatch):
+    child_id = "md__202609080003"
+    action = {
+        "run_id": RUN_ID,
+        "action_id": "repair-original",
+        "state_revision": 17,
+        "config_fingerprint": "a" * 64,
+        "summary": "原待确认调整方案",
+        "restart_step": 9,
+        "adjustments": [],
+    }
+    snapshots = {RUN_ID: {
+        "run_id": RUN_ID,
+        "state": "awaiting_confirmation",
+        "state_revision": 17,
+        "step": 9,
+        "done_steps": list(range(1, 9)),
+        "pending_action": action,
+    }}
+    histories = {RUN_ID: app._merge_status_into_history(
+        [{"role": "user", "content": "保留原工程对话"}], snapshots[RUN_ID],
+    )}
+    calls = {name: [] for name in ("resume", "revise", "confirm", "llm", "control", "save")}
+
+    def safe_run_id(run_id):
+        if run_id not in snapshots:
+            raise app.HTTPException(status_code=404, detail="未找到该工程")
+        return run_id
+
+    def get_action(run_id):
+        snapshot = snapshots[run_id]
+        return deepcopy(snapshot.get("pending_action")) if snapshot["state"] == "awaiting_confirmation" else None
+
+    def save_history(run_id, history):
+        calls["save"].append(run_id)
+        histories[run_id] = deepcopy(history)
+        return True
+
+    def resume(run_id, *, state_revision=None):
+        calls["resume"].append((run_id, state_revision))
+        snapshots[run_id].update(
+            state="retrying", state_revision=state_revision + 1, pending_action=None,
+        )
+        return "已按原参数续跑，未应用待确认方案。"
+
+    def revise(action_id, user_request, run_id, *, state_revision, config_fingerprint):
+        calls["revise"].append((action_id, user_request, run_id, state_revision, config_fingerprint))
+        replacement = dict(
+            snapshots[run_id]["pending_action"],
+            action_id=f"repair-revised-{state_revision + 1}",
+            state_revision=state_revision + 1,
+            summary=f"新版待确认方案：{user_request}",
+        )
+        snapshots[run_id].update(state_revision=state_revision + 1, pending_action=replacement)
+        return "已更新待确认方案；尚未确认或启动工程。"
+
+    def confirm(action_id, run_id, *, state_revision, config_fingerprint):
+        calls["confirm"].append((action_id, run_id, state_revision, config_fingerprint))
+        histories[child_id] = deepcopy(histories[run_id])
+        snapshots[child_id] = dict(
+            snapshots[run_id], run_id=child_id, state="retrying", state_revision=1, pending_action=None,
+        )
+        snapshots[run_id]["pending_action"] = None
+        return f"已创建 fork {child_id}；父工程不变。"
+
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(app, "_safe_run_id", safe_run_id)
+    monkeypatch.setattr(app, "_public_snapshot", lambda run_id: deepcopy(snapshots[run_id]))
+    monkeypatch.setattr(app.frontend_api, "get_pending_action", get_action)
+    monkeypatch.setattr(app.frontend_api, "get_run_assistant_history", lambda run_id: deepcopy(histories.get(run_id, [])))
+    monkeypatch.setattr(app.frontend_api, "save_run_assistant_history", save_history)
+    monkeypatch.setattr(app.frontend_api, "resume_aborted_run", resume)
+    monkeypatch.setattr(app.frontend_api, "revise_pending_action", revise)
+    monkeypatch.setattr(app.frontend_api, "confirm_pending_action", confirm)
+    monkeypatch.setattr(app.frontend_api, "get_run_assistant_switch_target", lambda message: None)
+    monkeypatch.setattr(app.frontend_api, "run_assistant_control_command", lambda run_id, message: calls["control"].append(message))
+    monkeypatch.setattr(app.frontend_api, "chat_run_assistant", lambda run_id, message, history: calls["llm"].append(message) or "只读讨论")
+    monkeypatch.setattr(app.frontend_api, "reconcile_stale_pipeline_states", lambda **kwargs: [])
+    with TestClient(app.app) as client:
+        yield {
+            "client": client, "snapshots": snapshots, "histories": histories,
+            "calls": calls, "action": deepcopy(action), "child_id": child_id,
+        }
+
+
+def test_recovery_snapshot_exposes_registry_revision(tmp_path, monkeypatch):
+    _record_run(tmp_path, RUN_ID, state="aborted", step=9)
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(app.frontend_api, "get_run_panel_snapshot", lambda run_id: {})
+    status = RunRegistry(tmp_path).get_run_status(RUN_ID, reconcile=False)
+
+    assert app._public_snapshot(RUN_ID)["state_revision"] == status["state_revision"]
+
+
+@pytest.mark.parametrize("state", ["aborted", "awaiting_confirmation", "escalated"])
+def test_recovery_resume_endpoint_preserves_original_run_and_ignores_pending_plan(recovery_ui, state):
+    recovery_ui["snapshots"][RUN_ID]["state"] = state
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/resume", json={"state_revision": 17})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["run_id"] == result["snapshot"]["run_id"] == RUN_ID
+    assert result["snapshot"]["state"] == "retrying"
+    assert result["snapshot"]["state_revision"] == 18
+    assert result["snapshot"]["pending_action"] is None
+    assert result["text"] == "已按原参数续跑，未应用待确认方案。"
+    assert recovery_ui["histories"][RUN_ID] == result["messages"]
+    assert any(message["content"] == "保留原工程对话" for message in result["messages"])
+    assert not any(message.get(app._RUN_STATUS_EVENT_KIND) == "pending_action" for message in result["messages"])
+    assert recovery_ui["calls"]["resume"] == [(RUN_ID, 17)]
+    assert recovery_ui["calls"]["save"] == [RUN_ID]
+    assert all(not recovery_ui["calls"][name] for name in ("revise", "confirm", "llm", "control"))
+    assert recovery_ui["child_id"] not in recovery_ui["snapshots"]
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ({}, 400), ({"state_revision": None}, 400), ({"state_revision": True}, 400),
+    ({"state_revision": "17"}, 400), ({"state_revision": 17.0}, 400),
+    ({"state_revision": -1}, 400), ({"state_revision": 16}, 409),
+    ({"state_revision": 18}, 409),
+])
+def test_recovery_resume_endpoint_rejects_invalid_or_stale_revision(recovery_ui, payload, expected):
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/resume", json=payload)
+
+    assert response.status_code == expected
+    assert all(not calls for calls in recovery_ui["calls"].values())
+
+
+@pytest.mark.parametrize("state", ["running", "retrying", "done", "unknown", "idle"])
+def test_recovery_resume_endpoint_rejects_ineligible_state(recovery_ui, state):
+    recovery_ui["snapshots"][RUN_ID]["state"] = state
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/resume", json={"state_revision": 17})
+
+    assert response.status_code == 409
+    assert all(not calls for calls in recovery_ui["calls"].values())
+
+
+@pytest.mark.parametrize("message", ["原参数续跑", "按原参数重跑", "不改参数继续", "原参数续跑。", "/resume"])
+def test_recovery_chat_original_parameter_commands_use_resume_not_proposal(recovery_ui, message):
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/chat", json={"message": message})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["run_id"] == RUN_ID
+    assert recovery_ui["histories"][RUN_ID] == result["messages"]
+    assert {"role": "user", "content": message} in result["messages"]
+    assert recovery_ui["calls"]["resume"] == [(RUN_ID, 17)]
+    assert all(not recovery_ui["calls"][name] for name in ("revise", "confirm", "llm", "control"))
+
+
+def test_recovery_chat_resume_honors_submitted_revision(recovery_ui):
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/chat", json={
+        "message": "原参数续跑", "state_revision": 16,
+    })
+
+    assert response.status_code == 409
+    assert all(not calls for calls in recovery_ui["calls"].values())
+
+
+def test_recovery_chat_reconciles_stale_process_before_resume_state_gate(recovery_ui, monkeypatch):
+    recovery_ui["snapshots"][RUN_ID].update(state="running", pending_action=None)
+    reconciled = []
+
+    def reconcile(run_id, *, source):
+        reconciled.append((run_id, source))
+        recovery_ui["snapshots"][run_id].update(state="aborted", state_revision=18)
+
+    monkeypatch.setattr(app.frontend_api, "reconcile_stale_pipeline_state", reconcile)
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/chat", json={"message": "/resume"})
+
+    assert response.status_code == 200
+    assert reconciled == [(RUN_ID, "resume_request")]
+    assert recovery_ui["calls"]["resume"] == [(RUN_ID, 18)]
+
+
+@pytest.mark.parametrize("revision_surface", ["endpoint", "chat"])
+@pytest.mark.parametrize("confirmation_surface", ["endpoint", "chat"])
+def test_recovery_revise_replaces_bubble_rejects_old_binding_and_confirms_new_child(
+    recovery_ui, revision_surface, confirmation_surface,
+):
+    client = recovery_ui["client"]
+    original = recovery_ui["action"]
+    request = "把时间步长改为 0.0005 ps"
+    revision_path = f"/api/runs/{RUN_ID}/pending-action/revise" if revision_surface == "endpoint" else f"/api/runs/{RUN_ID}/chat"
+    revision_payload = {"request": request} if revision_surface == "endpoint" else {"message": f"修改方案：{request}"}
+    confirmation_path = f"/api/runs/{RUN_ID}/pending-action/confirm" if confirmation_surface == "endpoint" else f"/api/runs/{RUN_ID}/chat"
+    response = client.post(revision_path, json=dict(original, **revision_payload))
+
+    assert response.status_code == 200
+    revised = response.json()
+    assert revised["run_id"] == RUN_ID
+    assert revised["snapshot"]["state"] == "awaiting_confirmation"
+    assert revised["snapshot"]["state_revision"] == 18
+    latest = revised["snapshot"]["pending_action"]
+    assert latest["action_id"] != original["action_id"]
+    assert latest["state_revision"] == 18
+    assert latest["config_fingerprint"] == original["config_fingerprint"]
+    proposals = [message for message in revised["messages"] if message.get(app._RUN_STATUS_EVENT_KIND) == "pending_action"]
+    assert len(proposals) == 1
+    assert proposals[0][app._RUN_STATUS_EVENT_ID] == f"{RUN_ID}:pending_action:{latest['action_id']}"
+    assert request in proposals[0]["content"]
+    assert "原待确认调整方案" not in str(revised["messages"])
+    assert recovery_ui["histories"][RUN_ID] == revised["messages"]
+    assert client.get(f"/api/runs/{RUN_ID}/chat").json()["messages"] == revised["messages"]
+    assert recovery_ui["calls"]["revise"] == [(original["action_id"], request, RUN_ID, 17, "a" * 64)]
+    assert all(not recovery_ui["calls"][name] for name in ("confirm", "resume", "llm", "control"))
+
+    assert client.post(revision_path, json=dict(original, **revision_payload)).status_code == 409
+    assert client.post(confirmation_path, json=dict(original, message="确认方案")).status_code == 409
+    confirmed = client.post(confirmation_path, json=dict(latest, message="确认方案"))
+    assert confirmed.status_code == 200
+    child = confirmed.json()
+    assert child["run_id"] == child["snapshot"]["run_id"] == recovery_ui["child_id"]
+    assert child["snapshot"]["pending_action"] is None
+    assert child["snapshot"]["state"] == "retrying"
+    assert recovery_ui["histories"][child["run_id"]] == child["messages"]
+    assert not any(message.get(app._RUN_STATUS_EVENT_KIND) == "pending_action" for message in child["messages"])
+    assert recovery_ui["calls"]["confirm"] == [(latest["action_id"], RUN_ID, 18, "a" * 64)]
+    assert len(recovery_ui["calls"]["revise"]) == 1
+    assert not recovery_ui["calls"]["resume"]
+    assert client.post(confirmation_path, json=dict(latest, message="确认方案")).status_code == 409
+
+
+@pytest.mark.parametrize("operation", ["revise", "confirm", "chat-revise", "chat-confirm"])
+@pytest.mark.parametrize("field, value, expected", [
+    ("action_id", "old-action", 409), ("state_revision", 16, 409),
+    ("config_fingerprint", "b" * 64, 409), ("action_id", None, 400),
+    ("state_revision", True, 400), ("state_revision", -1, 400),
+    ("config_fingerprint", "", 400),
+])
+def test_recovery_action_controls_require_exact_current_binding(recovery_ui, operation, field, value, expected):
+    payload = dict(recovery_ui["action"], request="降低时间步长")
+    payload[field] = value
+    if operation.startswith("chat-"):
+        path = f"/api/runs/{RUN_ID}/chat"
+        payload["message"] = "确认方案" if operation == "chat-confirm" else "修改方案：降低时间步长"
+    else:
+        path = f"/api/runs/{RUN_ID}/pending-action/{operation}"
+    response = recovery_ui["client"].post(path, json=payload)
+
+    assert response.status_code == expected
+    assert all(not calls for calls in recovery_ui["calls"].values())
+
+
+@pytest.mark.parametrize("user_request", [None, "", "   ", 17, "调" * 601])
+def test_recovery_revise_requires_bounded_nonempty_request(recovery_ui, user_request):
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/pending-action/revise", json={
+        **recovery_ui["action"], "request": user_request,
+    })
+
+    assert response.status_code == 400
+    assert all(not calls for calls in recovery_ui["calls"].values())
+
+
+@pytest.mark.parametrize("message", [
+    "修改方案：降低时间步长", "修改方案: 延长 EQ 保温段", "把 dt 改为 0.0005",
+    "将时间步长设置为 0.0005 ps", "把时间步长改成 0.0005 ps", "请把 dt 改为 0.0005。",
+    "请修改方案：降低时间步长。", "把你建议的时间步长改为 0.0005 ps",
+])
+def test_recovery_chat_revises_only_pending_plan_without_confirmation(recovery_ui, message):
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/chat", json={"message": message})
+
+    assert response.status_code == 200
+    assert response.json()["snapshot"]["pending_action"]["state_revision"] == 18
+    assert len(recovery_ui["calls"]["revise"]) == 1
+    assert all(not recovery_ui["calls"][name] for name in ("confirm", "resume", "llm", "control"))
+
+
+@pytest.mark.parametrize("message", [
+    "原参数续跑？", "不要按原参数重跑", "按原参数重跑是否合适", "不改参数继续吗", "我想了解原参数续跑",
+    "修改方案：把 dt 改为 0.0005 可以吗", "修改方案：不要降低时间步长", "修改方案：如果降低时间步长",
+    "把 dt 改为 0.0005？", "把 dt 改为 0.0005 合理吗", "把 dt 改为 0.0005 是否合适",
+    "不要把 dt 改为 0.0005", "将时间步长改为 0.0005 会怎样", "我们讨论把 dt 改为 0.0005",
+    "如果把 dt 改为 0.0005", "为什么要修改方案", "降低时间步长", "修改方案：",
+    "把 dt 改为 0.0005 会更稳定", "把 dt 改为 0.0005 应该更稳定", "修改方案：‘把 dt 改为 0.0005’",
+    "请问把 dt 改为 0.0005", "修改方案：把 dt 改为 0.0005。这里只是讨论",
+])
+def test_recovery_chat_questions_negation_and_discussion_remain_read_only(recovery_ui, message):
+    response = recovery_ui["client"].post(f"/api/runs/{RUN_ID}/chat", json={"message": message})
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "只读讨论"
+    assert recovery_ui["calls"]["llm"] == [message]
+    assert all(not recovery_ui["calls"][name] for name in ("revise", "confirm", "resume"))
+
+
+@pytest.mark.parametrize("state", ["awaiting_confirmation", "escalated", "unknown", "aborted"])
+def test_recovery_no_pending_action_never_invents_or_launches_a_plan(recovery_ui, state):
+    snapshot = recovery_ui["snapshots"][RUN_ID]
+    snapshot.update(state=state, pending_action=None)
+    client = recovery_ui["client"]
+    response = client.post(f"/api/runs/{RUN_ID}/chat", json={"message": "修改方案：降低时间步长"})
+
+    assert response.status_code == 200
+    assert "当前没有有效的待确认方案" in response.json()["text"]
+    assert not any(message.get(app._RUN_STATUS_EVENT_KIND) == "pending_action" for message in response.json()["messages"])
+    assert client.post(f"/api/runs/{RUN_ID}/pending-action/revise", json={
+        **recovery_ui["action"], "request": "降低时间步长",
+    }).status_code == 409
+    assert all(not recovery_ui["calls"][name] for name in ("revise", "confirm", "resume", "llm", "control"))
 
 
 def test_app2_proposal_chat_switches_to_run_only_when_a_new_run_appears(tmp_path, monkeypatch):

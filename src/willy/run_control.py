@@ -1,7 +1,7 @@
 """Deterministic command and parameter validation for Run Assistant controls.
 
 The chat layer must never infer a destructive control action from prose.  This
-module recognizes only explicit ``/resume``, ``/fork`` and ``/switch``
+module recognizes only explicit ``/resume``, ``/fork``, ``/inputs`` and ``/switch``
 commands, then maps each supported configuration field to its owning workflow
 step or validates the single allowed run identifier.
 """
@@ -15,10 +15,11 @@ import re
 import shlex
 from typing import Any
 
+from willy.charge_scaling import validate_ion_charge_scale
 from willy.step_registry import MDP_STEP, PACKMOL_STEP, STEP_REGISTRY
 
 
-_COMMAND_RE = re.compile(r"^/(?P<kind>resume|fork|switch)(?:\s+(?P<body>.*))?$", re.IGNORECASE | re.DOTALL)
+_COMMAND_RE = re.compile(r"^/(?P<kind>resume|fork|switch|inputs)(?:\s+(?P<body>.*))?$", re.IGNORECASE | re.DOTALL)
 _PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_-]*)*$")
 _SWITCH_RUN_ID_RE = re.compile(r"^(?:md__)?(?P<suffix>\d{12})$")
 _MAX_CHANGES = 16
@@ -33,6 +34,7 @@ class RunControlCommand:
     kind: str
     changes: dict[tuple[str, ...], Any]
     target_run_id: str | None = None
+    declaration: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,10 @@ def parse_run_control_command(message: object) -> RunControlCommand | None:
         return None
     kind = match.group("kind").lower()
     body = (match.group("body") or "").strip()
+    if kind == "inputs":
+        if len(body) > 2000:
+            raise RunControlError("新输入声明过长，请明确指出文件与用途")
+        return RunControlCommand(kind="inputs", changes={}, declaration=body)
     if kind == "resume":
         if body:
             raise RunControlError("/resume 不接受参数；请使用 /fork 修改参数后创建子运行")
@@ -110,7 +116,7 @@ def validate_fork_changes(
     *,
     stopped_at: int,
 ) -> ForkPlan:
-    """Validate existing, changed fields are owned by the stopped/later stage."""
+    """Validate changes and invalidate from the earliest owning workflow step."""
     if not changes:
         raise RunControlError("/fork 必须包含参数修改")
     if len(changes) > _MAX_CHANGES:
@@ -118,20 +124,16 @@ def validate_fork_changes(
 
     paths: list[str] = []
     for path, value in changes.items():
+        parameter_owner_step(path)
         existing = _value_at_path(config, path)
+        if path == ("ion_charge_scale",):
+            existing = _validated_charge_scale(existing)
+            value = _validated_charge_scale(value)
         if existing == value:
             raise RunControlError(f"参数 {'.'.join(path)} 未发生变化")
-        owner_step = parameter_owner_step(path)
         rendered = ".".join(path)
-        if owner_step < stopped_at:
-            raise RunControlError(
-                f"参数 {rendered} 属于第 {owner_step} 步，早于上次停止的第 {stopped_at} 步"
-            )
         paths.append(rendered)
 
-    # Forks intentionally replay the protocol construction boundary.  This
-    # gives the child its own MDP and simulation manifest rather than reusing
-    # a parent's stage permission or checkpoint under changed parameters.
     owner_steps = [parameter_owner_step(path) for path in changes]
     restart_step = min(_fork_restart_step(step) for step in owner_steps)
     return ForkPlan(
@@ -145,6 +147,8 @@ def parameter_owner_step(path: tuple[str, ...]) -> int:
     """Return the workflow step which first consumes a supported config path."""
     if not path:
         raise RunControlError("参数路径为空")
+    if path == ("ion_charge_scale",):
+        return 3
     root = path[0]
     if root == "topology":
         return 4
@@ -161,16 +165,19 @@ def parameter_owner_step(path: tuple[str, ...]) -> int:
             raise RunControlError("md.run_seed 是冻结的运行身份，不能通过 /fork 修改")
         return MDP_STEP
     raise RunControlError(
-        f"参数 {'.'.join(path)} 不支持通过 /fork 修改；只允许 topology、box、md 或 execution"
+        f"参数 {'.'.join(path)} 不支持通过 /fork 修改；只允许 ion_charge_scale、topology、box、md 或 execution"
     )
 
 
 def apply_fork_changes(config: Mapping[str, object], changes: Mapping[tuple[str, ...], object]) -> dict[str, Any]:
-    """Return a detached config copy with already-validated existing paths changed."""
+    """Return a detached config copy, materializing optional changed fields only."""
     copied = json.loads(json.dumps(config, ensure_ascii=False))
     if not isinstance(copied, dict):
         raise RunControlError("原运行配置格式无效")
     for path, value in changes.items():
+        if path == ("ion_charge_scale",):
+            copied["ion_charge_scale"] = _validated_charge_scale(value)
+            continue
         target: dict[str, Any] = copied
         for key in path[:-1]:
             child = target.get(key)
@@ -251,12 +258,21 @@ def _decode_scalar(value: str) -> Any:
 
 
 def _value_at_path(config: Mapping[str, object], path: tuple[str, ...]) -> object:
+    if path == ("ion_charge_scale",):
+        return config.get("ion_charge_scale", 1.0)
     value: object = config
     for key in path:
         if not isinstance(value, Mapping) or key not in value:
             raise RunControlError(f"参数 {'.'.join(path)} 在原运行配置中不存在")
         value = value[key]
     return value
+
+
+def _validated_charge_scale(value: object) -> float:
+    try:
+        return validate_ion_charge_scale(value)
+    except ValueError as exc:
+        raise RunControlError(str(exc)) from exc
 
 
 def _fork_restart_step(owner_step: int) -> int:
