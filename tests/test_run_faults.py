@@ -306,6 +306,22 @@ def test_refresh_waits_for_actual_owned_process_to_exit(tmp_path):
         process.wait(timeout=3)
 
 
+def test_tracked_process_termination_reaches_the_child_process_group(tmp_path):
+    from willy.run_processes import has_live_processes, terminate_tracked_process_groups, track_process
+
+    _registry, directory, _status = _fault(tmp_path, phase="stopping")
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"], start_new_session=True)
+    try:
+        track_process(directory, process)
+        assert terminate_tracked_process_groups(directory, term_grace_s=0) == [process.pid]
+        process.wait(timeout=3)
+        assert not has_live_processes(directory)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
+
+
 def test_legacy_pipeline_pid_blocks_review_until_gone(tmp_path, monkeypatch):
     import willy.pipeline_launch as launch
     _registry, directory, _status = _fault(tmp_path, phase="stopping")

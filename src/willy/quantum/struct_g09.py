@@ -29,6 +29,7 @@ from willy.quantum.smd_solvents import SMDSolventError, apply_scrf_snapshot
 # ── 常量 ──
 DEFAULT_MEM = "5GB"
 DEFAULT_NPROC = 8
+OPTIMIZATION_TIMEOUT_S = 36_000
 
 ROOT = get_project_root()
 CONFIG_PATH = ROOT / "config.json"
@@ -212,6 +213,22 @@ def run_one(name: str, cfg: dict, defaults: dict,
     import time
     t0 = time.time()
     std = Path(struct_dir)
+    gjf_path = std / f"{name}.gjf"
+    if cfg.get("skip_optimization") is True:
+        if not gjf_path.is_file() or gjf_path.stat().st_size <= 0:
+            return StepResult(
+                step_name="struct_g09", step_index=1, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{gjf_path} 不存在或为空",
+                                hint=f"跳过优化仍需要非空的 struct/{name}.gjf 原始输入"),
+                duration_s=time.time() - t0,
+            )
+        print(f"[struct_maker] ⏭ {name}: 已按方案跳过结构优化")
+        return StepResult(
+            step_name="struct_g09", step_index=1, success=True,
+            outputs={"source_input": str(gjf_path)}, artifacts=[str(gjf_path)],
+            duration_s=0.0, extra={"optimization_skipped": True},
+        )
     fchk_path = std / f"{name}.fchk"
     if fchk_path.exists():
         print(f"[struct_maker] ⏭ {name}: .fchk 已存在，跳过结构优化")
@@ -222,7 +239,6 @@ def run_one(name: str, cfg: dict, defaults: dict,
             duration_s=0.0,
         )
 
-    gjf_path = std / f"{name}.gjf"
     if not gjf_path.exists():
         return StepResult(
             step_name="struct_g09", step_index=1, success=False,
@@ -290,7 +306,7 @@ def run_one(name: str, cfg: dict, defaults: dict,
             [str(g09.executable)],
             input_text=new_gjf,
             cwd=std,
-            timeout=7200,
+            timeout=OPTIMIZATION_TIMEOUT_S,
             env=g09_env,
             run_dir=std,
         )
@@ -299,7 +315,7 @@ def run_one(name: str, cfg: dict, defaults: dict,
         return StepResult(
             step_name="struct_g09", step_index=1, success=False,
             error=StepError(kind=ErrorKind.TIMEOUT,
-                            message=f"{name}: G09 结构优化超时 (7200s)"),
+                            message=f"{name}: G09 结构优化超时 ({OPTIMIZATION_TIMEOUT_S}s)"),
             duration_s=time.time() - t0,
         )
     out_path = std / f"{name}.log"

@@ -33,7 +33,7 @@ const proposalPlan = {
     { label: "PROD", meta: "NPT · 10 ns · 298K→298K" },
   ],
 };
-const proposalSummary = `[[WILLY_PLAN_DATA:${JSON.stringify(proposalPlan)}]]\n**模拟方案确认**\n\n下一步将开始结构优化。\n\n确认无误后回复“运行”即可开始。\n若参数有误请提出，我会更新方案。`;
+const proposalSummary = `[[WILLY_PLAN_DATA:${JSON.stringify(proposalPlan)}]]\n**模拟方案确认**\n\n下一步将开始结构优化。\n\n确认无误后回复“运行”即可加入任务队列。\n若参数有误请提出，我会更新方案。`;
 const server = createServer(async (request, response) => {
   const pathname = new URL(request.url, "http://127.0.0.1").pathname;
   const candidate = resolve(root, `.${pathname}`);
@@ -497,7 +497,7 @@ try {
   await desktop.getByText("NPT · 1 ns · 500K→500K", { exact: true }).waitFor();
   await desktop.locator(".proposal-plan-row-main span").filter({ hasText: "b3lyp/6-311+g(d,p)" }).waitFor();
   assert.match(await desktop.locator(".proposal-plan-card").first().textContent(), /SMD: Acetone（builtin）.*覆盖原始 SCRF/);
-  await desktop.getByText("确认无误后回复“运行”即可开始。", { exact: true }).waitFor();
+  await desktop.getByText("确认无误后回复“运行”即可加入任务队列。", { exact: true }).waitFor();
   const proposalTypography = await desktop.locator(".proposal-plan").evaluate((plan) => ({
     heading: getComputedStyle(plan.querySelector(".proposal-plan-heading")).fontSize,
     index: getComputedStyle(plan.querySelector(".proposal-plan-index")).fontSize,

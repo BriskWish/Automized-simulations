@@ -44,7 +44,14 @@ def _rebind(value: Any, parent: Path, child: Path, key: str = "") -> Any:
     return value
 
 
-def copy_run_context(parent_dir: Path, child_dir: Path, config: Mapping[str, Any], *, restart_step: int = 6) -> None:
+def copy_run_context(
+    parent_dir: Path,
+    child_dir: Path,
+    config: Mapping[str, Any],
+    *,
+    restart_step: int = 6,
+    fork_context: Mapping[str, Any] | None = None,
+) -> None:
     parent = parent_dir.resolve()
     child = child_dir.resolve()
     if parent == child or child.is_relative_to(parent) or parent.is_relative_to(child):
@@ -144,10 +151,13 @@ def copy_run_context(parent_dir: Path, child_dir: Path, config: Mapping[str, Any
                     path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(archived, path)
                     break
-    write_json(child / "fork_context.json", {
+    context = {
         "schema_version": 1, "parent_run_id": parent.name, "run_id": child.name,
         "restart_step": restart_step, "source_context": str(snapshot.relative_to(child)),
-    })
+    }
+    if isinstance(fork_context, Mapping):
+        context["request"] = copy.deepcopy(dict(fork_context))
+    write_json(child / "fork_context.json", context)
 
 
 def preview_repair_config(run_dir: Path, action_id: str) -> tuple[dict[str, Any], dict[str, Any]]:

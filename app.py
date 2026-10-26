@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 from contextlib import ExitStack, asynccontextmanager, contextmanager
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -13,7 +15,9 @@ import re
 import stat
 import sys
 import tempfile
+import threading
 from typing import Any, Iterator, Mapping
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
@@ -37,12 +41,28 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from willy import frontend_api
-from willy.agent_config import chat
+from willy.agent_config import (
+    QUEUE_CONFIRMATION_MESSAGE,
+    chat,
+    create_pending_launch_plan,
+    is_launch_confirmation,
+    summarize,
+    start_pipeline,
+)
 from willy.env_registry import dotenv_value
 from willy.pipeline_launch import pipeline_launch_is_active
+from willy.plan_queue import (
+    PlanQueueError,
+    dispatch_plan_queue,
+    dequeue_plan,
+    queue_metadata,
+    queue_plan,
+    queue_snapshot,
+)
 from willy.proposal_workspace import (
     ProposalWorkspaceError,
     clear_pending_plans,
+    clear_pending_requests,
     create_plan_from_run_conversation,
     create_temp_workspace,
     delete_local_item,
@@ -53,6 +73,8 @@ from willy.proposal_workspace import (
     get_workspace_history,
     is_run_conversation_id,
     list_workspaces,
+    formalized_plan_display_name,
+    rename_plan_workspace,
     save_formalized_conversation,
     save_run_conversation,
     save_workspace_conversation,
@@ -64,21 +86,34 @@ from willy.structure_uploads import (
     normalize_uploaded_structure,
     supported_upload_suffixes,
 )
+from willy.workflow_config import validate_config
 
 
 DIST = ROOT / "frontend" / "dist"
 OFFICIAL_ACCOUNT_QR = ROOT / "assets" / "qrcode_for_gh_7df1329939c6_258.jpg"
 
 
+def _launch_queued_plan(config: Mapping[str, object], plan_id: str):
+    """Launch one queue head through the normal confirmed-plan boundary."""
+    return start_pipeline(config, proposal_workspace_id=plan_id)
+
+
 @asynccontextmanager
 async def _workbench_lifespan(_application: FastAPI):
-    """Recover stale snapshots before the workbench serves them.
-
-    This only terminates an already-unowned transient state after the existing
-    ETA/output heartbeat grace period. It never starts or resumes a run.
-    """
+    """Recover stale launches before the workbench serves them."""
+    clear_pending_requests(frontend_api.ROOT)
     frontend_api.reconcile_stale_pipeline_states(source="service_startup")
+    threading.Thread(target=frontend_api.dispatch_pending_forks, daemon=True).start()
+    threading.Thread(target=_dispatch_plan_queue_after_startup, daemon=True).start()
     yield
+
+
+def _dispatch_plan_queue_after_startup() -> None:
+    """Continue explicitly confirmed queue work without blocking ASGI startup."""
+    try:
+        dispatch_plan_queue(frontend_api.ROOT, launcher=_launch_queued_plan)
+    except (OSError, PlanQueueError, ProposalWorkspaceError):
+        pass
 
 
 app = FastAPI(title="Willy assistant-ui", lifespan=_workbench_lifespan)
@@ -153,6 +188,39 @@ def _proposal_id(payload: Mapping[str, object]) -> str:
     if not isinstance(proposal_id, str) or not proposal_id:
         raise HTTPException(status_code=400, detail="方案工作区标识无效")
     return proposal_id
+
+
+def _optimization_skip_selection(workspace: Mapping[str, object]) -> list[dict[str, object]] | None:
+    """Expose only the per-molecule optimization choice for an active plan."""
+    pending_plan = workspace.get("pending_plan")
+    if not isinstance(pending_plan, Mapping):
+        return None
+    config = pending_plan.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    residues = config.get("residues")
+    molecules = config.get("molecules")
+    if not isinstance(residues, Mapping) or not isinstance(molecules, Mapping):
+        return None
+    selection: list[dict[str, object]] = []
+    for raw_name in residues:
+        if not isinstance(raw_name, str) or not isinstance(molecules.get(raw_name), Mapping):
+            return None
+        selection.append({
+            "name": raw_name,
+            "skip_optimization": molecules[raw_name].get("skip_optimization") is True,
+        })
+    return selection
+
+
+def _replace_latest_plan_summary(history: list[dict[str, str]], summary: str) -> list[dict[str, str]]:
+    """Rebind the visible confirmation card to one edited pending plan."""
+    updated = [dict(message) for message in history]
+    for message in reversed(updated):
+        if message.get("role") == "assistant" and "**模拟方案确认**" in message.get("content", ""):
+            message["content"] = summary
+            return updated
+    raise ProposalWorkspaceError("当前方案缺少可更新的确认摘要")
 
 
 def _append_uploaded_structure_message(proposal_id: str, content: str) -> tuple[str, list[dict[str, str]]]:
@@ -456,15 +524,18 @@ def _public_snapshot(run_id: str | None) -> dict[str, Any]:
     if fault_review:
         snapshot["fault_review"] = fault_review
     snapshot.setdefault("run_id", run_id)
+    registry: RunRegistry | None = None
     state = "await"
     revision = None
     step: int | None = None
     done_steps: list[int] = []
     if isinstance(run_id, str):
         try:
-            status = RunRegistry(frontend_api.ROOT).get_run_status(run_id, reconcile=False)
+            registry = RunRegistry(frontend_api.ROOT)
+            status = registry.get_run_status(run_id, reconcile=False)
         except RunRegistryError:
             status = {}
+            registry = None
         value = status.get("state")
         if isinstance(status.get("fault"), dict):
             snapshot["fault"] = status["fault"]
@@ -494,6 +565,13 @@ def _public_snapshot(run_id: str | None) -> dict[str, Any]:
     snapshot["phase"] = "准备中" if state == "preparing" else _step_label(step)
     snapshot["progress"] = _display_progress(state, step, completed)
     snapshot["done_steps"] = completed
+    if registry is not None and isinstance(run_id, str) and completed:
+        try:
+            snapshot["step_completion_times"] = registry.get_completed_step_timestamps(
+                run_id, done_steps=completed,
+            )
+        except (OSError, RunRegistryError):
+            pass
     return snapshot
 
 
@@ -592,10 +670,24 @@ def _completion_events(snapshot: Mapping[str, object]) -> list[dict[str, str]]:
             continue
         if not 1 <= step <= STEP_REGISTRY.total_steps:
             continue
+        completion_times = snapshot.get("step_completion_times")
+        completion_time = (
+            completion_times.get(step)
+            if isinstance(completion_times, Mapping)
+            else None
+        )
+        completed_at = (
+            completion_time.get("completed_at_local")
+            if isinstance(completion_time, Mapping)
+            else None
+        )
+        content = f"第 {step} 步「{STEP_REGISTRY.label_for(step)}」已完成。"
+        if isinstance(completed_at, str) and completed_at:
+            content = f"{content}\n完成时间：{completed_at}。"
         events.append({
             "event_id": f"{run_id}:step:{step}:completed",
             "kind": "step_completed",
-            "content": f"第 {step} 步「{STEP_REGISTRY.label_for(step)}」已完成。",
+            "content": content,
         })
     return events
 
@@ -793,6 +885,16 @@ def _merge_status_into_history(
         if isinstance(message.get(_RUN_STATUS_EVENT_ID), str)
     }
     for event in _completion_events(snapshot):
+        existing = next(
+            (
+                message for message in merged
+                if message.get(_RUN_STATUS_EVENT_ID) == event["event_id"]
+            ),
+            None,
+        )
+        if existing is not None:
+            existing["content"] = event["content"]
+            continue
         if event["event_id"] in known_ids:
             continue
         merged.append({
@@ -1106,6 +1208,8 @@ def list_local_runs() -> dict[str, Any]:
             state = "preparing"
         display_name = display_names.get(canonical_id)
         if display_name is None:
+            display_name = formalized_plan_display_name(frontend_api.ROOT, canonical_id)
+        if not display_name:
             # One-time compatibility fallback for labels written by earlier UI builds.
             display_name = record.get("display_name") if isinstance(record.get("display_name"), str) else ""
         runs.append({
@@ -1122,13 +1226,36 @@ def list_local_runs() -> dict[str, Any]:
         workspaces = list_workspaces(frontend_api.ROOT)
     except (OSError, ProposalWorkspaceError, ValueError):
         workspaces = []
-    plans = [workspace for workspace in workspaces if workspace.get("kind") == "plan"]
+    try:
+        metadata = queue_metadata(frontend_api.ROOT)
+    except (OSError, PlanQueueError):
+        metadata = {}
+    plans = []
+    for workspace in workspaces:
+        if workspace.get("kind") != "plan":
+            continue
+        plan = dict(workspace)
+        plan.update(metadata.get(str(plan.get("workspace_id", "")), {
+            "queued": False,
+            "queue_position": None,
+            "queue_state": "",
+        }))
+        plans.append(plan)
+    plans.sort(key=lambda item: (
+        0 if item.get("queued") else 1,
+        item.get("queue_position") if item.get("queued") else 0,
+    ))
     temps = [workspace for workspace in workspaces if workspace.get("kind") == "temp"]
+    try:
+        public_queue = queue_snapshot(frontend_api.ROOT)
+    except (OSError, PlanQueueError):
+        public_queue = {"active": None, "queued": []}
     return {
         "runs": runs,
         "plans": plans,
         "temps": temps,
         "active_run_id": frontend_api.get_active_run_id(),
+        "queue": public_queue,
     }
 
 
@@ -1153,6 +1280,128 @@ def set_run_display_name(run_id: str, payload: dict[str, Any]) -> dict[str, Any]
     }
 
 
+@app.patch("/api/proposals/{proposal_id}/display-name")
+def set_plan_display_name(proposal_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Rename an unstarted plan; its label is retained by formalization."""
+    display_name = _normalized_display_name(payload.get("display_name"))
+    expected_revision = payload.get("revision")
+    if expected_revision is not None and (
+        not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0
+    ):
+        raise HTTPException(status_code=400, detail="方案版本无效")
+    try:
+        return {"workspace": rename_plan_workspace(
+            frontend_api.ROOT,
+            proposal_id,
+            display_name=display_name,
+            expected_revision=expected_revision,
+        )}
+    except ProposalWorkspaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError:
+        raise HTTPException(status_code=503, detail="方案名称暂时无法保存") from None
+
+
+@app.patch("/api/proposals/{proposal_id}/optimization-skips")
+def set_proposal_optimization_skips(proposal_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist explicit per-molecule geometry-optimization choices for one plan."""
+    expected_revision = payload.get("revision")
+    requested = payload.get("skip_optimization")
+    if (
+        not isinstance(expected_revision, int)
+        or isinstance(expected_revision, bool)
+        or expected_revision < 0
+    ):
+        raise HTTPException(status_code=400, detail="方案版本无效")
+    if not isinstance(requested, Mapping):
+        raise HTTPException(status_code=400, detail="skip_optimization 必须是分子布尔值映射")
+    try:
+        workspace = get_workspace(frontend_api.ROOT, proposal_id)
+        if workspace.get("kind") != "plan" or workspace.get("state") != "awaiting_confirmation":
+            raise ProposalWorkspaceError("仅待确认方案可修改结构优化选项")
+        if workspace.get("revision") != expected_revision:
+            raise ProposalWorkspaceError("方案已更新，请刷新后再修改")
+        pending_plan = workspace.get("pending_plan")
+        if not isinstance(pending_plan, Mapping) or not isinstance(pending_plan.get("config"), Mapping):
+            raise ProposalWorkspaceError("当前方案没有可修改的配置")
+        config = copy.deepcopy(dict(pending_plan["config"]))
+        residues = config.get("residues")
+        molecules = config.get("molecules")
+        if not isinstance(residues, Mapping) or not isinstance(molecules, Mapping):
+            raise ProposalWorkspaceError("当前方案的分子配置无效")
+        names = list(residues)
+        if set(requested) != set(names):
+            raise HTTPException(status_code=400, detail="必须为当前方案中的每个分子提供优化选项")
+        for name in names:
+            value = requested.get(name)
+            if type(value) is not bool:
+                raise HTTPException(status_code=400, detail=f"{name} 的优化选项必须是布尔值")
+            molecule = molecules.get(name)
+            if not isinstance(molecule, dict):
+                raise ProposalWorkspaceError(f"{name} 的分子配置无效")
+            molecule["skip_optimization"] = value
+        issues = validate_config(config)
+        if issues:
+            raise ProposalWorkspaceError("更新后的方案无效: " + "; ".join(issues))
+        summary = summarize(config)
+        history = _replace_latest_plan_summary(
+            get_workspace_history(frontend_api.ROOT, proposal_id), summary,
+        )
+        saved = save_workspace_conversation(
+            frontend_api.ROOT,
+            proposal_id,
+            messages=history,
+            pending_plan=create_pending_launch_plan(config, summary),
+            expected_revision=expected_revision,
+        )
+    except ProposalWorkspaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError:
+        raise HTTPException(status_code=503, detail="方案优化选项暂时无法保存") from None
+    return get_proposal_workspace(str(saved["workspace_id"]))
+
+
+@app.post("/api/proposals/{proposal_id}/queue")
+def enable_plan_queue(proposal_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Explicitly confirm one plan for serial scheduling, then dispatch it."""
+    body = payload if isinstance(payload, Mapping) else {}
+    expected_revision = body.get("revision")
+    if expected_revision is not None and (
+        not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0
+    ):
+        raise HTTPException(status_code=400, detail="方案版本无效")
+    try:
+        queued = queue_plan(frontend_api.ROOT, proposal_id, expected_revision=expected_revision)
+        return {
+            "plan": queued,
+            "queue": dispatch_plan_queue(frontend_api.ROOT, launcher=_launch_queued_plan),
+        }
+    except (PlanQueueError, ProposalWorkspaceError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用") from None
+
+
+@app.delete("/api/proposals/{proposal_id}/queue")
+def disable_plan_queue(proposal_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Withdraw an admitted but not-yet-started plan from serial scheduling."""
+    body = payload if isinstance(payload, Mapping) else {}
+    expected_revision = body.get("revision")
+    if expected_revision is not None and (
+        not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0
+    ):
+        raise HTTPException(status_code=400, detail="方案版本无效")
+    try:
+        return {
+            "plan": dequeue_plan(frontend_api.ROOT, proposal_id, expected_revision=expected_revision),
+            "queue": queue_snapshot(frontend_api.ROOT),
+        }
+    except PlanQueueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用") from None
+
+
 @app.delete("/api/local-items/{item_id}")
 def delete_local_task_item(item_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Delete exactly one inactive local task directory after UI confirmation."""
@@ -1174,6 +1423,11 @@ def delete_local_task_item(item_id: str, payload: dict[str, Any] | None = None) 
                 names.pop(canonical_id, None)
                 _save_display_name_mapping(names)
         else:
+            try:
+                if queue_metadata(frontend_api.ROOT).get(item_id, {}).get("queued"):
+                    raise ProposalWorkspaceError("请先从队列移除方案，再删除目录")
+            except PlanQueueError as exc:
+                raise HTTPException(status_code=503, detail="任务队列暂时不可用") from exc
             deleted = delete_local_item(frontend_api.ROOT, item_id, confirm_plan=confirm_plan)
     except ProposalWorkspaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1230,6 +1484,9 @@ def get_proposal_workspace(proposal_id: str) -> dict[str, Any]:
                 "state": workspace.get("state", "bound"),
                 "created_at": workspace.get("created_at", ""),
                 "updated_at": workspace.get("updated_at", ""),
+                "display_name": workspace.get("display_name", ""),
+                "revision": workspace.get("revision", 0),
+                "thinking": bool(workspace.get("pending_request")),
             }
             history = get_run_conversation_history(frontend_api.ROOT, canonical_id)
         else:
@@ -1240,7 +1497,16 @@ def get_proposal_workspace(proposal_id: str) -> dict[str, Any]:
                 "state": workspace["state"],
                 "created_at": workspace.get("created_at", ""),
                 "updated_at": workspace.get("updated_at", ""),
+                "display_name": workspace.get("display_name", ""),
+                "revision": workspace.get("revision", 0),
+                "thinking": bool(workspace.get("pending_request")),
             }
+            public_workspace.update(queue_metadata(frontend_api.ROOT).get(proposal_id, {
+                "queued": False,
+                "queue_position": None,
+                "queue_state": "",
+            }))
+            public_workspace["optimization_skips"] = _optimization_skip_selection(workspace)
             history = get_workspace_history(frontend_api.ROOT, proposal_id)
     except ProposalWorkspaceError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1336,24 +1602,55 @@ def proposal_chat(payload: dict[str, Any]) -> dict[str, Any]:
     # request can outlive the selected workspace in the browser, and an LLM
     # timeout/error must not erase the draft conversation on a later switch.
     request_history = [*history, {"role": "user", "content": latest_user}]
-    if not is_run_context:
-        try:
+    pending_request = {
+        "request_id": uuid4().hex,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        if is_run_context:
+            save_run_conversation(
+                frontend_api.ROOT,
+                proposal_id,
+                messages=request_history,
+                pending_request=pending_request,
+            )
+        else:
             save_workspace_conversation(
                 frontend_api.ROOT,
                 proposal_id,
                 messages=request_history,
                 pending_plan=pending_plan if isinstance(pending_plan, Mapping) else None,
+                pending_request=pending_request,
             )
-        except ProposalWorkspaceError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProposalWorkspaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     prior_run_id = frontend_api.latest_run_id()
-    updates = list(chat(
-        latest_user,
-        history,
-        pending_plan,
-        proposal_workspace_id=None if is_run_context else proposal_id,
-    ))
+    try:
+        updates = list(chat(
+            latest_user,
+            history,
+            pending_plan,
+            proposal_workspace_id=None if is_run_context else proposal_id,
+        ))
+    except Exception:
+        try:
+            if is_run_context:
+                save_run_conversation(
+                    frontend_api.ROOT,
+                    proposal_id,
+                    messages=request_history,
+                )
+            else:
+                save_workspace_conversation(
+                    frontend_api.ROOT,
+                    proposal_id,
+                    messages=request_history,
+                    pending_plan=pending_plan if isinstance(pending_plan, Mapping) else None,
+                )
+        except ProposalWorkspaceError:
+            pass
+        raise
     if updates:
         _, _, _, pending_plan, _, _ = updates[-1]
         reply = updates[-1][1][-1].get("content", "")
@@ -1384,6 +1681,7 @@ def proposal_chat(payload: dict[str, Any]) -> dict[str, Any]:
                     frontend_api.ROOT,
                     proposal_id,
                     messages=persisted_history,
+                    pending_request=None,
                 )
                 saved = {"workspace_id": proposal_id}
         else:
@@ -1392,10 +1690,43 @@ def proposal_chat(payload: dict[str, Any]) -> dict[str, Any]:
                 proposal_id,
                 messages=persisted_history,
                 pending_plan=pending_plan if isinstance(pending_plan, Mapping) else None,
+                pending_request=None,
             )
     except ProposalWorkspaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     response = {"text": reply, "proposalId": saved["workspace_id"]}
+    if (
+        not is_run_context
+        and is_launch_confirmation(latest_user)
+        and reply == QUEUE_CONFIRMATION_MESSAGE
+        and isinstance(pending_plan, Mapping)
+    ):
+        try:
+            queued = queue_plan(
+                frontend_api.ROOT,
+                saved["workspace_id"],
+                expected_revision=saved.get("revision"),
+            )
+            queue = dispatch_plan_queue(frontend_api.ROOT, launcher=_launch_queued_plan)
+        except (PlanQueueError, ProposalWorkspaceError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OSError:
+            raise HTTPException(status_code=503, detail="任务队列暂时不可用") from None
+        active = queue.get("active") if isinstance(queue, Mapping) else None
+        run_id = active.get("run_id") if isinstance(active, Mapping) else None
+        if (
+            isinstance(active, Mapping)
+            and active.get("plan_id") == saved["workspace_id"]
+            and isinstance(run_id, str)
+            and run_id
+        ):
+            response["text"] = f"{QUEUE_CONFIRMATION_MESSAGE}\n\n已开始执行。\n\n运行：{run_id}"
+            save_formalized_conversation(frontend_api.ROOT, run_id, messages=persisted_history)
+            response["runId"] = run_id
+        else:
+            position = queued.get("queue_position")
+            if isinstance(position, int):
+                response["text"] = f"{QUEUE_CONFIRMATION_MESSAGE}\n\n已加入队列，第 {position} 位。"
     current_run_id = frontend_api.latest_run_id()
     if isinstance(current_run_id, str) and current_run_id != prior_run_id:
         response["runId"] = current_run_id
@@ -1592,7 +1923,7 @@ def complete_run_fault(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/runs/{run_id}/pending-action/revise")
 def revise_run_pending_action(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Replace the bound proposal without confirming it or starting a run."""
+    """Replace one proposal; a unique validated repair then auto-forks."""
     canonical_id = _safe_run_id(run_id)
     request = payload.get("request")
     if not isinstance(request, str) or not request.strip():
@@ -1601,9 +1932,9 @@ def revise_run_pending_action(run_id: str, payload: dict[str, Any]) -> dict[str,
     reply = _revise_waiting_pending_action(canonical_id, request, payload)
     if reply is None:
         raise HTTPException(status_code=409, detail="当前没有有效的待确认方案")
-    return _save_run_chat_exchange(
-        canonical_id, _run_history(canonical_id), f"修改方案：{request}", reply,
-    )
+    target_run_id = _safe_run_id(_follow_controlled_run(canonical_id, reply))
+    history = _run_history(target_run_id) if target_run_id != canonical_id else _run_history(canonical_id)
+    return _save_run_chat_exchange(target_run_id, history, f"修改方案：{request}", reply)
 
 
 @app.post("/api/runs/{run_id}/pending-action/confirm")

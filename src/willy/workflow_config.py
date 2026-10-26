@@ -146,6 +146,9 @@ def validate_config(config_dict: object) -> list[str]:
     for name, molecule in molecules.items():
         if isinstance(molecule, Mapping) and "nproc" in molecule:
             _validate_nproc(issues, f"molecules.{name}.nproc", molecule.get("nproc"), nullable=True)
+        if isinstance(molecule, Mapping) and "skip_optimization" in molecule:
+            if type(molecule.get("skip_optimization")) is not bool:
+                issues.append(f"molecules.{name}.skip_optimization 必须是布尔值")
     configured_backend = str(config_dict.get("backend", "g16")).strip().lower()
     for name in residues:
         if name not in molecules:
@@ -281,6 +284,7 @@ def _apply_defaults(config_dict: dict) -> dict:
             molecules[name].setdefault("mem", "")
             molecules[name].setdefault("nproc", None)
             molecules[name].setdefault("solvent", default_solvent)
+            molecules[name].setdefault("skip_optimization", False)
     for molecule in molecules.values():
         if isinstance(molecule, Mapping):
             solvent, snapshot = molecule_solvent_settings(molecule, out["backend"])

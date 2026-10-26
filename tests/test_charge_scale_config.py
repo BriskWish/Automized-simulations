@@ -357,7 +357,7 @@ def test_summary_matches_mdp_six_segments_and_normalized_defaults(partial):
     assert payload["md_steps"][0] == {"label": "EM", "meta": "能量最小化"}
     assert payload["md_steps"][-1]["label"] == "PROD"
     assert "下一步将开始结构优化。" in summary
-    assert "确认无误后回复“运行”即可开始。" in summary
+    assert "确认无误后回复“运行”即可加入任务队列。" in summary
     assert config == original
 
 

@@ -222,6 +222,26 @@ def inspect_quantum_input_file(path: str | Path) -> dict[str, Any]:
     raise ValueError("仅支持 .gjf 或 .inp 原始量子输入")
 
 
+def coordinates_from_quantum_input(path: str | Path) -> list[str]:
+    """Return validated inline coordinates from an already accepted raw input."""
+    parsed = inspect_quantum_input_file(path)
+    issues = parsed.get("issues", [])
+    coordinates = parsed.get("coordinates")
+    if parsed.get("valid") is not True or not isinstance(coordinates, list) or not coordinates:
+        detail = "；".join(str(issue) for issue in issues if str(issue).strip())
+        raise QuantumInputAuditError(detail or "原始量子输入不包含可用坐标")
+    normalized: list[str] = []
+    for raw_line in coordinates:
+        fields = str(raw_line).strip().split()
+        if not fields or fields[0].startswith(("!", "#", ";")):
+            continue
+        if len(fields) >= 4:
+            normalized.append(" ".join(fields[:4]))
+    if not normalized:
+        raise QuantumInputAuditError("原始量子输入不包含可用坐标")
+    return normalized
+
+
 def audit_quantum_inputs(
     backend: object,
     components: Mapping[str, object],

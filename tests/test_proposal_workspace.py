@@ -6,6 +6,7 @@ import pytest
 
 from willy.proposal_workspace import (
     ProposalWorkspaceError,
+    clear_pending_requests,
     create_plan_from_run_conversation,
     create_temp_workspace,
     delete_local_item,
@@ -14,6 +15,7 @@ from willy.proposal_workspace import (
     get_run_conversation_history,
     get_workspace,
     list_workspaces,
+    rename_plan_workspace,
     save_formalized_conversation,
     save_run_conversation,
     save_workspace_conversation,
@@ -41,6 +43,50 @@ def test_default_workspace_creates_temp_and_reuses_unfinished_plan(tmp_path):
     assert saved["state"] == "awaiting_confirmation"
     assert ensure_default_workspace(tmp_path)["workspace_id"] == saved["workspace_id"]
     assert list_workspaces(tmp_path)[0]["workspace_id"] == saved["workspace_id"]
+
+
+def test_workspace_persists_thinking_marker_without_exposing_request_metadata(tmp_path):
+    workspace = create_temp_workspace(tmp_path)
+
+    saved = save_workspace_conversation(
+        tmp_path,
+        workspace["workspace_id"],
+        messages=[{"role": "user", "content": "建立 Li 体系"}],
+        pending_plan=None,
+        pending_request={
+            "request_id": "a" * 32,
+            "started_at": "2026-09-24T10:00:00+00:00",
+        },
+    )
+
+    assert saved["pending_request"]["request_id"] == "a" * 32
+    assert list_workspaces(tmp_path)[0]["thinking"] is True
+    cleared = save_workspace_conversation(
+        tmp_path,
+        workspace["workspace_id"],
+        messages=saved["messages"],
+        pending_plan=None,
+    )
+    assert cleared["pending_request"] is None
+    assert list_workspaces(tmp_path)[0]["thinking"] is False
+
+
+def test_service_restart_clears_orphaned_thinking_marker(tmp_path):
+    workspace = create_temp_workspace(tmp_path)
+    save_workspace_conversation(
+        tmp_path,
+        workspace["workspace_id"],
+        messages=[{"role": "user", "content": "建立 Li 体系"}],
+        pending_plan=None,
+        pending_request={
+            "request_id": "b" * 32,
+            "started_at": "2026-09-24T10:00:00+00:00",
+        },
+    )
+
+    assert clear_pending_requests(tmp_path) == 1
+    assert get_workspace(tmp_path, workspace["workspace_id"])["pending_request"] is None
+    assert clear_pending_requests(tmp_path) == 0
 
 
 def test_formalizing_plan_reuses_its_directory_and_preserves_conversation(tmp_path):
@@ -186,3 +232,32 @@ def test_delete_local_item_requires_plan_confirmation_and_removes_only_target(tm
     assert not (tmp_path / "md_run" / plan["workspace_id"]).exists()
     assert delete_local_item(tmp_path, run_id) == {"item_id": run_id, "kind": "run"}
     assert not run_dir.exists()
+
+
+def test_plan_display_name_survives_formalization(tmp_path):
+    draft = create_temp_workspace(tmp_path)
+    plan = save_workspace_conversation(
+        tmp_path,
+        draft["workspace_id"],
+        messages=[],
+        pending_plan={"config": _candidate_config()},
+    )
+    renamed = rename_plan_workspace(
+        tmp_path,
+        plan["workspace_id"],
+        display_name="Li_EC_batch",
+        expected_revision=plan["revision"],
+    )
+    run_dir = tmp_path / "md_run" / "md__202608310006"
+    run_dir.mkdir(parents=True)
+    formalize_plan_directory(
+        tmp_path,
+        plan_id=plan["workspace_id"],
+        run_dir=run_dir,
+        expected_config=_candidate_config(),
+    )
+
+    from willy.proposal_workspace import formalized_plan_display_name
+
+    assert renamed["display_name"] == "Li_EC_batch"
+    assert formalized_plan_display_name(tmp_path, run_dir.name) == "Li_EC_batch"

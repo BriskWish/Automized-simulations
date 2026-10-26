@@ -1094,6 +1094,50 @@ class RunRegistry:
             "error": latest.get("error", status.get("error", "")),
         }
 
+    def get_completed_step_timestamps(
+        self,
+        run_id: str,
+        *,
+        done_steps: list[int] | None = None,
+    ) -> dict[int, dict[str, str]]:
+        """Return latest state-machine completion instants for public steps.
+
+        ``step_succeeded`` is emitted with the status snapshot immediately
+        after ``mark_done``.  It is therefore the completion fact, unlike a
+        result artifact's modification time or an earlier per-target result.
+        """
+        directory = self.resolve_run_id(run_id)
+        allowed_steps = (
+            {step for step in done_steps if isinstance(step, int) and not isinstance(step, bool)}
+            if isinstance(done_steps, list)
+            else None
+        )
+        completed: dict[int, dict[str, str]] = {}
+        for event in self._read_events(directory):
+            if event.get("event_type") != "step_succeeded":
+                continue
+            timestamp = self._public_timestamp(event.get("timestamp"))
+            details = event.get("details")
+            if timestamp is None or not isinstance(details, Mapping):
+                continue
+            raw_steps = details.get("done_steps")
+            if not isinstance(raw_steps, list):
+                continue
+            local_timestamp = self._public_local_timestamp(timestamp)
+            for step in raw_steps:
+                if (
+                    not isinstance(step, int)
+                    or isinstance(step, bool)
+                    or not 1 <= step <= STEP_REGISTRY.total_steps
+                    or (allowed_steps is not None and step not in allowed_steps)
+                ):
+                    continue
+                record = {"completed_at": timestamp}
+                if local_timestamp is not None:
+                    record["completed_at_local"] = local_timestamp
+                completed[step] = record
+        return completed
+
     def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
         directory = self.resolve_run_id(run_id)
         manifest = self._read_registry_manifest(directory)
@@ -1511,10 +1555,44 @@ class RunRegistry:
 
     @staticmethod
     def _public_pending_fork(extra: object) -> dict[str, Any]:
-        """Keep a bounded, user-reviewable natural-language fork proposal."""
+        """Keep a bounded automatic fork request or a legacy proposal public."""
         if not isinstance(extra, Mapping):
             return {}
         raw = extra.get("pending_fork")
+        if isinstance(raw, Mapping) and raw.get("schema_version") == 2:
+            proposal_id = raw.get("proposal_id")
+            run_id = raw.get("run_id")
+            state = raw.get("state")
+            restart_step = raw.get("restart_step")
+            current_step = raw.get("current_process_step")
+            if (
+                not isinstance(proposal_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{12,128}", proposal_id)
+                or not isinstance(run_id, str)
+                or not _RUN_ID_RE.fullmatch(run_id)
+                or state not in {"launch_pending", "clarification_required"}
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    or not 1 <= value <= STEP_REGISTRY.total_steps
+                    for value in (restart_step, current_step)
+                )
+            ):
+                return {}
+            public = {
+                "schema_version": 2,
+                "proposal_id": proposal_id,
+                "run_id": run_id,
+                "state": state,
+                "restart_step": restart_step,
+                "current_process_step": current_step,
+            }
+            notice = raw.get("restart_notice")
+            clarification = raw.get("clarification")
+            if isinstance(notice, str) and notice:
+                public["restart_notice"] = notice[:300]
+            if isinstance(clarification, str) and clarification:
+                public["clarification"] = clarification[:360]
+            return public
         if not isinstance(raw, Mapping) or raw.get("status") != "awaiting_confirmation":
             return {}
         proposal_id = raw.get("proposal_id")

@@ -60,6 +60,16 @@ def test_molecule_nproc_can_override_global_default():
     assert validate_config(config) == []
 
 
+def test_skip_optimization_defaults_to_false_and_requires_a_boolean():
+    completed = _apply_defaults(_config())
+
+    assert completed["molecules"]["A"]["skip_optimization"] is False
+
+    invalid = _config()
+    invalid["molecules"]["A"]["skip_optimization"] = "yes"
+    assert "molecules.A.skip_optimization 必须是布尔值" in validate_config(invalid)
+
+
 def test_default_nproc_is_bounded_by_detected_cpu_count(monkeypatch):
     import willy.execution_resources as resources
 

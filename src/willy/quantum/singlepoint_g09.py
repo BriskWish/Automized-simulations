@@ -14,13 +14,14 @@ from willy.errors import StepResult, StepError, ErrorKind
 from willy.env_registry import EnvironmentRegistryError, build_tool_env, require_tool
 from willy.process_lifecycle import run_managed_command
 from willy.quantum._orca_utils import extract_xyz
+from willy.quantum.input_audit import coordinates_from_quantum_input
 from willy.quantum.smd_solvents import SMDSolventError, apply_scrf_snapshot
 
 SP_BASIS = "b3lyp/def2TZVP"
 
 
 def run(
-    fchk_path: str,
+    fchk_path: str | None,
     charge: int,
     spin: int,
     workdir: str = None,
@@ -29,11 +30,13 @@ def run(
     nproc: int = 8,
     solvent: str = "gas",
     solvent_ref: dict | None = None,
+    source_input_path: str | None = None,
 ) -> StepResult:
     """G09 single-point at b3lyp/def2TZVP → *_opt.fchk.
 
     Args:
         fchk_path: Step 1 产出的 .fchk（优化后几何）。
+        source_input_path: 跳过优化时使用的已审计原始 .gjf 输入。
         charge: 净电荷。
         spin: 自旋多重度。
         workdir: 工作目录，默认与 fchk 同目录。
@@ -45,7 +48,8 @@ def run(
         StepResult: outputs["fchk"] = *_opt.fchk 路径。
     """
     _start = _time.time()
-    mp = Path(fchk_path)
+    source_input = Path(source_input_path) if source_input_path else None
+    mp = source_input if source_input is not None else Path(fchk_path or "")
     if workdir is None:
         workdir = str(mp.parent)
     if name is None:
@@ -62,21 +66,23 @@ def run(
             artifacts=[str(opt_fchk)], duration_s=0.0,
         )
 
-    # ── Extract coordinates from optimization fchk ──
+    # ── Extract coordinates from optimization fchk or audited raw input ──
+    xyz_path = None
     try:
-        xyz_path = extract_xyz(fchk_path, workdir)
-    except (FileNotFoundError, RuntimeError) as e:
+        if source_input is not None:
+            coords = "\n".join(coordinates_from_quantum_input(source_input))
+        else:
+            xyz_path = extract_xyz(fchk_path or "", workdir)
+            xyz_content = Path(xyz_path).read_text()
+            xyz_lines = xyz_content.strip().split("\n")
+            coords = "\n".join(xyz_lines[2:]) if len(xyz_lines) > 2 else ""
+    except (FileNotFoundError, RuntimeError, ValueError) as e:
         return StepResult(
             step_name="sp_g09", step_index=2, success=False,
             error=StepError(kind=ErrorKind.RESP_FAILED,
-                            message=f"{name}: 坐标提取失败 — {e}"),
+                            message=f"{name}: 坐标读取失败 — {e}"),
             duration_s=_time.time() - _start,
         )
-
-    # ── Build *_opt.gjf ──
-    xyz_content = Path(xyz_path).read_text()
-    xyz_lines = xyz_content.strip().split("\n")
-    coords = "\n".join(xyz_lines[2:]) if len(xyz_lines) > 2 else ""
 
     route = f"# {SP_BASIS} SP"
     try:
@@ -182,7 +188,8 @@ def run(
         )
 
     # ── Cleanup ──
-    Path(xyz_path).unlink(missing_ok=True)
+    if xyz_path is not None:
+        Path(xyz_path).unlink(missing_ok=True)
     gjf_path.unlink(missing_ok=True)
 
     print(f"[sp_g09] {name}: ✅ {opt_fchk.name}  ({opt_fchk.stat().st_size} bytes)")

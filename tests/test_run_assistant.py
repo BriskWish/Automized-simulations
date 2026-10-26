@@ -126,6 +126,24 @@ class TestRunRegistry:
         assert report["completed"] is False
         assert "events" not in report
 
+    def test_completed_step_timestamps_follow_step_succeeded_events(self, tmp_path):
+        registry, run_dir = _make_run(tmp_path)
+
+        registry.record_status(run_dir, _status(), "step_succeeded")
+
+        event = next(
+            json.loads(line)
+            for line in reversed((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines())
+            if json.loads(line).get("event_type") == "step_succeeded"
+        )
+        timestamps = registry.get_completed_step_timestamps(
+            run_dir.name, done_steps=[1, 2],
+        )
+
+        assert timestamps[1]["completed_at"] == event["timestamp"]
+        assert "本地时间" in timestamps[1]["completed_at_local"]
+        assert 2 not in timestamps
+
     def test_registry_rejects_path_traversal_and_log_secrets_are_redacted(self, tmp_path):
         registry, run_dir = _make_run(tmp_path)
         (run_dir / "engine.log").write_text("API_KEY=super-secret\ncomplete\n")

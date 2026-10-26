@@ -142,6 +142,13 @@ def test_switch_resolves_existing_run_and_audits_both_histories(tmp_path, monkey
     assert "run_assistant_switch_in" in (target / "events.jsonl").read_text(encoding="utf-8")
 
 
+def test_legacy_fork_confirmation_never_falls_through_to_llm(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    _registry, directory = _aborted_run(tmp_path)
+
+    assert frontend_api.run_assistant_control_command(directory.name, "确认 fork") == "当前没有等待启动的 fork 请求。"
+
+
 def test_switch_rejects_an_unknown_but_well_formed_run(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     _registry, source = _aborted_run(tmp_path, run_id="md__202608150001")
@@ -318,7 +325,14 @@ def test_fork_inherits_context_without_mutating_parent(tmp_path, monkeypatch):
     args, _kwargs = spawned[0]
     assert args[:3] == [sys.executable, str(tmp_path / "run_pipeline.py"), "g16"]
     assert args[-2:] == ["--resume-from-step", "6"]
-    assert {name: (parent / name).read_bytes() for name in parent_before} == parent_before
+    for name, content in parent_before.items():
+        if name not in {"events.jsonl", ".event-sequence"}:
+            assert (parent / name).read_bytes() == content
+    parent_status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
+    assert parent_status["state"] == "aborted"
+    fork_context = json.loads((child / "fork_context.json").read_text(encoding="utf-8"))
+    assert fork_context["request"]["current_process_step"] == 8
+    assert fork_context["request"]["restart_step"] == 6
 
 
 def test_controlled_child_uses_parent_python_when_path_points_elsewhere(tmp_path, monkeypatch):
@@ -354,8 +368,9 @@ def test_controlled_child_uses_parent_python_when_path_points_elsewhere(tmp_path
 
 
 @pytest.mark.parametrize("source_state", ("aborted", "escalated"))
-def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypatch, source_state):
+def test_natural_language_fork_launches_without_second_confirmation(tmp_path, monkeypatch, source_state):
     import willy.agent_config as agent_config
+    import willy.simulation.manifest as simulation_manifest
 
     class Replies:
         def create(self, **_kwargs):
@@ -364,28 +379,41 @@ def test_natural_language_fork_creates_a_pending_llm_proposal(tmp_path, monkeypa
             ))])
 
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(simulation_manifest, "tool_versions", lambda: {"gromacs": "test", "packmol": "test"})
     _registry, parent = _aborted_run(tmp_path, step=9, state=source_state)
+    child = tmp_path / "md_run" / "md__202608140002"
+    child.mkdir(parents=True)
+    reservation = _Reservation(child)
+    spawned = []
     monkeypatch.setattr(
         agent_config,
         "_DS",
         SimpleNamespace(chat=SimpleNamespace(completions=Replies())),
     )
     monkeypatch.setattr(agent_config, "_LLM_SETTINGS", None)
+    monkeypatch.setattr(frontend_api, "reserve_pipeline_launch", lambda *_args: reservation)
+    monkeypatch.setattr(
+        frontend_api.subprocess, "Popen",
+        lambda args, **kwargs: spawned.append((args, kwargs)) or _Process(),
+    )
+    monkeypatch.setattr(frontend_api.threading, "Thread", _IdleThread)
 
     reply = frontend_api.run_assistant_control_command(
         parent.name, "/fork 重跑eq段，tau_p设置为1"
     )
 
-    assert "待确认 fork 方案" in reply
+    assert "已创建 fork" in reply
+    assert "从第 6 步开始续跑" in reply
     status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
     assert status["state"] == source_state
-    proposal = frontend_api.get_pending_fork(parent.name)
-    assert proposal is not None, status
-    assert proposal["changes"] == [{"path": "md.eq.tau_p", "value": 1}]
-    assert not list((tmp_path / "md_run").glob("md__20260814000[2-9]"))
+    assert frontend_api.get_pending_fork(parent.name) is None
+    record = json.loads(next((tmp_path / ".willy" / "run_controls" / "proposals").glob("*.json")).read_text())
+    assert record["state"] == "launched"
+    assert record["changes"] == [{"path": "md.eq.tau_p", "value": 1}]
+    assert len(spawned) == 1
     events = (parent / "events.jsonl").read_text(encoding="utf-8")
-    assert "fork_proposal_created" not in events
-    assert "fork_proposed" not in events
+    assert "fork_auto_requested" in events
+    assert "fork_auto_launched" in events
 
 
 def test_natural_language_fork_rejects_running_child_with_state_reason(tmp_path, monkeypatch):
@@ -401,7 +429,7 @@ def test_natural_language_fork_rejects_running_child_with_state_reason(tmp_path,
     assert "path=value" not in reply
 
 
-def test_confirmed_natural_language_fork_creates_child_only_after_approval(tmp_path, monkeypatch):
+def test_natural_language_fork_persists_context_before_immediate_launch(tmp_path, monkeypatch):
     import willy.agent_config as agent_config
     import willy.simulation.manifest as simulation_manifest
 
@@ -435,14 +463,7 @@ def test_confirmed_natural_language_fork_creates_child_only_after_approval(tmp_p
     )
     monkeypatch.setattr(frontend_api.threading, "Thread", _IdleThread)
 
-    frontend_api.run_assistant_control_command(parent.name, "/fork 重跑eq段，tau_p设置为1")
-    proposal = frontend_api.get_pending_fork(parent.name)
-    assert proposal is not None
-    assert spawned == []
-
-    reply = frontend_api.confirm_pending_fork(
-        proposal["proposal_id"], parent.name, state_revision=proposal["state_revision"],
-    )
+    reply = frontend_api.run_assistant_control_command(parent.name, "/fork 重跑eq段，tau_p设置为1")
 
     assert "已创建 fork" in reply
     assert len(spawned) == 1
@@ -450,7 +471,53 @@ def test_confirmed_natural_language_fork_creates_child_only_after_approval(tmp_p
     assert frontend_api.get_pending_fork(parent.name) is None
     parent_status = RunRegistry(tmp_path).get_run_status(parent.name, reconcile=False)
     assert parent_status["state"] == "aborted"
-    assert "fork_proposal_confirmed" not in (parent / "events.jsonl").read_text(encoding="utf-8")
+    context = json.loads((child / "fork_context.json").read_text(encoding="utf-8"))["request"]
+    assert context["source"] == "manual"
+    assert context["stop_context"]["state"] == "aborted"
+
+
+def test_fork_uses_the_earliest_effective_parameter_step(tmp_path, monkeypatch):
+    import willy.simulation.manifest as simulation_manifest
+
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(simulation_manifest, "tool_versions", lambda: {"gromacs": "test", "packmol": "test"})
+    _registry, parent = _aborted_run(tmp_path, step=9)
+    child = tmp_path / "md_run" / "md__202608140002"
+    child.mkdir(parents=True)
+    reservation = _Reservation(child)
+    spawned = []
+    monkeypatch.setattr(frontend_api, "reserve_pipeline_launch", lambda *_args: reservation)
+    monkeypatch.setattr(
+        frontend_api.subprocess,
+        "Popen",
+        lambda args, **kwargs: spawned.append((args, kwargs)) or _Process(),
+    )
+    monkeypatch.setattr(frontend_api.threading, "Thread", _IdleThread)
+
+    reply = frontend_api.run_assistant_control_command(parent.name, "/fork box.tolerance=1.5")
+
+    assert "从第 6 步按新参数重跑" in reply
+    assert "修改的参数定位在已结束的运行步骤前，将从第 6 步开始续跑。" in reply
+    assert spawned[0][0][-2:] == ["--resume-from-step", "6"]
+
+
+def test_fork_request_survives_a_launch_lock_race(tmp_path, monkeypatch):
+    from willy.pipeline_launch import PipelineLockConflict
+
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    _registry, parent = _aborted_run(tmp_path, step=9)
+    monkeypatch.setattr(
+        frontend_api,
+        "reserve_pipeline_launch",
+        lambda *_args: (_ for _ in ()).throw(PipelineLockConflict("md__other")),
+    )
+
+    reply = frontend_api.run_assistant_control_command(parent.name, "/fork md.eq.tau_p=1")
+
+    assert "等待当前启动锁释放" in reply
+    pending = frontend_api.get_pending_fork(parent.name)
+    assert pending is not None
+    assert pending["state"] == "launch_pending"
 
 
 def test_rejected_fork_keeps_parent_state_and_history(tmp_path, monkeypatch):
@@ -460,7 +527,7 @@ def test_rejected_fork_keeps_parent_state_and_history(tmp_path, monkeypatch):
     before = (directory / "run_manifest.json").read_bytes()
     reply = frontend_api.run_assistant_control_command(directory.name, "/fork md.dt=-1")
 
-    assert "分支未启动" in reply
+    assert "fork 未启动" in reply
     status = RunRegistry(tmp_path).get_run_status(directory.name, reconcile=False)
     assert status["state"] == "aborted"
     assert status["done_steps"] == list(range(1, 8))

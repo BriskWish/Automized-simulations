@@ -18,6 +18,7 @@ from willy.quantum._orca_utils import (
 )
 
 ROOT = get_project_root()
+OPTIMIZATION_TIMEOUT_S = 36_000
 
 
 def _single_atom_input(path: Path) -> bool:
@@ -142,6 +143,22 @@ def run_one(name: str, cfg: dict, defaults: dict, struct_dir: str = "struct") ->
     """单分子：inp→orca→molden。若 .molden 已存在则跳过。"""
     _start = time.time()
     std = Path(struct_dir)
+    inp_path = std / f"{name}.inp"
+    if cfg.get("skip_optimization") is True:
+        if not inp_path.is_file() or inp_path.stat().st_size <= 0:
+            return StepResult(
+                step_name="struct_orca", step_index=1, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{inp_path} 不存在或为空",
+                                hint=f"跳过优化仍需要非空的 struct/{name}.inp 原始输入"),
+                duration_s=time.time() - _start,
+            )
+        print(f"[orca_struct] ⏭ {name}: 已按方案跳过结构优化")
+        return StepResult(
+            step_name="struct_orca", step_index=1, success=True,
+            outputs={"source_input": str(inp_path)}, artifacts=[str(inp_path)],
+            duration_s=0.0, extra={"optimization_skipped": True},
+        )
     molden_out = std / f"{name}.molden"
     if molden_out.exists():
         print(f"[orca_struct] ⏭ {name}: .molden 已存在，跳过结构优化")
@@ -152,7 +169,6 @@ def run_one(name: str, cfg: dict, defaults: dict, struct_dir: str = "struct") ->
             duration_s=0.0,
         )
 
-    inp_path = std / f"{name}.inp"
     if not inp_path.exists():
         return StepResult(
             step_name="struct_orca", step_index=1, success=False,
@@ -206,7 +222,7 @@ def run_one(name: str, cfg: dict, defaults: dict, struct_dir: str = "struct") ->
         result = run_managed_command(
             [orca_bin, execution_input.name],
             cwd=std,
-            timeout=7200,
+            timeout=OPTIMIZATION_TIMEOUT_S,
             env=orca_env,
             run_dir=std,
         )
@@ -215,7 +231,7 @@ def run_one(name: str, cfg: dict, defaults: dict, struct_dir: str = "struct") ->
         return StepResult(
             step_name="struct_orca", step_index=1, success=False,
             error=StepError(kind=ErrorKind.TIMEOUT,
-                            message=f"{name}: ORCA 计算超时 (7200s)",
+                            message=f"{name}: ORCA 计算超时 ({OPTIMIZATION_TIMEOUT_S}s)",
                             hint="减少 nproc 或换用更小基组"),
             duration_s=time.time() - _start,
         )

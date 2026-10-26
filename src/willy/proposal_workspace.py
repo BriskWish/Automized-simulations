@@ -29,6 +29,8 @@ WORKSPACE_LOCK_FILENAME = ".proposal_workspaces.lock"
 _TEMP_RE = re.compile(r"^temp__(?P<date>\d{8})(?P<counter>\d{4})$")
 _PLAN_RE = re.compile(r"^plan__(?P<date>\d{8})(?P<counter>\d{4})$")
 _RUN_RE = re.compile(r"^md__\d{12}$")
+DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_PENDING_REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _MAX_HISTORY_MESSAGES = 80
 _MAX_MESSAGE_CHARS = 6_000
 
@@ -108,6 +110,25 @@ def _sanitize_messages(messages: object) -> list[dict[str, str]]:
     return result
 
 
+def _sanitize_pending_request(value: object) -> dict[str, str] | None:
+    """Validate the small durable marker used to restore a pending reply."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ProposalWorkspaceError("方案请求状态格式无效")
+    request_id = value.get("request_id")
+    started_at = value.get("started_at")
+    if (
+        not isinstance(request_id, str)
+        or _PENDING_REQUEST_ID_RE.fullmatch(request_id) is None
+        or not isinstance(started_at, str)
+        or not started_at.strip()
+        or len(started_at) > 64
+    ):
+        raise ProposalWorkspaceError("方案请求状态格式无效")
+    return {"request_id": request_id, "started_at": started_at}
+
+
 def _config_fingerprint(value: object) -> str:
     try:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -132,8 +153,19 @@ def _load_workspace(path: Path, workspace_id: str) -> dict[str, Any]:
     if state not in {"draft", "awaiting_confirmation", "formalized"}:
         raise ProposalWorkspaceError("方案工作区状态无效")
     raw["messages"] = _sanitize_messages(raw.get("messages"))
+    display_name = raw.get("display_name", "")
+    if display_name != "" and (
+        not isinstance(display_name, str) or DISPLAY_NAME_RE.fullmatch(display_name) is None
+    ):
+        raise ProposalWorkspaceError("方案名称无效")
+    raw["display_name"] = display_name
+    revision = raw.get("revision", 0)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise ProposalWorkspaceError("方案工作区版本无效")
+    raw["revision"] = revision
     if raw.get("pending_plan") is not None and not isinstance(raw.get("pending_plan"), Mapping):
         raise ProposalWorkspaceError("待确认方案格式无效")
+    raw["pending_request"] = _sanitize_pending_request(raw.get("pending_request"))
     return raw
 
 
@@ -149,6 +181,7 @@ def _bound_run_record(run_id: str) -> dict[str, Any]:
         "updated_at": timestamp,
         "messages": [],
         "pending_plan": None,
+        "pending_request": None,
         "bound_run_id": run_id,
     }
 
@@ -184,20 +217,24 @@ def _load_run_conversation(path: Path, run_id: str) -> dict[str, Any]:
     raw["messages"] = _sanitize_messages(raw.get("messages"))
     if raw.get("pending_plan") is not None and not isinstance(raw.get("pending_plan"), Mapping):
         raise ProposalWorkspaceError("待确认方案格式无效")
+    raw["pending_request"] = _sanitize_pending_request(raw.get("pending_request"))
     return raw
 
 
-def _public_workspace(record: Mapping[str, Any]) -> dict[str, str]:
+def _public_workspace(record: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "workspace_id": str(record["workspace_id"]),
         "kind": str(record["kind"]),
         "state": str(record["state"]),
         "created_at": str(record.get("created_at", "")),
         "updated_at": str(record.get("updated_at", "")),
+        "display_name": str(record.get("display_name", "")),
+        "revision": int(record.get("revision", 0)),
+        "thinking": record.get("pending_request") is not None,
     }
 
 
-def _public_run_conversation(record: Mapping[str, Any], run_id: str) -> dict[str, str]:
+def _public_run_conversation(record: Mapping[str, Any], run_id: str) -> dict[str, Any]:
     """Expose a run as a proposal context without leaking its frozen config."""
     return {
         "workspace_id": run_id,
@@ -205,6 +242,7 @@ def _public_run_conversation(record: Mapping[str, Any], run_id: str) -> dict[str
         "state": str(record.get("state", "bound")),
         "created_at": str(record.get("created_at", "")),
         "updated_at": str(record.get("updated_at", "")),
+        "thinking": record.get("pending_request") is not None,
     }
 
 
@@ -222,7 +260,7 @@ def _next_workspace_id(runs_dir: Path, kind: str) -> str:
     return f"{kind}__{today}{counter:04d}"
 
 
-def create_temp_workspace(root: str | Path) -> dict[str, str]:
+def create_temp_workspace(root: str | Path) -> dict[str, Any]:
     """Create one independent draft workspace under ``md_run``."""
     with _workspaces_lock(root) as runs_dir:
         while True:
@@ -241,19 +279,22 @@ def create_temp_workspace(root: str | Path) -> dict[str, str]:
             "state": "draft",
             "created_at": timestamp,
             "updated_at": timestamp,
+            "display_name": "",
+            "revision": 0,
             "messages": [],
             "pending_plan": None,
+            "pending_request": None,
         }
         write_json(directory / WORKSPACE_FILENAME, record)
         return _public_workspace(record)
 
 
-def list_workspaces(root: str | Path) -> list[dict[str, str]]:
+def list_workspaces(root: str | Path) -> list[dict[str, Any]]:
     """Return durable proposal workspaces without treating them as runs."""
     runs_dir = _runs_dir(root)
     if not runs_dir.is_dir():
         return []
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     for directory in runs_dir.iterdir():
         if not directory.is_dir():
             continue
@@ -309,13 +350,18 @@ def save_workspace_conversation(
     *,
     messages: object,
     pending_plan: Mapping[str, object] | None,
+    pending_request: Mapping[str, object] | None = None,
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     """Persist one conversation and promote a draft after a valid plan appears."""
+    changed_plan_id: str | None = None
     with _workspaces_lock(root) as runs_dir:
         source = _workspace_path(runs_dir, workspace_id)
         if not source.is_dir():
             raise ProposalWorkspaceError("方案工作区不存在")
         record = _load_workspace(source, workspace_id)
+        if expected_revision is not None and record["revision"] != expected_revision:
+            raise ProposalWorkspaceError("方案已更新，请刷新后再修改")
         target = source
         if pending_plan is not None and record["kind"] == "temp":
             target_id = _next_workspace_id(runs_dir, "plan")
@@ -326,10 +372,18 @@ def save_workspace_conversation(
             workspace_id = target_id
         record["messages"] = _sanitize_messages(messages)
         record["pending_plan"] = copy.deepcopy(dict(pending_plan)) if pending_plan is not None else None
+        record["pending_request"] = _sanitize_pending_request(pending_request)
         record["state"] = "awaiting_confirmation" if pending_plan is not None else "draft"
         record["updated_at"] = _now()
+        record["revision"] = int(record.get("revision", 0)) + 1
         write_json(target / WORKSPACE_FILENAME, record)
-        return record
+        if record["kind"] == "plan":
+            changed_plan_id = str(record["workspace_id"])
+    if changed_plan_id is not None:
+        from willy.plan_queue import invalidate_queued_plan
+
+        invalidate_queued_plan(root, changed_plan_id)
+    return record
 
 
 def _save_run_conversation_locked(
@@ -337,12 +391,14 @@ def _save_run_conversation_locked(
     run_id: str,
     *,
     messages: object,
+    pending_request: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     path = _run_path(runs_dir, run_id)
     if not path.is_dir():
         raise ProposalWorkspaceError("运行工程不存在")
     record = _load_run_conversation(path, run_id)
     record["messages"] = _sanitize_messages(messages)
+    record["pending_request"] = _sanitize_pending_request(pending_request)
     record["updated_at"] = _now()
     write_json(path / WORKSPACE_FILENAME, record)
     return record
@@ -353,10 +409,16 @@ def save_run_conversation(
     run_id: str,
     *,
     messages: object,
+    pending_request: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Persist proposal-assistant history in an existing managed run."""
     with _workspaces_lock(root) as runs_dir:
-        return _save_run_conversation_locked(runs_dir, run_id, messages=messages)
+        return _save_run_conversation_locked(
+            runs_dir,
+            run_id,
+            messages=messages,
+            pending_request=pending_request,
+        )
 
 
 def create_plan_from_run_conversation(
@@ -399,8 +461,11 @@ def create_plan_from_run_conversation(
             "state": "awaiting_confirmation",
             "created_at": timestamp,
             "updated_at": timestamp,
+            "display_name": "",
+            "revision": 0,
             "messages": _sanitize_messages(messages),
             "pending_plan": copy.deepcopy(dict(pending_plan)),
+            "pending_request": None,
             "source_run_id": run_id,
         }
         write_json(directory / WORKSPACE_FILENAME, record)
@@ -431,9 +496,40 @@ def delete_local_item(
     return {"item_id": item_id, "kind": kind}
 
 
+def rename_plan_workspace(
+    root: str | Path,
+    workspace_id: str,
+    *,
+    display_name: str,
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
+    """Set a plan-local label which moves with the plan into its run."""
+    if _kind_for_id(workspace_id) != "plan":
+        raise ProposalWorkspaceError("只有待确认方案可以重命名")
+    if DISPLAY_NAME_RE.fullmatch(display_name) is None:
+        raise ProposalWorkspaceError("方案名称格式无效")
+    with _workspaces_lock(root) as runs_dir:
+        path = _workspace_path(runs_dir, workspace_id)
+        if not path.is_dir():
+            raise ProposalWorkspaceError("方案工作区不存在")
+        record = _load_workspace(path, workspace_id)
+        if expected_revision is not None and record["revision"] != expected_revision:
+            raise ProposalWorkspaceError("方案已更新，请刷新后重试")
+        record["display_name"] = display_name
+        record["updated_at"] = _now()
+        record["revision"] += 1
+        write_json(path / WORKSPACE_FILENAME, record)
+        public = _public_workspace(record)
+    from willy.plan_queue import invalidate_queued_plan
+
+    invalidate_queued_plan(root, workspace_id)
+    return public
+
+
 def clear_pending_plans(root: str | Path) -> int:
     """Invalidate candidates after the shared quantum-input catalog changes."""
     cleared = 0
+    changed_plan_ids: list[str] = []
     with _workspaces_lock(root) as runs_dir:
         for directory in runs_dir.iterdir():
             if not directory.is_dir():
@@ -447,6 +543,39 @@ def clear_pending_plans(root: str | Path) -> int:
                 continue
             record["pending_plan"] = None
             record["state"] = "draft"
+            record["updated_at"] = _now()
+            record["revision"] = int(record.get("revision", 0)) + 1
+            write_json(directory / WORKSPACE_FILENAME, record)
+            if record["kind"] == "plan":
+                changed_plan_ids.append(str(record["workspace_id"]))
+            cleared += 1
+    if changed_plan_ids:
+        from willy.plan_queue import invalidate_queued_plan
+
+        for plan_id in changed_plan_ids:
+            invalidate_queued_plan(root, plan_id)
+    return cleared
+
+
+def clear_pending_requests(root: str | Path) -> int:
+    """Clear requests left behind when the web service itself restarts."""
+    cleared = 0
+    with _workspaces_lock(root) as runs_dir:
+        for directory in runs_dir.iterdir():
+            if not directory.is_dir():
+                continue
+            try:
+                if _TEMP_RE.fullmatch(directory.name) or _PLAN_RE.fullmatch(directory.name):
+                    record = _load_workspace(directory, directory.name)
+                elif _RUN_RE.fullmatch(directory.name):
+                    record = _load_run_conversation(directory, directory.name)
+                else:
+                    continue
+            except ProposalWorkspaceError:
+                continue
+            if record.get("pending_request") is None:
+                continue
+            record["pending_request"] = None
             record["updated_at"] = _now()
             write_json(directory / WORKSPACE_FILENAME, record)
             cleared += 1
@@ -489,6 +618,7 @@ def formalize_plan_directory(
         record["state"] = "formalized"
         record["formalized_run_id"] = target.name
         record["updated_at"] = _now()
+        record["revision"] = int(record.get("revision", 0)) + 1
         write_json(target / WORKSPACE_FILENAME, record)
 
 
@@ -512,6 +642,7 @@ def rollback_formalized_plan(root: str | Path, *, plan_id: str, run_dir: str | P
         record["state"] = "awaiting_confirmation"
         record.pop("formalized_run_id", None)
         record["updated_at"] = _now()
+        record["revision"] = int(record.get("revision", 0)) + 1
         write_json(destination / WORKSPACE_FILENAME, record)
 
 
@@ -540,6 +671,7 @@ def save_formalized_conversation(
     if record.get("state") != "formalized":
         return
     record["messages"] = _sanitize_messages(messages)
+    record["pending_request"] = None
     record["updated_at"] = _now()
     write_json(path / WORKSPACE_FILENAME, record)
 
@@ -560,3 +692,13 @@ def formalized_plan_id(run_dir: str | Path) -> str | None:
     if isinstance(plan_id, str) and _PLAN_RE.fullmatch(plan_id) and raw.get("state") == "formalized":
         return plan_id
     return None
+
+
+def formalized_plan_display_name(root: str | Path, run_id: str) -> str:
+    """Return a promoted plan label when no later run-local override exists."""
+    try:
+        record = get_run_conversation(root, run_id)
+    except ProposalWorkspaceError:
+        return ""
+    display_name = record.get("display_name", "")
+    return display_name if isinstance(display_name, str) and DISPLAY_NAME_RE.fullmatch(display_name) else ""

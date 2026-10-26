@@ -71,7 +71,7 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案
 {{
   "backend": "g16",
   "ion_charge_scale": 1.0,
-  "molecules": {{ "XXX": {{"charge": "<本次输入审计返回的整数>", "spin": "<本次输入审计返回的正整数>", "basis": "b3lyp/6-311+g(d,p)", "solvent": "acetone", "mem": "", "nproc": null}} }},
+  "molecules": {{ "XXX": {{"charge": "<本次输入审计返回的整数>", "spin": "<本次输入审计返回的正整数>", "basis": "b3lyp/6-311+g(d,p)", "solvent": "acetone", "mem": "", "nproc": null, "skip_optimization": false}} }},
   "residues": {{ "XXX": 100 }},
   "md": {{
     "schema_version": 2,
@@ -87,6 +87,7 @@ CONFIG_AGENT_PROMPT = """你是 MD 模拟助手。生成可确认的模拟方案
 }}
 ```
 - backend: 量子化学后端，默认 g16。用户说"用 G09""gaussian09" 时设为 g09；说"用 ORCA""orca" 时设为 orca。后端只能写入候选 JSON，不能调用写入型工具。
+- `molecules.<name>.skip_optimization` 默认固定为 false。用户仅可在方案确认卡的逐分子复选框中将其改为 true；true 时不执行结构优化，直接使用已审计的原始输入几何进行单点和电荷配置。
 - molecules/residues 的 key 必须用 struct/ 下的核心文件名: {molecules}。带电写法由注册表统一归一化，例如 Li+/Li⁺/锂离子 映射到 Li，上传的 Ca2+/Ca²⁺ 映射到 Ca，NO3-/NO₃⁻/硝酸根 映射到 NO3；最终 key 不含电荷符号。
 - solvent 按 molecules.<name>.solvent 保存；用户只指定一个溶剂时，默认统一应用到本次选中的全部分子。先调用 tools_lookup_solvent 精确确认库条目，未确认不得编造名称。gas 表示不启用 SMD。ORCA 当前不支持 SMD，只能使用 gas。
 - 溶剂选择在语义草案用 solvent_selection 表示：default 是所有选中分子的溶剂名，molecules 是按分子指定的覆盖映射。例如 {{"default":"Water","molecules":{{"Li":"gas"}}}}。未涉及溶剂时可省略；修改方案时保留未修改分子的溶剂。服务端绑定名称与 solvent_ref，优化和单点共同使用这两个字段，不得另造阶段级溶剂参数。
@@ -162,6 +163,7 @@ LAUNCH_CONFIRMATIONS = frozenset({
     "开始启动", "运行", "启动", "ok", "yes", "run", "start", "行", "可以",
     "没问题", "就这样", "go",
 })
+QUEUE_CONFIRMATION_MESSAGE = "方案确认已接受，正在提交任务队列。"
 _HIDE_BTN = {"visible": False}
 _PENDING_LAUNCH_PLAN_VERSION = 1
 CONFIG_PROMPT_VERSION = "config-assistant-v2"
@@ -420,6 +422,25 @@ def start_pipeline(
             except OSError:
                 pass
             cleanup_finished_launch(ROOT, reservation.run_id, reservation.token)
+            try:
+                from willy.frontend_api import dispatch_pending_forks
+
+                dispatch_pending_forks(ROOT)
+            except (OSError, ValueError, RuntimeError):
+                pass
+            try:
+                from willy.plan_queue import advance_after_run_release
+
+                advance_after_run_release(
+                    ROOT,
+                    reservation.run_id,
+                    launcher=lambda queued_config, plan_id: start_pipeline(
+                        queued_config,
+                        proposal_workspace_id=plan_id,
+                    ),
+                )
+            except Exception:
+                pass
 
         handoff_controlled_process(proc, reservation, ROOT, lambda: threading.Thread(target=_wait_then_cleanup, daemon=True).start())
     except LaunchCleanupError:
@@ -1033,6 +1054,7 @@ def summarize(cfg):
             "name": str(n),
             "count": int(c),
             "optimization_level": level.strip() if isinstance(level, str) and level.strip() else "未指定",
+            "skip_optimization": molecule.get("skip_optimization") is True,
             "solvent": solvent_name,
             "solvent_source": solvent_record["source"],
             "scrf_override": scrf_action,
@@ -1091,14 +1113,20 @@ def summarize(cfg):
     }
     encoded_card_data = json.dumps(card_data, ensure_ascii=False, separators=(",", ":"))
     solvent_summary = "\n".join(solvent_notes)
+    skipped_names = [item["name"] for item in structure if item["skip_optimization"]]
+    next_step = (
+        "下一步将对未勾选分子执行结构优化；"
+        f"{ '、'.join(skipped_names) } 将直接以原始输入几何进行单点与电荷配置。"
+        if skipped_names else "下一步将开始结构优化。"
+    )
     return f"""[[WILLY_PLAN_DATA:{encoded_card_data}]]
 **模拟方案确认**
 
 {solvent_summary}
 
-下一步将开始结构优化。
+{next_step}
 
-确认无误后回复“运行”即可开始。
+确认无误后回复“运行”即可加入任务队列。
 若参数有误请提出，我会更新方案。"""
 
 
@@ -1175,8 +1203,11 @@ def _pending_launch_config(
     return copy.deepcopy(dict(config))
 
 
-def _is_launch_confirmation(message: str) -> bool:
+def is_launch_confirmation(message: str) -> bool:
     return _normalized_confirmation(message) in LAUNCH_CONFIRMATIONS
+
+
+_is_launch_confirmation = is_launch_confirmation
 
 
 # A pending proposal is an interactive editing session. These markers are
@@ -1228,7 +1259,7 @@ def _is_config_revision_request(message: str) -> bool:
 
 def _classify_pending_config_intent(message: str) -> str:
     """Classify a second-turn message while a plan awaits confirmation."""
-    if _is_launch_confirmation(message):
+    if is_launch_confirmation(message):
         return "confirm"
     if _is_config_replacement_request(message):
         return "replace"
@@ -1644,17 +1675,11 @@ def chat(
                 yield _emit(h, pending_plan)
                 return
         try:
-            # Preserve the established direct-call contract for non-browser
-            # callers.  The durable workspace token is supplied only by the
-            # proposal API that owns a persisted ``plan__`` directory.
-            receipt = (
-                start_pipeline(launch_config)
-                if proposal_workspace_id is None
-                else start_pipeline(
-                    launch_config,
-                    proposal_workspace_id=proposal_workspace_id,
-                )
-            )
+            if proposal_workspace_id is not None:
+                h = user_h + [{"role": "assistant", "content": QUEUE_CONFIRMATION_MESSAGE}]
+                yield _emit(h, pending_plan)
+                return
+            receipt = start_pipeline(launch_config)
             launch_message = receipt.message
         except Exception:
             receipt = PipelineLaunchReceipt("流水线未能启动，请检查模拟方案后重试。", None, "failed")

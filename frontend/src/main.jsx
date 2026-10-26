@@ -108,7 +108,7 @@ function assistantMessageText(message) {
     .join("\n");
 }
 
-function createChatAdapter(kind, runId, proposalId, onPipelineStarted, onProposalWorkspaceChanged) {
+function createChatAdapter(kind, runId, proposalId, onPipelineStarted, onProposalWorkspaceChanged, onProposalThinkingChange) {
   return {
     async run({ messages, abortSignal, unstable_threadId }) {
       if (kind === "run" && !runId) {
@@ -120,24 +120,29 @@ function createChatAdapter(kind, runId, proposalId, onPipelineStarted, onProposa
       const endpoint = kind === "proposal"
         ? "/api/proposal/chat"
         : `/api/runs/${encodeURIComponent(runId)}/chat`;
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(kind === "proposal"
-          ? { messages, proposalId, threadId: unstable_threadId }
-          : { message: assistantMessageText([...messages].reverse().find((item) => item.role === "user")) }),
-        signal: abortSignal,
-      });
-      if (!response.ok) throw new Error(await readResponseError(response));
-      const data = await response.json();
-      if (abortSignal.aborted) return { content: [] };
-      const launchedRunId = data.run_id || data.runId || data.snapshot?.run_id;
-      if (typeof launchedRunId === "string" && (kind === "proposal" || launchedRunId !== runId)) {
-        onPipelineStarted(launchedRunId);
-      } else if (kind === "proposal" && typeof data.proposalId === "string" && data.proposalId !== proposalId) {
-        onProposalWorkspaceChanged(data.proposalId);
+      if (kind === "proposal") onProposalThinkingChange(true);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(kind === "proposal"
+            ? { messages, proposalId, threadId: unstable_threadId }
+            : { message: assistantMessageText([...messages].reverse().find((item) => item.role === "user")) }),
+          signal: abortSignal,
+        });
+        if (!response.ok) throw new Error(await readResponseError(response));
+        const data = await response.json();
+        if (abortSignal.aborted) return { content: [] };
+        const launchedRunId = data.run_id || data.runId || data.snapshot?.run_id;
+        if (typeof launchedRunId === "string" && (kind === "proposal" || launchedRunId !== runId)) {
+          onPipelineStarted(launchedRunId);
+        } else if (kind === "proposal" && typeof data.proposalId === "string" && data.proposalId !== proposalId) {
+          onProposalWorkspaceChanged(data.proposalId);
+        }
+        return { content: [{ type: "text", text: data.text || "暂时没有生成新的回复。" }] };
+      } finally {
+        if (kind === "proposal") onProposalThinkingChange(false);
       }
-      return { content: [{ type: "text", text: data.text || "暂时没有生成新的回复。" }] };
     },
   };
 }
@@ -175,7 +180,8 @@ function parseProposalPlan(text) {
       const solventSource = typeof item?.solvent_source === "string" ? item.solvent_source.trim() : "unknown";
       const scrfOverride = typeof item?.scrf_override === "string" ? item.scrf_override.trim() : "";
       const solventNote = typeof item?.solvent_note === "string" ? item.solvent_note.trim() : "";
-      return name && Number.isInteger(count) && count > 0 && optimizationLevel ? { name, count, optimizationLevel, solvent, solventSource, scrfOverride, solventNote } : null;
+      const skipOptimization = item?.skip_optimization === true;
+      return name && Number.isInteger(count) && count > 0 && optimizationLevel ? { name, count, optimizationLevel, skipOptimization, solvent, solventSource, scrfOverride, solventNote } : null;
     }).filter(Boolean);
     const chargeScale = typeof payload.environment.charge_scale === "string" ? payload.environment.charge_scale.trim() : "";
     const initialDensity = typeof payload.environment.initial_density === "string" ? payload.environment.initial_density.trim() : "";
@@ -225,17 +231,18 @@ function ProposalPlanOverview({ plan }) {
     { label: "合计分子数", meta: `${plan.environment.totalMolecules} 个` },
   ];
   return <div className="proposal-plan" aria-label="模拟方案">
-    <PlanCard number="01" title="结构生成过程" detail="优化阶段" rows={plan.structure.map((item) => ({ label: item.name, meta: `${item.count} 个 · ${item.optimizationLevel} · SMD: ${item.solvent}（${item.solventSource}） · ${item.scrfOverride}${item.solventNote ? ` · ${item.solventNote}` : ""}` }))} />
+    <PlanCard number="01" title="结构生成过程" detail="优化阶段" rows={plan.structure.map((item) => ({ label: item.name, meta: `${item.count} 个 · ${item.skipOptimization ? "跳过优化，原始几何单点" : item.optimizationLevel} · SMD: ${item.solvent}（${item.solventSource}） · ${item.scrfOverride}${item.solventNote ? ` · ${item.solventNote}` : ""}` }))} />
     <PlanCard number="02" title="环境生成" detail="建盒阶段" rows={environmentRows} />
     <PlanCard number="03" title="MD 模拟流程" detail="EM → EQ → PROD" rows={plan.mdSteps} />
   </div>;
 }
 
-function ProposalConfirmation() {
+function ProposalConfirmation({ plan }) {
+  const hasSkippedOptimization = plan.structure.some((item) => item.skipOptimization);
   return <div className="proposal-confirmation">
     <strong>模拟方案确认</strong>
-    <span>下一步将开始结构优化。</span>
-    <span>确认无误后回复“运行”即可开始。</span>
+    <span>{hasSkippedOptimization ? "未勾选分子将执行结构优化；勾选分子将以原始几何进行单点与电荷配置。" : "下一步将开始结构优化。"}</span>
+    <span>确认无误后回复“运行”即可加入任务队列。</span>
     <span>若参数有误请提出，我会更新方案。</span>
   </div>;
 }
@@ -252,7 +259,7 @@ function AssistantMessage({ showEq = false }) {
   const completedStep = eventKind === "step_completed" || eventKind === "completion_artifacts" || (eventKind === "status" && !eventActive && /已完成|全流程完成/.test(messageText));
   return <MessagePrimitive.Root className={`message assistant-message ${runningStep ? "running-step" : ""} ${completedStep ? "completed-step" : ""} ${plan ? "proposal-plan-message" : ""}`} data-role="assistant">
     <div className="message-mark">{runningStep ? <span className="step-spinner" aria-label="当前步骤进行中" /> : completedStep ? <CircleCheck size={16} aria-label="步骤已完成" /> : <Sparkles size={15} />}</div>
-    <div className="message-copy">{plan ? <><ProposalPlanOverview plan={plan} /><ProposalConfirmation /></> : <>{showEq && <EqProtocolOverview text={messageText} />}<MessagePrimitive.Parts /></>}</div>
+    <div className="message-copy">{plan ? <><ProposalPlanOverview plan={plan} /><ProposalConfirmation plan={plan} /></> : <>{showEq && <EqProtocolOverview text={messageText} />}<MessagePrimitive.Parts /></>}</div>
   </MessagePrimitive.Root>;
 }
 
@@ -281,10 +288,90 @@ function ThreadWelcome({ kind }) {
   </div>;
 }
 
-function ProposalThinkingIndicator() {
+function ProposalThinkingIndicator({ persistedThinking = false }) {
   const isRunning = useAuiState((state) => state.thread.isRunning);
-  if (!isRunning) return null;
+  if (!isRunning && !persistedThinking) return null;
   return <div className="proposal-thinking" role="status" aria-live="polite"><span className="step-spinner" aria-hidden="true" />正在思考...</div>;
+}
+
+function optimizationSelectionFromPayload(payload) {
+  const workspace = payload?.workspace;
+  const records = workspace?.optimization_skips;
+  if (!workspace || !Array.isArray(records) || !Number.isInteger(workspace.revision)) return null;
+  const molecules = records.map((record) => {
+    const name = typeof record?.name === "string" ? record.name.trim() : "";
+    return name ? { name, skipOptimization: record?.skip_optimization === true } : null;
+  }).filter(Boolean);
+  return molecules.length ? { workspaceId: workspace.workspace_id, revision: workspace.revision, molecules } : null;
+}
+
+function OptimizationSelection({ proposalId, active }) {
+  const aui = useAui();
+  const tailId = useAuiState((state) => state.thread.messages.at(-1)?.id || "");
+  const [selection, setSelection] = useState(null);
+  const [saving, setSaving] = useState("");
+  const [error, setError] = useState("");
+  const loadSelection = useCallback(async () => {
+    if (!proposalId) {
+      setSelection(null);
+      return;
+    }
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}`);
+    if (!response.ok) throw new Error(await readResponseError(response));
+    setSelection(optimizationSelectionFromPayload(await response.json()));
+  }, [proposalId]);
+  useEffect(() => {
+    if (!active) return undefined;
+    let cancelled = false;
+    loadSelection().catch((reason) => {
+      if (!cancelled) {
+        setSelection(null);
+        setError(reason instanceof Error ? reason.message : "无法读取结构优化选项");
+      }
+    });
+    return () => { cancelled = true; };
+  }, [active, loadSelection, tailId]);
+  useEffect(() => { setSaving(""); setError(""); }, [proposalId]);
+  const toggle = async (name) => {
+    if (!selection || selection.workspaceId !== proposalId || saving) return;
+    const molecules = selection.molecules.map((item) => item.name === name
+      ? { ...item, skipOptimization: !item.skipOptimization }
+      : item);
+    const skipOptimization = Object.fromEntries(molecules.map((item) => [item.name, item.skipOptimization]));
+    setSelection({ ...selection, molecules });
+    setSaving(name);
+    setError("");
+    try {
+      const response = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}/optimization-skips`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revision: selection.revision, skip_optimization: skipOptimization }),
+      });
+      if (!response.ok) throw new Error(await readResponseError(response));
+      const payload = await response.json();
+      const updated = optimizationSelectionFromPayload(payload);
+      if (!updated) throw new Error("方案优化选项未返回");
+      setSelection(updated);
+      if (Array.isArray(payload.messages)) aui.thread.reset(threadHistoryMessages(payload.messages));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "保存结构优化选项失败");
+      loadSelection().catch(() => undefined);
+    } finally {
+      setSaving("");
+    }
+  };
+  if (!active || !selection || selection.workspaceId !== proposalId) return null;
+  return <section className="optimization-selection" aria-label="结构优化设置">
+    <div className="optimization-selection-heading"><strong>结构优化</strong><span>按分子设置</span></div>
+    <div className="optimization-selection-list">
+      {selection.molecules.map((item) => <label className="optimization-selection-row" key={item.name} title="跳过后以原始输入几何进入单点计算">
+        <span>{item.name}</span>
+        <input type="checkbox" checked={item.skipOptimization} disabled={Boolean(saving)} onChange={() => toggle(item.name)} />
+        <span>跳过结构优化</span>
+      </label>)}
+    </div>
+    {error && <span className="optimization-selection-error" role="status">{error}</span>}
+  </section>;
 }
 
 function SlashMenu({ inputId, onClose }) {
@@ -571,7 +658,7 @@ function SolventCatalogDialog({ onClose }) {
   </Dialog>;
 }
 
-function WorkbenchThread({ kind, active, proposalId, controlsBusy = false }) {
+function WorkbenchThread({ kind, active, proposalId, controlsBusy = false, persistedThinking = false }) {
   const aui = useAui();
   const [slashOpen, setSlashOpen] = useState(false);
   const [moleculesOpen, setMoleculesOpen] = useState(false);
@@ -607,7 +694,8 @@ function WorkbenchThread({ kind, active, proposalId, controlsBusy = false }) {
       <div className="thread-content">
         <ThreadWelcome kind={kind} />
         <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage: kind === "proposal" ? ProposalAssistantMessage : AssistantMessage }} />
-        {!isRun && <ProposalThinkingIndicator />}
+        {!isRun && <ProposalThinkingIndicator persistedThinking={persistedThinking} />}
+        {!isRun && <OptimizationSelection proposalId={proposalId} active={active} />}
         <ThreadPrimitive.ViewportFooter className="thread-footer">
           <ComposerPrimitive.Root className="composer">
             <ComposerPrimitive.Input
@@ -659,12 +747,13 @@ function RunHistoryLoader({ runId, onSnapshot }) {
   return null;
 }
 
-function ProposalHistoryLoader({ proposalId }) {
+function ProposalHistoryLoader({ proposalId, onThinkingChange }) {
   const aui = useAui();
   useEffect(() => {
     let cancelled = false;
     if (!proposalId) {
       aui.thread.reset([]);
+      onThinkingChange(false);
       return undefined;
     }
     fetch(`/api/proposals/${encodeURIComponent(proposalId)}`)
@@ -672,10 +761,11 @@ function ProposalHistoryLoader({ proposalId }) {
       .then((payload) => {
         if (cancelled || payload?.workspace?.workspace_id !== proposalId) return;
         aui.thread.reset(threadHistoryMessages(Array.isArray(payload.messages) ? payload.messages : []));
+        onThinkingChange(payload.workspace.thinking === true);
       })
-      .catch(() => undefined);
+      .catch(() => { if (!cancelled) onThinkingChange(false); });
     return () => { cancelled = true; };
-  }, [aui, proposalId]);
+  }, [aui, onThinkingChange, proposalId]);
   return null;
 }
 
@@ -760,7 +850,13 @@ function recoveryContext(runId, snapshot) {
     && Number.isInteger(action.state_revision) && action.state_revision >= 0
     && action.state_revision === revision
     && typeof action.config_fingerprint === "string" && action.config_fingerprint.trim();
-  return { recoverable, revision, action: validAction ? action : null };
+  const fork = snapshot?.pending_fork;
+  const validFork = recoverable && fork
+    && fork.run_id === runId
+    && ["launch_pending", "clarification_required"].includes(fork.state)
+    && typeof fork.proposal_id === "string" && fork.proposal_id.trim()
+    && Number.isInteger(fork.restart_step) && fork.restart_step >= 1;
+  return { recoverable, revision, action: validAction ? action : null, fork: validFork ? fork : null };
 }
 
 function PendingActionConfirmation({ runId, snapshot, onSnapshot, isCurrentProject, recoveryLock }) {
@@ -779,14 +875,14 @@ function PendingActionConfirmation({ runId, snapshot, onSnapshot, isCurrentProje
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  const { recoverable, revision, action } = recoveryContext(runId, snapshot);
+  const { recoverable, revision, action, fork } = recoveryContext(runId, snapshot);
   const busy = Boolean(submitting) || chatBusy || recoveryLock.isBusy(runId);
   const submit = async (operation) => {
     const current = latest.current;
     if (!mounted.current || !current || inFlight.current || current.chatBusy || !current.isCurrentProject(current.snapshot)) return;
     const context = recoveryContext(current.runId, current.snapshot);
     if (operation !== "refresh" && (!context.recoverable || current.needsRefresh)) return;
-    if (operation === "resume" && (!Number.isInteger(context.revision) || context.revision < 0)) return;
+    if (operation === "resume" && (!Number.isInteger(context.revision) || context.revision < 0 || context.fork)) return;
     if (operation === "resume" && current.snapshot?.fault_review?.reason === "process_exit_unconfirmed") return;
     if (operation === "resolve" && (!current.snapshot?.fault_review?.manual_completion_allowed
       || !current.snapshot?.fault?.fault_id || !Number.isInteger(context.revision))) return;
@@ -878,7 +974,13 @@ function PendingActionConfirmation({ runId, snapshot, onSnapshot, isCurrentProje
         <p className="recovery-hint">{{ process_exit_unconfirmed: "尚未确认进程退出，请先完成人工处理。", prerequisites_unmet: "故障条件尚未解除，请修复后刷新复查。", state_changed: "状态已变化，请刷新复查。", manual_review_required: "此类故障无法仅靠文件判断；完成处理后请明确声明。" }[snapshot?.fault_review?.reason] || "刷新时会重新检查；复查不会启动计算。"}</p>
         {snapshot?.fault_review?.manual_completion_allowed && <button type="button" disabled={busy || needsRefresh} onClick={() => submit("resolve")}>{submitting === "resolve" ? "正在复查" : "已完成人工处理，复查"}</button>}
       </section>}
-      <div className="recovery-actions"><button type="button" className="resume-original" disabled={busy || needsRefresh || snapshot?.fault_review?.reason === "process_exit_unconfirmed" || !Number.isInteger(revision) || revision < 0} onClick={() => submit("resume")}><Play size={13} />{submitting === "resume" ? "正在续跑" : "原参数续跑"}</button><span className="recovery-hint">沿用当前工程和原配置，不应用建议。</span></div>
+      <div className="recovery-actions"><button type="button" className="resume-original" disabled={busy || needsRefresh || Boolean(fork) || snapshot?.fault_review?.reason === "process_exit_unconfirmed" || !Number.isInteger(revision) || revision < 0} onClick={() => submit("resume")}><Play size={13} />{submitting === "resume" ? "正在续跑" : "原参数续跑"}</button><span className="recovery-hint">沿用当前工程和原配置，不应用建议。</span></div>
+      {fork && <section className="recovery-proposal auto-fork-status" aria-label="自动 fork 状态">
+        <div className="recovery-proposal-heading"><ShieldCheck size={15} /><strong>{fork.state === "clarification_required" ? "fork 需要补充信息" : "正在创建独立 fork"}</strong></div>
+        <p className="recovery-summary">将从第 {fork.restart_step} 步续跑；父工程配置和状态保持不变。</p>
+        {fork.restart_notice && <p className="recovery-hint">{fork.restart_notice}</p>}
+        {fork.clarification && <p className="recovery-hint">{fork.clarification}</p>}
+      </section>}
       {action && <section className="recovery-proposal" aria-label="最新待确认方案">
         <div className="recovery-proposal-heading"><ShieldCheck size={15} /><strong>最新建议 · 待确认</strong></div>
         <p className="recovery-summary">{action.summary || "请核对方案后确认，或提出修改要求。"}</p>
@@ -911,22 +1013,25 @@ function AssistantCompletionSync({ pendingTransition, onPipelineStarted, onPropo
 
 function AssistantSurface({ kind, active, runId, proposalId, snapshot, onPipelineStarted, onProposalWorkspaceChanged, onSnapshot, onStop, isCurrentProject, recoveryLock }) {
   const pendingTransition = useRef(null);
+  const [persistedThinking, setPersistedThinking] = useState(false);
+  useEffect(() => { setPersistedThinking(false); }, [kind, proposalId]);
   const adapter = useMemo(
     () => createChatAdapter(kind, runId, proposalId,
       (nextRunId) => { pendingTransition.current = { runId: nextRunId }; },
-      (nextProposalId) => { pendingTransition.current = { proposalId: nextProposalId }; }),
+      (nextProposalId) => { pendingTransition.current = { proposalId: nextProposalId }; },
+      setPersistedThinking),
     [kind, runId, proposalId],
   );
   const runtime = useLocalRuntime(adapter, { unstable_enableMessageQueue: true });
   return <AssistantRuntimeProvider runtime={runtime}>
     <AssistantCompletionSync pendingTransition={pendingTransition} onPipelineStarted={onPipelineStarted} onProposalWorkspaceChanged={onProposalWorkspaceChanged} />
     <section className={`assistant-surface ${active ? "active" : ""}`} aria-hidden={!active}>
-      {kind === "proposal" && <ProposalHistoryLoader proposalId={proposalId} />}
+      {kind === "proposal" && <ProposalHistoryLoader proposalId={proposalId} onThinkingChange={setPersistedThinking} />}
       {kind === "run" && <RunHistoryLoader runId={runId} onSnapshot={onSnapshot} />}
       {kind === "run" && <RunHistorySync runId={runId} active={active} onSnapshot={onSnapshot} />}
       {kind === "run" && <PendingActionConfirmation runId={runId} snapshot={snapshot} onSnapshot={onSnapshot} isCurrentProject={isCurrentProject} recoveryLock={recoveryLock} />}
       {kind === "run" && <RunStopControl runId={runId} snapshot={snapshot} onStop={onStop} />}
-      <WorkbenchThread kind={kind} active={active} proposalId={proposalId} controlsBusy={kind === "run" && recoveryLock.isBusy(runId)} />
+      <WorkbenchThread kind={kind} active={active} proposalId={proposalId} controlsBusy={kind === "run" && recoveryLock.isBusy(runId)} persistedThinking={persistedThinking} />
     </section>
   </AssistantRuntimeProvider>;
 }
@@ -1087,15 +1192,22 @@ function OfficialAccountDialog({ onClose }) {
   </Dialog>;
 }
 
-function LocalTaskContent({ runs, plans, temps, selectedRunId, selectedProposalId, onSelectRun, onSelectPlan, onCreateTemp, onRefresh, onRename, onDelete, refreshState }) {
+function LocalTaskContent({ runs, plans, temps, selectedRunId, selectedProposalId, onSelectRun, onSelectPlan, onCreateTemp, onRefresh, onRename, onRenamePlan, onTogglePlanQueue, onDelete, refreshState }) {
   const [editing, setEditing] = useState(null);
   const [displayName, setDisplayName] = useState("");
   const [renameError, setRenameError] = useState("");
+  const [editingPlan, setEditingPlan] = useState(null);
+  const [planDisplayName, setPlanDisplayName] = useState("");
+  const [planRenameError, setPlanRenameError] = useState("");
+  const [runMenu, setRunMenu] = useState(null);
+  const [planMenu, setPlanMenu] = useState(null);
+  const [planActionError, setPlanActionError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteStage, setDeleteStage] = useState(0);
   const [deleteError, setDeleteError] = useState("");
-  const openRename = (run) => { setEditing(run); setDisplayName(run.display_name || run.run_id); setRenameError(""); };
-  const openDelete = (item) => { setDeleteTarget(item); setDeleteStage(0); setDeleteError(""); };
+  const openRename = (run) => { setRunMenu(null); setEditing(run); setDisplayName(run.display_name || run.run_id); setRenameError(""); };
+  const openPlanRename = (plan) => { setRunMenu(null); setPlanMenu(null); setEditingPlan(plan); setPlanDisplayName(plan.display_name || plan.workspace_id); setPlanRenameError(""); };
+  const openDelete = (item) => { setRunMenu(null); setPlanMenu(null); setDeleteTarget(item); setDeleteStage(0); setDeleteError(""); };
   const submitRename = async (event) => {
     event.preventDefault();
     if (!editing) return;
@@ -1104,6 +1216,25 @@ function LocalTaskContent({ runs, plans, temps, selectedRunId, selectedProposalI
       setEditing(null);
     } catch (error) {
       setRenameError(error instanceof Error ? error.message : "重命名失败");
+    }
+  };
+  const submitPlanRename = async (event) => {
+    event.preventDefault();
+    if (!editingPlan) return;
+    try {
+      await onRenamePlan(editingPlan.workspace_id, planDisplayName, editingPlan.revision);
+      setEditingPlan(null);
+    } catch (error) {
+      setPlanRenameError(error instanceof Error ? error.message : "重命名失败");
+    }
+  };
+  const togglePlanQueue = async (plan) => {
+    setPlanMenu(null);
+    setPlanActionError("");
+    try {
+      await onTogglePlanQueue(plan);
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : "队列操作失败");
     }
   };
   const submitDelete = async () => {
@@ -1121,13 +1252,24 @@ function LocalTaskContent({ runs, plans, temps, selectedRunId, selectedProposalI
   };
   const refreshLabel = refreshState === "refreshing" ? "正在刷新" : refreshState === "done" ? "已刷新" : refreshState === "failed" ? "刷新失败" : "";
   const itemRow = (item, label, selected, select) => <div className={`run-directory-row proposal-directory-row ${selected ? "selected" : ""}`} key={item.workspace_id}><button type="button" className="run-directory" onClick={() => select(item.workspace_id)}><span className={`run-state-dot ${item.state === "awaiting_confirmation" ? "await" : "idle"}`} /><span><b>{item.workspace_id}</b><small>{label}{item.updated_at ? ` · ${item.updated_at}` : ""}</small></span><ChevronRight size={15} /></button><button type="button" className="run-menu-button destructive-action" title="删除目录" aria-label={`删除 ${item.workspace_id}`} onClick={() => openDelete({ itemId: item.workspace_id, kind: item.kind })}><Trash2 size={15} /></button></div>;
+  const planRow = (plan) => {
+    const selected = selectedProposalId === plan.workspace_id;
+    const queueLabel = plan.queued ? `队列第 ${plan.queue_position}` : "待确认方案";
+    return <div className={`run-directory-row proposal-directory-row plan-directory-row ${selected ? "selected" : ""} ${plan.queued ? "is-queued" : ""}`} key={plan.workspace_id}>
+      <button type="button" className="run-directory" onClick={() => onSelectPlan(plan.workspace_id)}><span className={`run-state-dot ${plan.queued ? "queued" : "await"}`} /><span><b>{plan.display_name || plan.workspace_id}</b><small>{plan.display_name ? `${plan.workspace_id} · ` : ""}{queueLabel}{plan.updated_at ? ` · ${plan.updated_at}` : ""}</small></span><ChevronRight size={15} /></button>
+      <button type="button" className="run-menu-button" title="方案菜单" aria-label={`${plan.display_name || plan.workspace_id} 方案菜单`} aria-expanded={planMenu === plan.workspace_id} onClick={() => { setPlanMenu((current) => current === plan.workspace_id ? null : plan.workspace_id); setPlanActionError(""); }}><MoreHorizontal size={16} /></button>
+      {planMenu === plan.workspace_id && <div className="plan-menu-popover" role="menu"><button type="button" onClick={() => openPlanRename(plan)}><MoreHorizontal size={14} />重命名方案</button><button type="button" onClick={() => togglePlanQueue(plan)}>{plan.queued ? <X size={14} /> : <Play size={14} />}{plan.queued ? "移出队列" : "加入队列"}</button><button type="button" className="destructive-action" onClick={() => openDelete({ itemId: plan.workspace_id, kind: "plan" })}><Trash2 size={14} />删除方案</button></div>}
+      {editingPlan?.workspace_id === plan.workspace_id && <form className="rename-popover plan-rename-popover" onSubmit={submitPlanRename}><label>方案名称<input aria-label="方案名称" value={planDisplayName} maxLength={64} pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" onChange={(event) => setPlanDisplayName(event.target.value)} autoFocus /></label>{planRenameError && <p>{planRenameError}</p>}<div><button type="button" onClick={() => setEditingPlan(null)}>取消</button><button type="submit">重命名</button></div></form>}
+    </div>;
+  };
   return <><section className="drawer-content"><div className="drawer-title"><div><span className="eyebrow">LOCAL WORKSPACE</span><h2>本地任务</h2></div><div className="drawer-refresh"><button type="button" className="icon-button" title="刷新工程目录" aria-label="刷新工程目录" disabled={refreshState === "refreshing"} onClick={() => onRefresh("tasks")}><RefreshCw className={refreshState === "refreshing" ? "spin" : ""} size={16} /></button>{refreshLabel && <span aria-live="polite">{refreshLabel}</span>}</div></div>
     <p className="drawer-lead">Willy/md_run/目录下的已有工程。</p>
     <div className="run-directory-list" aria-label="当前工程目录">
       <div className="proposal-workspace-heading"><span>历史工程 Previous Process</span></div>
-      {runs.length ? runs.map((run) => <div className={`run-directory-row run-directory-row--managed ${selectedRunId === run.run_id ? "selected" : ""}`} key={run.run_id} onContextMenu={(event) => { event.preventDefault(); openRename(run); }}><button type="button" className="run-directory" onClick={() => onSelectRun(run.run_id)}><span className={`run-state-dot ${run.state || "await"}`} /><span><b>{run.display_name || run.run_id}</b><small>{run.display_name ? `${run.run_id} · ` : ""}{run.state || "await"}{run.updated_at ? ` · ${run.updated_at}` : ""}</small></span><ChevronRight size={15} /></button><div className="directory-actions"><button type="button" className="run-menu-button" title="重命名工程" aria-label={`${run.run_id} 重命名工程`} onClick={() => openRename(run)}><MoreHorizontal size={16} /></button><button type="button" className="run-menu-button destructive-action" title="删除工程" aria-label={`删除 ${run.run_id}`} onClick={() => openDelete({ itemId: run.run_id, kind: "run" })}><Trash2 size={15} /></button></div>{editing?.run_id === run.run_id && <form className="rename-popover" onSubmit={submitRename}><label>工程名称<input aria-label="工程名称" value={displayName} maxLength={64} pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" onChange={(event) => setDisplayName(event.target.value)} autoFocus /></label>{renameError && <p>{renameError}</p>}<div><button type="button" onClick={() => setEditing(null)}>取消</button><button type="submit">重命名</button></div></form>}</div>) : <div className="empty-run-list"><FolderKanban size={20} /><span>尚无历史工程</span></div>}
+      {runs.length ? runs.map((run) => <div className={`run-directory-row run-directory-row--managed ${selectedRunId === run.run_id ? "selected" : ""}`} key={run.run_id}><button type="button" className="run-directory" onClick={() => onSelectRun(run.run_id)}><span className={`run-state-dot ${run.state || "await"}`} /><span><b>{run.display_name || run.run_id}</b><small>{run.display_name ? `${run.run_id} · ` : ""}{run.state || "await"}{run.updated_at ? ` · ${run.updated_at}` : ""}</small></span><ChevronRight size={15} /></button><button type="button" className="run-menu-button" title="工程菜单" aria-label={`${run.display_name || run.run_id} 工程菜单`} aria-expanded={runMenu === run.run_id} onClick={() => { setPlanMenu(null); setRunMenu((current) => current === run.run_id ? null : run.run_id); }}><MoreHorizontal size={16} /></button>{runMenu === run.run_id && <div className="plan-menu-popover" role="menu"><button type="button" onClick={() => openRename(run)}><MoreHorizontal size={14} />重命名工程</button><button type="button" className="destructive-action" onClick={() => openDelete({ itemId: run.run_id, kind: "run" })}><Trash2 size={14} />删除工程</button></div>}{editing?.run_id === run.run_id && <form className="rename-popover" onSubmit={submitRename}><label>工程名称<input aria-label="工程名称" value={displayName} maxLength={64} pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" onChange={(event) => setDisplayName(event.target.value)} autoFocus /></label>{renameError && <p>{renameError}</p>}<div><button type="button" onClick={() => setEditing(null)}>取消</button><button type="submit">重命名</button></div></form>}</div>) : <div className="empty-run-list"><FolderKanban size={20} /><span>尚无历史工程</span></div>}
       <div className="proposal-workspace-heading"><span>方案 Plan</span></div>
-      {plans.length ? plans.map((plan) => itemRow(plan, "待确认方案", selectedProposalId === plan.workspace_id, onSelectPlan)) : <div className="directory-empty">尚无待确认方案</div>}
+      {plans.length ? plans.map(planRow) : <div className="directory-empty">尚无待确认方案</div>}
+      {planActionError && <div className="directory-action-error" role="alert">{planActionError}</div>}
       <div className="proposal-workspace-heading"><span>临时目录 Temporary List</span><button type="button" className="icon-button" title="新建临时方案" aria-label="新建临时方案" onClick={onCreateTemp}><Plus size={15} /></button></div>
       {temps.length ? temps.map((temp) => itemRow(temp, "临时方案", selectedProposalId === temp.workspace_id, onSelectPlan)) : <div className="directory-empty">尚无临时目录</div>}
     </div>
@@ -1170,11 +1312,11 @@ function AboutContent() {
   return <><section className="drawer-content about-content"><div className="drawer-title"><div><span className="eyebrow">ABOUT</span><h2>{ABOUT_WILLY.title}</h2></div><Info size={18} /></div><h3 className="about-heading">{ABOUT_WILLY.introduction.title}</h3>{ABOUT_WILLY.introduction.paragraphs.map((paragraph, index) => <p key={index}><RichText parts={paragraph} /></p>)}{ABOUT_WILLY.sections.map((section) => <details className="detail-accordion" key={section.id}><summary>{section.title}<ChevronDown size={15} /></summary><div className="detail-accordion-body"><ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul></div></details>)}<button type="button" className="official-account" title="放大查看公众号二维码" onClick={() => setQrOpen(true)}><img src="/app-assets/qrcode_for_gh_7df1329939c6_258.jpg" alt={ABOUT_WILLY.officialAccount.label} /><span>{ABOUT_WILLY.officialAccount.label}</span></button><details className="detail-accordion"><summary>{ABOUT_WILLY.thirdPartyNotices.title}<ChevronDown size={15} /></summary><div className="detail-accordion-body">{ABOUT_WILLY.thirdPartyNotices.paragraphs.map((paragraph, index) => <p key={index}><RichText parts={paragraph} /></p>)}{ABOUT_WILLY.thirdPartyNotices.citationGroups.map((group) => <div className="citation-group" key={group.label}><h3>{group.label}</h3>{group.introduction && <p><RichText parts={group.introduction} /></p>}<ol>{group.citations.map((citation, index) => <li key={index}><RichText parts={citation} /></li>)}</ol></div>)}<p><RichText parts={ABOUT_WILLY.thirdPartyNotices.closing} /></p></div></details></section>{qrOpen && <OfficialAccountDialog onClose={() => setQrOpen(false)} />}</>;
 }
 
-function DrawerContent({ section, runs, plans, temps, selectedRunId, selectedProposalId, onSelectRun, onSelectPlan, onCreateTemp, onRefresh, onRename, onDelete, refreshState }) {
+function DrawerContent({ section, runs, plans, temps, selectedRunId, selectedProposalId, onSelectRun, onSelectPlan, onCreateTemp, onRefresh, onRename, onRenamePlan, onTogglePlanQueue, onDelete, refreshState }) {
   if (section === "config") return <ConfigurationContent />;
   if (section === "guide") return <GuideContent />;
   if (section === "about") return <AboutContent />;
-  return <LocalTaskContent runs={runs} plans={plans} temps={temps} selectedRunId={selectedRunId} selectedProposalId={selectedProposalId} onSelectRun={onSelectRun} onSelectPlan={onSelectPlan} onCreateTemp={onCreateTemp} onRefresh={onRefresh} onRename={onRename} onDelete={onDelete} refreshState={refreshState} />;
+  return <LocalTaskContent runs={runs} plans={plans} temps={temps} selectedRunId={selectedRunId} selectedProposalId={selectedProposalId} onSelectRun={onSelectRun} onSelectPlan={onSelectPlan} onCreateTemp={onCreateTemp} onRefresh={onRefresh} onRename={onRename} onRenamePlan={onRenamePlan} onTogglePlanQueue={onTogglePlanQueue} onDelete={onDelete} refreshState={refreshState} />;
 }
 
 function App() {
@@ -1345,6 +1487,29 @@ function App() {
     setAssistantMode("run");
     refreshWorkspace();
   }, [bindProject, isCurrentProject, refreshWorkspace]);
+  const renamePlan = useCallback(async (planId, displayName, revision) => {
+    const response = await fetch(`/api/proposals/${encodeURIComponent(planId)}/display-name`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: displayName, revision }),
+    });
+    if (!response.ok) throw new Error(await readResponseError(response));
+    await refreshWorkspace();
+  }, [refreshWorkspace]);
+  const togglePlanQueue = useCallback(async (plan) => {
+    const queued = plan.queued === true;
+    const response = await fetch(`/api/proposals/${encodeURIComponent(plan.workspace_id)}/queue`, {
+      method: queued ? "DELETE" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: plan.revision }),
+    });
+    if (!response.ok) throw new Error(await readResponseError(response));
+    const payload = await response.json();
+    const active = payload?.queue?.active;
+    const startedRunId = active?.plan_id === plan.workspace_id ? active.run_id : null;
+    if (!queued && typeof startedRunId === "string" && startedRunId) pipelineStarted(startedRunId);
+    await refreshWorkspace();
+  }, [pipelineStarted, refreshWorkspace]);
   const renameRun = useCallback(async (runId, displayName) => {
     const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/display-name`, {
       method: "PATCH",
@@ -1436,7 +1601,7 @@ function App() {
     <aside className="sidebar"><div className="brand"><div className="brand-glyph"><Atom size={19} /></div><div><strong>WILLY</strong><small>SCIENTIFIC WORKBENCH</small></div></div><nav className="nav-list" aria-label="主导航">{NAV_ITEMS.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={`nav-item ${section === id ? "active" : ""}`} onClick={() => selectNav(id)}><Icon size={17} /><span>{label}</span>{section === id && <ChevronRight size={14} className="nav-arrow" />}</button>)}</nav><div className="sidebar-bottom"><div className="system-line"><span className="pulse" /> SYSTEM ONLINE</div><small>受控执行环境 · 本机</small></div></aside>
     <main className="main-area"><header className="topbar"><div className="mobile-brand"><button type="button" className="icon-button" title="展开详情" aria-label="展开详情" onClick={() => setDrawerOpen((value) => !value)}><Menu size={18} /></button><span>{activeLabel}</span></div><div className="breadcrumb">WILLY <span>/</span> {activeLabel?.toUpperCase()}</div><div className="top-actions"><button type="button" className="icon-button" title="Willy 简介" aria-label="Willy 简介" onClick={() => setAboutOpen(true)}><CircleHelp size={17} /></button><div className="avatar">ZL</div></div></header>
       <div ref={workspaceRef} className={`workspace-layout ${drawerOpen ? "drawer-open" : "drawer-closed"} ${inspectorCollapsed ? "inspector-collapsed" : ""} ${isResizing ? "is-resizing" : ""}`} style={{ "--drawer-width": `${drawerOpen ? drawerWidth : 0}px`, "--inspector-width": `${inspectorCollapsed ? 44 : inspectorWidth}px` }}>
-        <aside className="detail-drawer" aria-hidden={!drawerOpen}><DrawerContent section={section} runs={runs} plans={plans} temps={temps} selectedRunId={selectedProjectKind === "run" ? selectedRunId : null} selectedProposalId={selectedProjectKind === "proposal" ? proposalId : null} onSelectRun={selectRun} onSelectPlan={selectProposal} onCreateTemp={createTempProposal} onRefresh={refreshWorkspace} onRename={renameRun} onDelete={deleteLocalItem} refreshState={refreshStates.tasks} /></aside><button type="button" className="drawer-toggle" title={drawerOpen ? "收起详情" : "展开详情"} aria-label={drawerOpen ? "收起详情" : "展开详情"} aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>{drawerOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
+        <aside className="detail-drawer" aria-hidden={!drawerOpen}><DrawerContent section={section} runs={runs} plans={plans} temps={temps} selectedRunId={selectedProjectKind === "run" ? selectedRunId : null} selectedProposalId={selectedProjectKind === "proposal" ? proposalId : null} onSelectRun={selectRun} onSelectPlan={selectProposal} onCreateTemp={createTempProposal} onRefresh={refreshWorkspace} onRename={renameRun} onRenamePlan={renamePlan} onTogglePlanQueue={togglePlanQueue} onDelete={deleteLocalItem} refreshState={refreshStates.tasks} /></aside><button type="button" className="drawer-toggle" title={drawerOpen ? "收起详情" : "展开详情"} aria-label={drawerOpen ? "收起详情" : "展开详情"} aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>{drawerOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
         {drawerOpen && <button type="button" className="panel-resize-handle panel-resize-handle-left" title="拖动调整本地任务栏宽度" aria-label="调整本地任务栏宽度" onPointerDown={(event) => beginPanelResize("drawer", event)} onKeyDown={(event) => handleResizeKeyDown("drawer", event)} />}
         <section className="assistant-area"><div className="assistant-tabs" role="tablist" aria-label="助理工作区">{ASSISTANT_TABS.map(({ id, label, icon: Icon }) => <button type="button" role="tab" aria-selected={assistantMode === id} className={`assistant-tab ${assistantMode === id ? "active" : ""}`} key={id} onClick={() => setAssistantMode(id)}><Icon size={16} /><span>{label}</span></button>)}</div><div className="assistant-stack"><AssistantSurface key={`proposal-${projectVersion}`} kind="proposal" active={assistantMode === "proposal"} runId={selectedRunId} proposalId={proposalId} snapshot={snapshot} onPipelineStarted={pipelineStarted} onProposalWorkspaceChanged={proposalWorkspaceChanged} onSnapshot={applySnapshot} onStop={stopRun} isCurrentProject={isCurrentProject} recoveryLock={recoveryLock} /><AssistantSurface key={`run-${projectVersion}`} kind="run" active={assistantMode === "run"} runId={selectedRunId} proposalId={null} snapshot={snapshot} onPipelineStarted={pipelineStarted} onProposalWorkspaceChanged={proposalWorkspaceChanged} onSnapshot={applySnapshot} onStop={stopRun} isCurrentProject={isCurrentProject} recoveryLock={recoveryLock} /><VisualizationSurface active={assistantMode === "visual"} runId={selectedRunId} runs={runs} /><LogsSurface active={assistantMode === "logs"} runId={selectedRunId} runs={runs} /></div></section>
         {!inspectorCollapsed && <button type="button" className="panel-resize-handle panel-resize-handle-right" title="拖动调整运行检查器宽度" aria-label="调整运行检查器宽度" onPointerDown={(event) => beginPanelResize("inspector", event)} onKeyDown={(event) => handleResizeKeyDown("inspector", event)} />}

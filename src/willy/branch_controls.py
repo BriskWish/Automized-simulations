@@ -9,6 +9,7 @@ from willy.branching import branch_receipt, control_path, preview_repair_config
 from willy.charge_scaling import validate_ion_charge_scale
 from willy.config_store import write_json
 from willy.controlled_launch import LaunchCleanupError, handoff_controlled_process
+from willy.pipeline_launch import PipelineLockConflict
 from willy.run_control import RunControlError, apply_fork_changes, safe_restart_step, validate_fork_changes
 from willy.run_registry import RunRegistry
 from willy.simulation.manifest import ManifestError, RunLock, initialize_manifest, load_manifest
@@ -37,6 +38,7 @@ def _source(root: Path, run_id: str | None):
 def create_branch(
     parent: Path, config: dict, *, restart_step: int, source_action_id: str = "",
     expected_revision: int | None = None, parameter_paths: tuple[str, ...] = (),
+    fork_context: Mapping[str, object] | None = None,
 ) -> str:
     import willy.frontend_api as api
 
@@ -64,11 +66,17 @@ def create_branch(
             reservation.release()
             return f"已创建 fork {receipt['run_id']}；该方案不会重复启动。"
         with RunLock(parent, remove_artifact=True):
-            validate_step_inputs(parent, 6)
+            validate_step_inputs(parent, restart_step)
             from willy.run_store import run_transaction
 
             with run_transaction(parent):
-                api._copy_fork_workspace(parent, reservation.run_dir, config, restart_step=restart_step)
+                api._copy_fork_workspace(
+                    parent,
+                    reservation.run_dir,
+                    config,
+                    restart_step=restart_step,
+                    fork_context=fork_context,
+                )
             after = registry.get_run_status(parent.name, reconcile=False)
             if after.get("state_revision") != status.get("state_revision"):
                 raise RunControlError("父工程在复制期间变化，未启动分支")
@@ -114,6 +122,10 @@ def create_branch(
         except (OSError, ValueError, RuntimeError):
             pass
         return "分支启动交接失败，子进程尚未退出；已保留启动锁，父工程保持不变。"
+    except PipelineLockConflict:
+        # A durable automatic fork must remain launch-pending while another
+        # controlled runner holds the project-wide reservation.
+        raise
     except (OSError, ValueError, RuntimeError) as exc:
         if receipt_path is not None:
             try:
@@ -135,6 +147,53 @@ def create_branch(
         return f"分支未启动：{reason}。父工程保持不变。"
 
 
+def _current_process_step(status: Mapping[str, object], first_unfinished: int) -> int:
+    """Use the interrupted workflow step, falling back to the safe frontier."""
+    step = status.get("step")
+    if isinstance(step, int) and not isinstance(step, bool) and 1 <= step <= 10:
+        return step
+    return min(first_unfinished, 10)
+
+
+def _fork_context(
+    expected_proposal: Mapping[str, object] | None,
+    *,
+    current_process_step: int,
+    parameter_step: int,
+    restart_step: int,
+) -> dict[str, object]:
+    """Copy only bounded, audit-relevant fork facts into the child run."""
+    context: dict[str, object] = {
+        "schema_version": 2,
+        "current_process_step": current_process_step,
+        "parameter_step": parameter_step,
+        "restart_step": restart_step,
+    }
+    if not isinstance(expected_proposal, Mapping):
+        return context
+    for key in (
+        "proposal_id", "source", "source_action_id", "request", "decision_summary", "restart_notice",
+    ):
+        value = expected_proposal.get(key)
+        if isinstance(value, str) and value:
+            context[key] = value[:600]
+    paths = expected_proposal.get("parameter_paths")
+    if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
+        context["parameter_paths"] = paths[:16]
+    stop_context = expected_proposal.get("stop_context")
+    if isinstance(stop_context, Mapping):
+        safe_stop = {
+            key: value[:360] if isinstance(value, str) else value
+            for key, value in stop_context.items()
+            if key in {"state", "step", "error_kind", "error"}
+            and isinstance(value, (str, int))
+            and not isinstance(value, bool)
+        }
+        if safe_stop:
+            context["stop_context"] = safe_stop
+    return context
+
+
 def fork_run(run_id: str | None, command, *, expected_proposal: Mapping[str, object] | None = None) -> str:
     import willy.frontend_api as api
 
@@ -147,13 +206,31 @@ def fork_run(run_id: str | None, command, *, expected_proposal: Mapping[str, obj
             from willy.step_contracts import fingerprint
             if expected_proposal.get("config_fingerprint") != fingerprint(directory, "config.json")["sha256"]:
                 raise RunControlError("配置在方案生成后变化，请重新确认")
-        plan = validate_fork_changes(config, command.changes, stopped_at=min(first, 10))
+        current_process_step = _current_process_step(status, first)
+        plan = validate_fork_changes(config, command.changes, stopped_at=current_process_step)
+        restart_step = min(plan.restart_step, current_process_step)
+        notice = ""
+        if plan.restart_step < current_process_step:
+            notice = (
+                f"修改的参数定位在已结束的运行步骤前，将从第 {restart_step} 步开始续跑。"
+            )
         config = apply_fork_changes(config, command.changes)
-        return create_branch(
-            directory, config, restart_step=plan.restart_step,
+        reply = create_branch(
+            directory, config, restart_step=restart_step,
             expected_revision=status["state_revision"], parameter_paths=plan.parameter_paths,
             source_action_id=str(expected_proposal.get("proposal_id", "")) if expected_proposal else "",
+            fork_context=_fork_context(
+                expected_proposal,
+                current_process_step=current_process_step,
+                parameter_step=plan.restart_step,
+                restart_step=restart_step,
+            ),
         )
+        if notice and reply.startswith(("已创建 fork", "该方案已创建 fork", "已创建 fork")):
+            return f"{reply}\n{notice}"
+        return reply
+    except PipelineLockConflict:
+        return "fork 已登记，等待当前启动锁释放后自动执行。"
     except (OSError, ValueError):
         return "fork 参数或父工程不可用，未创建分支；父工程保持不变。"
 
@@ -183,5 +260,7 @@ def confirm_repair(
             source_action_id=action_id, expected_revision=status["state_revision"],
             parameter_paths=tuple(item["field"] for item in action.get("adjustments", [])),
         )
+    except PipelineLockConflict:
+        return "当前已有运行中的工程，请等待其结束后再创建分支。"
     except (OSError, ValueError):
         return "待确认方案已失效或工程状态已变化，未创建分支，父工程保持不变。"

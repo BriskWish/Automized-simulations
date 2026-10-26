@@ -55,6 +55,8 @@ def test_stop_during_gromacs_requests_checkpoint_first_shutdown(tmp_path, monkey
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     run_dir = _record_run_status(tmp_path, "run-001", {"state": "running", "step": 9})
     monkeypatch.setattr(frontend_api, "get_active_run_id", lambda: "run-001")
+    queue_watches = []
+    monkeypatch.setattr(frontend_api, "_schedule_plan_queue_after_stop", queue_watches.append)
 
     with patch.object(frontend_api, "_kill_process_group") as kill:
         message = frontend_api.stop_pipeline()
@@ -63,6 +65,46 @@ def test_stop_during_gromacs_requests_checkpoint_first_shutdown(tmp_path, monkey
     assert (run_dir / "stop.request").is_file()
     assert RunRegistry(tmp_path).get_run_status(run_dir.name)["state"] == "stopping"
     kill.assert_not_called()
+    assert queue_watches == [run_dir.name]
+
+
+def test_stop_non_simulation_terminates_tracked_children_and_wakes_queue(tmp_path, monkeypatch):
+    from willy import run_processes
+
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    run_dir = _record_run_status(tmp_path, "run-quantum-001", {"state": "running", "step": 1})
+    monkeypatch.setattr(frontend_api, "get_active_run_id", lambda: run_dir.name)
+    calls = []
+    monkeypatch.setattr(frontend_api, "_kill_process_group", lambda: calls.append("runner"))
+    monkeypatch.setattr(
+        run_processes,
+        "terminate_tracked_process_groups",
+        lambda directory: calls.append(("children", directory)),
+    )
+    monkeypatch.setattr(frontend_api, "_schedule_plan_queue_after_stop", lambda run_id: calls.append(("queue", run_id)))
+
+    assert frontend_api.stop_pipeline() == "已请求中止当前流水线。"
+    assert calls == ["runner", ("children", run_dir), ("queue", run_dir.name)]
+    assert RunRegistry(tmp_path).get_run_status(run_dir.name)["state"] == "stopping"
+
+
+def test_queue_stop_watcher_advances_only_after_launch_release(tmp_path, monkeypatch):
+    from willy import plan_queue
+
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    active = iter([True, False])
+    monkeypatch.setattr(frontend_api, "pipeline_launch_is_active", lambda _root: next(active))
+    monkeypatch.setattr(frontend_api.time, "sleep", lambda _seconds: None)
+    calls = []
+    monkeypatch.setattr(
+        plan_queue,
+        "advance_after_run_release",
+        lambda root, run_id, launcher: calls.append((root, run_id, callable(launcher))),
+    )
+
+    frontend_api._advance_plan_queue_after_stop_release("md__202609240004")
+
+    assert calls == [(tmp_path, "md__202609240004", True)]
 
 
 def test_clean_stop_unlinks_only_known_root_artifacts(tmp_path, monkeypatch):
@@ -432,8 +474,7 @@ def test_active_pipeline_run_wins_over_newer_historical_index_entry(tmp_path, mo
     assert frontend_api.latest_run_id() == active_id
 
 
-@pytest.mark.parametrize("revisions", (0, 1, 2))
-def test_confirm_pending_action_creates_child_without_changing_parent(tmp_path, monkeypatch, revisions):
+def test_confirm_pending_action_creates_child_without_changing_parent(tmp_path, monkeypatch):
     monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
     monkeypatch.setattr("willy.simulation.manifest.tool_versions", lambda: {"gromacs": "test", "packmol": "test"})
     run_id = "md__202608030001"
@@ -466,29 +507,6 @@ def test_confirm_pending_action_creates_child_without_changing_parent(tmp_path, 
     (run_dir / "Li.gjf").write_text("synthetic input")
     seed_contracts(run_dir)
     expected_dt = 0.0005
-    config_before_revision = (run_dir / "config.json").read_bytes()
-    if revisions:
-        import willy.agent_config as agent_config
-        from willy.agent_simulation import SimulationAgent
-        from willy.simulation.pending_action import load_pending_action
-
-        monkeypatch.setattr(agent_config, "_DS", object())
-        for revision_index in range(revisions):
-            expected_dt = 0.0005 / (2 ** (revision_index + 1))
-            monkeypatch.setattr(SimulationAgent, "propose_revised_eq_recovery", lambda *_args, **_kwargs: {
-                "adjustments": [{"field": "dt", "after": expected_dt}],
-            })
-            old_pending = frontend_api.get_pending_action(run_id)
-            result = frontend_api.revise_pending_action(
-                action["action_id"], f"将 dt 改为 {expected_dt}", run_id,
-                state_revision=old_pending["state_revision"],
-                config_fingerprint=old_pending["config_fingerprint"],
-            )
-            assert "已按你的要求更新" in result
-            assert "已失效" in frontend_api.confirm_pending_action(action["action_id"], run_id)
-            action = load_pending_action(run_dir)
-            assert action["action_id"] != old_pending["action_id"]
-            assert (run_dir / "config.json").read_bytes() == config_before_revision
     parent_before = {path.name: path.read_bytes() for path in run_dir.iterdir() if path.is_file()}
     child = tmp_path / "md_run" / "md__202608030003"
     child.mkdir()
@@ -566,6 +584,97 @@ def test_confirm_pending_action_creates_child_without_changing_parent(tmp_path, 
     assert {name: (run_dir / name).read_bytes() for name in parent_before} == parent_before
     assert json.loads((child / "config.json").read_text())["md"]["dt"] == expected_dt
     assert frontend_api.get_pending_action(run_id) is None
+
+
+def test_eq_recovery_auto_fork_dispatches_after_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr("willy.simulation.manifest.tool_versions", lambda: {"gromacs": "test", "packmol": "test"})
+    run_id = "md__202608030009"
+    run_dir = tmp_path / "md_run" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.json").write_text(json.dumps({
+        "residues": {"Li": 1},
+        "molecules": {"Li": {"charge": 0, "spin": 1}},
+        "md": default_md_config(),
+    }))
+    registry = RunRegistry(tmp_path)
+    registry.register_run(run_dir, backend="g16", total_steps=10)
+    action = create_eq_pending_action(run_dir, proposal={
+        "summary": "降低时间步长后重跑 EQ。",
+        "adjustments": [{"field": "dt", "after": 0.0005}],
+    })
+    registry.record_status(run_dir, {
+        "state": "awaiting_confirmation", "step": 9,
+        "step_label": "GROMACS 三点式退火平衡", "layer": "simulation",
+        "error": "EQ 验收未通过", "error_kind": "equilibration_failed",
+        "activity": {}, "done_steps": list(range(1, 9)),
+        "extra": {"pending_action": {
+            "action_id": action["action_id"], "state": "pending",
+            "step_label": "GROMACS 三点式退火平衡", "restart_step": 9,
+            "summary": action["summary"], "adjustments": [],
+        }},
+    }, "run_awaiting_confirmation")
+    from tests.run_contract_fixture import seed_contracts
+    (run_dir / "Li.gjf").write_text("synthetic input")
+    seed_contracts(run_dir)
+    launch_active = {"value": True}
+    monkeypatch.setattr(frontend_api, "pipeline_launch_is_active", lambda _root: launch_active["value"])
+
+    record = frontend_api.enqueue_eq_recovery_fork(run_id)
+
+    assert record is not None
+    assert record["source"] == "error_recovery"
+    assert record["restart_step"] == 6
+    assert frontend_api.get_pending_action(run_id) is None
+    pending = frontend_api.get_pending_fork(run_id)
+    assert pending is not None
+    child = tmp_path / "md_run" / "md__202608030010"
+    child.mkdir()
+    spawned = []
+
+    class Reservation:
+        def __init__(self):
+            self.run_dir = child
+            self.fd = 19
+            self.token = "recovery-token"
+
+        def mark_runner_started(self, pid):
+            self.pid = pid
+
+        def detach_parent(self):
+            return None
+
+        def release(self):
+            raise AssertionError("valid launch must retain the reservation")
+
+    class Process:
+        pid = 4321
+
+        def wait(self):
+            return 0
+
+    class IdleThread:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(frontend_api, "reserve_pipeline_launch", lambda _root: Reservation())
+    monkeypatch.setattr(frontend_api.subprocess, "Popen", lambda args, **kwargs: spawned.append((args, kwargs)) or Process())
+    monkeypatch.setattr(frontend_api.threading, "Thread", IdleThread)
+    launch_active["value"] = False
+
+    outcomes = frontend_api.dispatch_pending_forks(tmp_path, run_id=run_id)
+
+    assert "已创建 fork" in outcomes[run_id]
+    assert spawned[0][0][-2:] == ["--resume-from-step", "6"]
+    assert json.loads((child / "config.json").read_text())["md"]["dt"] == 0.0005
+    context = json.loads((child / "fork_context.json").read_text())["request"]
+    assert context["source"] == "error_recovery"
+    assert context["stop_context"]["error_kind"] == "equilibration_failed"
+    parent_status = RunRegistry(tmp_path).get_run_status(run_id)
+    assert parent_status["state"] == "awaiting_confirmation"
 
 
 def test_confirm_pending_action_preserves_parent_when_child_cannot_start(tmp_path, monkeypatch):
@@ -703,22 +812,27 @@ def test_revising_pending_action_keeps_run_waiting_and_config_unchanged(tmp_path
             }],
         },
     )
+    monkeypatch.setattr(frontend_api, "pipeline_launch_is_active", lambda _root: True)
 
     reply = frontend_api.revise_pending_action(
         original["action_id"], "将最终保温段改为 8 ns", run_id,
     )
     revised = frontend_api.get_pending_action(run_id)
+    pending_fork = frontend_api.get_pending_fork(run_id)
 
     assert "已按你的要求更新" in reply
-    assert revised is not None
-    assert revised["action_id"] != original["action_id"]
+    assert revised is None
+    assert pending_fork is not None
+    assert pending_fork["state"] == "launch_pending"
+    assert pending_fork["restart_step"] == 6
     revised_status = RunRegistry(tmp_path).get_run_status(run_id)
     assert revised_status["state"] == "awaiting_confirmation"
-    assert revised_status["state_revision"] == 2
+    assert "pending_action" not in revised_status["extra"]
     assert (run_dir / "config.json").read_bytes() == config_before
     with pytest.raises(PendingActionError, match="已失效"):
         validate_pending_action_for_launch(run_dir, original["action_id"])
     assert "pending_action_revised" in (run_dir / "events.jsonl").read_text()
+    assert "eq_recovery_fork_requested" in (run_dir / "events.jsonl").read_text()
 
 
 @pytest.mark.parametrize("failure", ("invalid_proposal", "state_changed", "commit_conflict", "launch_busy", "llm_unavailable", "already_confirmed"))

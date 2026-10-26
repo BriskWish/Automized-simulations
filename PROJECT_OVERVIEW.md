@@ -1,6 +1,6 @@
 # Willy 项目总览：面向可信分子模拟的 Agent 工作流
 
-> 当前范围：本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理提供原样 `/resume`、完整上下文分支 `/fork`、有界 `/inputs` 声明、`/switch`、工程对话记录和 CPU 资源预检。步骤输入逐步校验哈希，旧产物先归档；确认新的修复参数也创建独立分支。远程执行与托管网关不属于当前产品入口。
+> 当前范围：本机 MD 执行和用户自配 OpenAI-compatible LLM。运行助理提供原样 `/resume`、完整上下文分支 `/fork`、有界 `/inputs` 声明、`/switch`、工程对话记录和 CPU 资源预检。步骤输入逐步校验哈希，旧产物先归档；fork 与单一已验证修复参数持久化后创建独立分支。远程执行与托管网关不属于当前产品入口。
 
 > 定位：Willy 将自然语言需求转化为可审计的分子动力学工作流。LLM 不直接执行科学计算，而是在受限工具、结构化配置、确定性编排和人工授权的边界内参与决策。
 >
@@ -136,13 +136,13 @@ read_only -> retry_safe -> requires_confirmation -> requires_fork -> destructive
 
 `RecoveryPolicy` 再按 `layer + ErrorKind + step + attempt` 做声明式裁决：指定可用工具、最大尝试次数、是否需要确认、是否只能 fork，以及从哪一步重跑。模型可以提出候选，但无法自行放宽策略。
 
-EQ 失败是该机制的代表：模型只生成脱敏修复方案；确认后创建完整上下文子工程，仅子工程按 `awaiting_confirmation -> retrying -> running` 流转；父配置、状态及证据不改变。替代方案产生新的 `action_id`，分支回执防止重复确认再次启动。
+EQ 失败是该机制的代表：模型只生成脱敏修复字段；单一、已验证修复在 `awaiting_confirmation` 中持久化为自动 fork 请求，并在父 runner 释放启动锁后创建完整上下文子工程。多候选或字段不明确时才要求用户选择或补充；仅子工程按 `awaiting_confirmation -> retrying -> running` 流转，父配置、状态及证据不改变。分支回执防止重复启动。
 
 ## 7. 状态机、停止与恢复
 
 系统公开八个运行状态：`idle`、`running`、`retrying`、`awaiting_confirmation`、`stopping`、`escalated`、`done`、`aborted`。
 
-状态机保留八种状态及合法迁移表：`awaiting_confirmation` 不能直接跳到 `running`，而必须先进入 `retrying`；`stopping` 正常退出到 `aborted`，停止失败或超时升级为 `escalated`。非完成状态的执行或控制故障可以升级，记录步骤、阶段和关联原因；`done` 不回退。人工处理后，页面刷新及轮询重新核验进程退出和已知故障条件，通过则 `escalated -> aborted`；未知或科学执行故障须声明完成处理，不能靠文件变化推断修复。此复查不启动计算、不自动接纳新输入。报错和手动暂停均可显式原参数续跑，不依赖 LLM 方案；续跑仍须哈希准入，再经 CAS 迁至 `awaiting_confirmation -> retrying`。修改 LLM 建议只原子替换待确认方案和按钮绑定，不启动计算；`/fork` 和修复确认只迁移子工程状态。每次写入带单调 `state_revision`，过期方案禁止确认。简图见 [`运行助理状态图`](docs/run_assistant.md#状态图)。
+状态机保留八种状态及合法迁移表：`awaiting_confirmation` 不能直接跳到 `running`，而必须先进入 `retrying`；`stopping` 正常退出到 `aborted`，停止失败或超时升级为 `escalated`。非完成状态的执行或控制故障可以升级，记录步骤、阶段和关联原因；`done` 不回退。人工处理后，页面刷新及轮询重新核验进程退出和已知故障条件，通过则 `escalated -> aborted`；未知或科学执行故障须声明完成处理，不能靠文件变化推断修复。此复查不启动计算、不自动接纳新输入。报错和手动暂停均可显式原参数续跑，不依赖 LLM 方案；续跑仍须哈希准入，再经 CAS 迁至 `awaiting_confirmation -> retrying`。自然语言 `/fork` 的字段由 LLM 受限定位，服务端计算实际生效步；持久化请求在锁释放后只迁移子工程状态。每次写入带单调 `state_revision`，过期请求不得启动。简图见 [`运行助理状态图`](docs/run_assistant.md#状态图)。
 
 状态快照只包含当前步骤、层、受限活动描述、重试次数、已应用白名单参数差异、错误摘要和完成步骤。`activity` 固定为工具、操作、对象类型、对象、当前数和总数，例如“正在使用 GROMACS 进行 NPT 退火（2/2）”。
 
@@ -201,9 +201,9 @@ EQ 失败是该机制的代表：模型只生成脱敏修复方案；确认后�
 
 完成标准不是退出码为零，而是可消费产物、输入指纹和阶段许可。它直接防止拓扑文件缺失、EQ 未完成却提前 PROD、上游参数变更后仍消费旧 checkpoint 等跨层错误。
 
-### 10.4 人工确认成为工作流状态
+### 10.4 人工澄清成为工作流状态
 
-EQ 修复不是聊天建议，而是带 `action_id`、参数差异、受限重跑点和配置指纹的待确认动作。无回复保持等待，替代方案失效旧动作，确认才执行，构成可审计的人类监督闭环。
+EQ 修复不是聊天建议，而是带 `action_id`、参数差异、配置指纹和受限 fork 请求的可审计动作。单一已验证调整在父 runner 释放锁后自动创建子工程；多候选或字段不明确才保持等待，用户选择或补充后替换旧动作并自动派发。
 
 ### 10.5 长任务的可观测性与可恢复性
 

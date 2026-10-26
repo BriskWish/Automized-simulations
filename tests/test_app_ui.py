@@ -5,6 +5,7 @@ import base64
 from copy import deepcopy
 import json
 from pathlib import Path
+from threading import Event, Thread
 
 from fastapi.testclient import TestClient
 import pytest
@@ -45,25 +46,29 @@ def test_configuration_preflight_displays_the_runtime_report(monkeypatch):
 
 def test_app_lifespan_reconciles_stale_runs_before_serving(monkeypatch):
     calls = []
+    monkeypatch.setattr(app, "clear_pending_requests", lambda _root: calls.append({"pending_requests": True}))
     monkeypatch.setattr(
         app.frontend_api,
         "reconcile_stale_pipeline_states",
         lambda **kwargs: calls.append(kwargs) or [],
     )
+    monkeypatch.setattr(app, "_dispatch_plan_queue_after_startup", lambda: calls.append({"queue": True}))
 
     async def enter_lifespan():
         async with app._workbench_lifespan(app.app):
-            pass
+            await asyncio.sleep(0.05)
 
     asyncio.run(enter_lifespan())
 
-    assert calls == [{"source": "service_startup"}]
+    assert calls == [{"pending_requests": True}, {"source": "service_startup"}, {"queue": True}]
 
 
-def test_app2_proposal_surface_shows_a_thinking_buffer_while_a_request_runs():
+def test_app2_proposal_surface_restores_a_persisted_thinking_buffer():
     source = (app.ROOT / "frontend" / "src" / "main.jsx").read_text(encoding="utf-8")
 
     assert "state.thread.isRunning" in source
+    assert "payload.workspace.thinking === true" in source
+    assert "persistedThinking" in source
     assert "正在思考..." in source
 
 
@@ -105,6 +110,28 @@ def test_app2_projects_initial_run_as_preparing_and_counts_the_active_step(tmp_p
 
     assert running["state"] == "running"
     assert running["progress"] == "10/10"
+
+
+def test_app2_snapshot_exposes_step_succeeded_completion_timestamp(tmp_path, monkeypatch):
+    run_dir = tmp_path / "md_run" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.json").write_text("{}", encoding="utf-8")
+    registry = RunRegistry(tmp_path)
+    registry.register_run(run_dir, backend="g16", total_steps=10)
+    registry.record_status(run_dir, {
+        "state": "running", "step": 2, "done_steps": [1],
+    }, "step_succeeded")
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+
+    snapshot = app._public_snapshot(RUN_ID)
+    event = next(
+        json.loads(line)
+        for line in reversed((run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines())
+        if json.loads(line).get("event_type") == "step_succeeded"
+    )
+
+    assert snapshot["step_completion_times"][1]["completed_at"] == event["timestamp"]
+    assert "本地时间" in snapshot["step_completion_times"][1]["completed_at_local"]
 
 
 def test_app2_status_panel_labels_preparing_state():
@@ -175,6 +202,10 @@ def test_app2_declares_separate_proposal_and_run_assistant_routes():
         ("/api/runs/{run_id}/pending-action/revise", "POST"),
         ("/api/runs/{run_id}/pending-action/confirm", "POST"),
         ("/api/runs/{run_id}/display-name", "PATCH"),
+        ("/api/proposals/{proposal_id}/display-name", "PATCH"),
+        ("/api/proposals/{proposal_id}/optimization-skips", "PATCH"),
+        ("/api/proposals/{proposal_id}/queue", "POST"),
+        ("/api/proposals/{proposal_id}/queue", "DELETE"),
         ("/api/local-items/{item_id}", "DELETE"),
         ("/api/runs/{run_id}/logs", "GET"),
         ("/api/runs/{run_id}/stop", "POST"),
@@ -231,6 +262,123 @@ def test_app2_lists_registered_local_task_directories_without_paths(tmp_path, mo
     assert response["plans"] == []
     assert response["temps"] == []
     assert str(tmp_path) not in str(response)
+
+
+def test_app2_plan_queue_routes_require_current_revision_and_protect_queued_plan(tmp_path, monkeypatch):
+    from willy.proposal_workspace import save_workspace_conversation
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        app,
+        "_launch_queued_plan",
+        lambda _config, _plan_id: SimpleNamespace(state="lock_conflict", run_id=None),
+    )
+    plan = save_workspace_conversation(
+        tmp_path,
+        app.create_proposal_workspace()["workspace"]["workspace_id"],
+        messages=[],
+        pending_plan={"config": {"backend": "g16", "residues": {"Li": 1}}},
+    )
+
+    accepted = app.enable_plan_queue(plan["workspace_id"], {"revision": plan["revision"]})
+    listed = app.list_local_runs()["plans"]
+
+    assert accepted["plan"]["queue_position"] == 1
+    assert listed[0]["queued"] is True
+    with pytest.raises(Exception) as stale:
+        app.enable_plan_queue(plan["workspace_id"], {"revision": plan["revision"] - 1})
+    assert stale.value.status_code == 409
+    with pytest.raises(Exception) as deleting:
+        app.delete_local_task_item(plan["workspace_id"], {"confirm_plan": True})
+    assert deleting.value.status_code == 409
+
+    app.disable_plan_queue(plan["workspace_id"], {"revision": plan["revision"]})
+    assert app.list_local_runs()["plans"][0]["queued"] is False
+
+
+def test_app2_plan_chat_confirmation_enters_the_serial_queue(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import willy.agent_config as agent_config
+    from willy.proposal_workspace import save_workspace_conversation
+
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        app,
+        "_launch_queued_plan",
+        lambda _config, _plan_id: SimpleNamespace(state="lock_conflict", run_id=None),
+    )
+    workspace = app.create_proposal_workspace()["workspace"]
+    plan = save_workspace_conversation(
+        tmp_path,
+        workspace["workspace_id"],
+        messages=[{"role": "assistant", "content": "**模拟方案确认**"}],
+        pending_plan=agent_config.create_pending_launch_plan(
+            {"backend": "g16", "residues": {"Li": 1}},
+            "**模拟方案确认**",
+        ),
+    )
+
+    response = app.proposal_chat({
+        "proposalId": plan["workspace_id"],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "运行"}]}],
+    })
+
+    assert "已加入队列，第 1 位" in response["text"]
+    assert app.list_local_runs()["plans"][0]["queued"] is True
+
+
+def test_app2_plan_queue_ui_only_switches_for_the_started_plan():
+    source = (app.ROOT / "frontend" / "src" / "main.jsx").read_text(encoding="utf-8")
+
+    assert "active?.plan_id === plan.workspace_id" in source
+
+
+def test_app2_updates_per_molecule_optimization_skip_with_current_plan_revision(tmp_path, monkeypatch):
+    import willy.agent_config as agent_config
+    from willy.proposal_workspace import save_workspace_conversation
+
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    monkeypatch.setattr(app, "validate_config", lambda _config: [])
+    monkeypatch.setattr(
+        app,
+        "summarize",
+        lambda config: "**模拟方案确认**\nskip=" + str(config["molecules"]["Li"].get("skip_optimization")),
+    )
+    summary = "**模拟方案确认**\nskip=False"
+    workspace = app.create_proposal_workspace()["workspace"]
+    plan = save_workspace_conversation(
+        tmp_path,
+        workspace["workspace_id"],
+        messages=[{"role": "assistant", "content": summary}],
+        pending_plan=agent_config.create_pending_launch_plan(
+            {
+                "backend": "g16",
+                "residues": {"Li": 1},
+                "molecules": {"Li": {"charge": 1, "spin": 1, "skip_optimization": False}},
+            },
+            summary,
+        ),
+    )
+
+    response = app.set_proposal_optimization_skips(
+        plan["workspace_id"],
+        {"revision": plan["revision"], "skip_optimization": {"Li": True}},
+    )
+    persisted = app.get_workspace(tmp_path, plan["workspace_id"])
+
+    assert persisted["pending_plan"]["config"]["molecules"]["Li"]["skip_optimization"] is True
+    assert response["workspace"]["revision"] == plan["revision"] + 1
+    assert response["workspace"]["optimization_skips"] == [{"name": "Li", "skip_optimization": True}]
+    assert response["messages"][-1]["content"] == "**模拟方案确认**\nskip=True"
+
+
+def test_app2_optimization_skip_ui_uses_a_versioned_checkbox_control():
+    source = (app.ROOT / "frontend" / "src" / "main.jsx").read_text(encoding="utf-8")
+
+    assert "function OptimizationSelection" in source
+    assert "/optimization-skips" in source
+    assert 'type="checkbox"' in source
 
 
 def test_app2_display_name_is_frontend_only_and_preserves_run_state(tmp_path, monkeypatch):
@@ -657,6 +805,48 @@ def test_app2_proposal_persists_user_turn_before_llm_returns(tmp_path, monkeypat
     assert app.get_workspace_history(tmp_path, workspace["workspace_id"]) == [
         {"role": "user", "content": "建立 Li 体系"},
     ]
+    assert app.get_proposal_workspace(workspace["workspace_id"])["workspace"]["thinking"] is False
+
+
+def test_app2_proposal_exposes_thinking_while_llm_is_still_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(app.frontend_api, "ROOT", tmp_path)
+    workspace = app.create_proposal_workspace()["workspace"]
+    entered = Event()
+    release = Event()
+    result: dict[str, object] = {}
+
+    def stalled_chat(message, history, pending_plan, *, proposal_workspace_id=None):
+        entered.set()
+        assert release.wait(timeout=2)
+        yield "", [
+            *history,
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": "方案回复"},
+        ], None, None, None, None
+
+    def invoke() -> None:
+        result["response"] = app.proposal_chat({
+            "proposalId": workspace["workspace_id"],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "建立 Li 体系"}]}],
+        })
+
+    monkeypatch.setattr(app, "chat", stalled_chat)
+    worker = Thread(target=invoke)
+    worker.start()
+    assert entered.wait(timeout=2)
+
+    pending = app.get_proposal_workspace(workspace["workspace_id"])
+    assert pending["workspace"]["thinking"] is True
+    assert pending["messages"] == [{"role": "user", "content": "建立 Li 体系"}]
+
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert result["response"] == {
+        "text": "方案回复",
+        "proposalId": workspace["workspace_id"],
+    }
+    assert app.get_proposal_workspace(workspace["workspace_id"])["workspace"]["thinking"] is False
 
 
 def test_app2_run_chat_confirms_only_the_current_awaiting_action(monkeypatch):
@@ -728,6 +918,41 @@ def test_app2_run_chat_confirms_only_the_current_awaiting_action(monkeypatch):
     assert ordinary["text"] == "只读回复"
     assert llm_calls == [(RUN_ID, "确认调参")]
     assert persisted[-1][0] == RUN_ID
+
+
+def test_run_chat_routes_legacy_fork_confirmation_to_control_not_llm(monkeypatch):
+    calls = {"control": [], "llm": []}
+    snapshot = {
+        "run_id": RUN_ID,
+        "state": "aborted",
+        "step": 9,
+        "phase": "GROMACS 三点式退火平衡",
+        "progress": "8/10",
+        "done_steps": list(range(1, 9)),
+        "status_event_id": f"{RUN_ID}:status:aborted:9",
+        "live_summary": "已中止。",
+        "pending_action": None,
+    }
+    monkeypatch.setattr(app, "_safe_run_id", lambda run_id: RUN_ID)
+    monkeypatch.setattr(app, "_public_snapshot", lambda run_id: dict(snapshot))
+    monkeypatch.setattr(app.frontend_api, "get_run_assistant_history", lambda run_id: [])
+    monkeypatch.setattr(app.frontend_api, "save_run_assistant_history", lambda run_id, history: True)
+    monkeypatch.setattr(
+        app.frontend_api,
+        "run_assistant_control_command",
+        lambda run_id, message: calls["control"].append((run_id, message)) or "fork 已在等待启动锁释放后自动执行。",
+    )
+    monkeypatch.setattr(
+        app.frontend_api,
+        "chat_run_assistant",
+        lambda run_id, message, history: calls["llm"].append((run_id, message)) or "不应调用",
+    )
+
+    response = app.run_chat(RUN_ID, {"message": "确认 fork"})
+
+    assert response["text"] == "fork 已在等待启动锁释放后自动执行。"
+    assert calls["control"] == [(RUN_ID, "确认 fork")]
+    assert calls["llm"] == []
 
 
 def test_pending_action_confirmation_follows_child_and_saves_only_child_history(monkeypatch):
@@ -1368,6 +1593,41 @@ def test_app2_run_updates_expose_one_completion_notice_per_completed_step(monkey
         "第 3 步「RESP 电荷计算」已完成。",
     ]
     assert unchanged["events"] == []
+
+
+def test_app2_completion_events_display_persisted_step_timestamp_without_duplication():
+    snapshot = {
+        "run_id": RUN_ID,
+        "state": "running",
+        "step": 2,
+        "done_steps": [1],
+        "status_event_id": f"{RUN_ID}:status:running:2",
+        "live_summary": "正在执行第 2 步。",
+        "step_completion_times": {
+            1: {
+                "completed_at": "2026-09-25T03:04:05+00:00",
+                "completed_at_local": "2026-09-25 11:04:05 本地时间（UTC+08:00）",
+            },
+        },
+    }
+    legacy_completion = {
+        "role": "assistant",
+        "content": "第 1 步「结构优化」已完成。",
+        "_run_assistant_event_kind": "step_completed",
+        "_run_assistant_event_id": f"{RUN_ID}:step:1:completed",
+    }
+
+    merged = app._merge_status_into_history([legacy_completion], snapshot)
+
+    completions = [
+        message for message in merged
+        if message.get("_run_assistant_event_kind") == "step_completed"
+    ]
+    assert len(completions) == 1
+    assert completions[0]["content"] == (
+        "第 1 步「结构优化」已完成。\n"
+        "完成时间：2026-09-25 11:04:05 本地时间（UTC+08:00）。"
+    )
 
 
 def test_app2_visualization_passes_validated_viewer_controls(monkeypatch):

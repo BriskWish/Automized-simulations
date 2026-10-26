@@ -24,7 +24,7 @@
 | [`g07_python_matrix_20260908.json`](../tests/reports/audits/g07_python_matrix_20260908.json) | 本机三版本独立安装、真实 Web 重启、无科学计算续跑及错误矩阵证据 | 6 号 | 解释器、验收范围、实现散列或回归结果变化；核心冒烟与扩大回归结论必须分别记录。 |
 | [`g07_python_matrix_20260910.json`](../tests/reports/audits/g07_python_matrix_20260910.json) | 本机三版本默认全量回归、真实冒烟、前端构建及完整快照一致性复验 | 6 号 | 源码、产物、解释器或回归结果变化；记录未覆盖变更，不以快照通过替代当前版本放行。 |
 | [`g09_eq_coverage_20260906.json`](../tests/reports/audits/g09_eq_coverage_20260906.json) | EQ 覆盖门禁的真实产物隔离复验与回归脱敏证据 | 6 号 | 新验收规则的受管复验、来源产物与实现散列、许可结果或回归证据变化。 |
-| [`../tests/reports/test_case_catalog.md`](../tests/reports/test_case_catalog.md) | 当前测试用例台账 | 6 号 | pytest 收集结果或 LLM 场景变化；当前生成台账（1968 条 pytest、18 条 LLM 场景，共 1986 条记录）。 |
+| [`../tests/reports/test_case_catalog.md`](../tests/reports/test_case_catalog.md) | 当前测试用例台账 | 6 号 | pytest 收集结果或 LLM 场景变化；当前生成台账（1999 条 pytest、18 条 LLM 场景，共 2017 条记录）。 |
 | [`gateway.md`](gateway.md) | 未来托管网关的安全边界 | 网关 | 重新纳入产品范围时。 |
 | [`remote_execution.md`](remote_execution.md) | 未来远程执行的安全边界 | 模拟与前端 | 重新纳入产品范围时。 |
 

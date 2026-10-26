@@ -39,7 +39,7 @@ EQ 五段覆盖规则不新增公开状态：时间协议无效归入输入契�
 }
 ```
 
-`activity` 是唯一公开工序模型。`repair` 只在已实际执行受控修复时出现；`pending_action` 只包含脱敏方案摘要和 `recovery_plan`：问题、当前步调参路径、打回前序路径、逐点证据及服务端写入的 `risk_level=high` / `manual_review_required=true`。`escalation` 只包含错误类别、已尝试动作和建议。ETA 单独来自受限 ETA 快照，不能作为完成保证。完整十步流程的 `done` 快照还会生成一个固定的公开完成交付事件，仅含相对 run 目录与 `prod.gro`、`prod.xtc`、`prod.trr`、`prod.edr` 等文件名。运行助理的 `status_event_id` 对模拟阶段纳入脱敏 ETA 令牌；等待、可用、预测变更和结束都会使前端重新读取状态气泡。
+`activity` 是唯一公开工序模型。`repair` 只在已实际执行受控修复时出现；`pending_action` 只包含脱敏方案摘要和 `recovery_plan`：问题、当前步调参路径、打回前序路径、逐点证据及服务端写入的 `risk_level=high` / `manual_review_required=true`。`escalation` 只包含错误类别、已尝试动作和建议。ETA 单独来自受限 ETA 快照，不能作为完成保证。运行助理快照可额外返回 `step_completion_times`，以已完成步骤为键，值仅含 `step_succeeded` 事件的 UTC `completed_at` 与服务器本地格式 `completed_at_local`；缺失审计事件不补造时间。完整十步流程的 `done` 快照还会生成一个固定的公开完成交付事件，仅含相对 run 目录与 `prod.gro`、`prod.xtc`、`prod.trr`、`prod.edr` 等文件名。运行助理的 `status_event_id` 对模拟阶段纳入脱敏 ETA 令牌；等待、可用、预测变更和结束都会使前端重新读取状态气泡。
 
 ## 状态
 
@@ -98,11 +98,13 @@ EQ 五段覆盖规则不新增公开状态：时间协议无效归入输入契�
 
 ## 方案工作区接口
 
-方案助理的预启动会话不属于运行状态机。前端加载且没有活动流水线时，`POST /api/proposals/default` 会恢复最近一个未正式化的方案工作区；不存在时创建 `md_run/temp__YYYYMMDDNNNN/`。`POST /api/proposals` 始终创建一个独立 `temp__`，用于本地任务栏中的“新建临时方案”。`GET /api/proposals/{proposal_id}` 可读取 `temp__`、`plan__` 或受管 `md__` 工程的受限方案会话；不返回候选配置。
+方案助理的预启动会话不属于运行状态机。前端加载且没有活动流水线时，`POST /api/proposals/default` 会恢复最近一个未正式化的方案工作区；不存在时创建 `md_run/temp__YYYYMMDDNNNN/`。`POST /api/proposals` 始终创建一个独立 `temp__`，用于本地任务栏中的“新建临时方案”。`GET /api/proposals/{proposal_id}` 可读取 `temp__`、`plan__` 或受管 `md__` 工程的受限方案会话；不返回候选配置，但 `workspace.thinking` 会公开当前请求是否仍在等待模型答复，供工程切换后恢复思考气泡。
 
 首次形成待确认候选时，当前 `temp__` 原子改名为 `plan__YYYYMMDDNNNN/` 并保存 `proposal.json`。在已有 `plan__` 中继续提出新方案时，更新同一目录中的候选和会话；不会额外分配 `plan__`。在已有 `md__` 的方案助理中形成新候选时，服务端保留原工程的既有会话，再分配新的 `plan__` 并将“本轮用户请求 + 新方案回复”作为该 plan 的独立会话；两侧不复制、不互通，旧 run 的候选不会被重新确认。明确运行请求须携带该 `plan__` 标识；服务端在正常启动锁已保留、候选配置仍匹配后，才把目录原子改为分配的 `md__` 目录。注册正式 run 后，registry manifest 写入不含参数值的 `proposal_workspace_id`，`events.jsonl` 写入 `proposal_formalized`；候选配置和对话只保留在 run 本地的 `proposal.json`。目录正式化或启动失败不得伪造 `status.json` 状态转换。
 
-本地任务删除接口为 `DELETE /api/local-items/{item_id}`。它只接受单一受管 `md__`、`plan__` 或 `temp__` 标识，且任何流水线运行中均返回冲突。删除 `plan__` 必须携带 `confirm_plan: true`，作为前端两次确认后的服务端约束；删除 run 同时移除其索引和仅用于显示的名称映射，不改写其他工程记录。
+方案队列由 `md_run/.plan_queue.json` 持久化，`POST /api/proposals/{proposal_id}/queue` 接受方案当前 `revision`，完成显式确认并立即尝试调度；已有任务运行时保留在队列中。`DELETE /api/proposals/{proposal_id}/queue` 只允许移除尚未启动的队列项。队列启动前再次校验方案版本和候选配置指纹，任一变化均使队列项失效，不能静默使用新参数。所有受控启动的清理回调、用户停止释放和服务启动复查都会推进队列；停止时先确认启动锁及登记的独立子进程组均已退出，队列任务的结束或故障不会阻塞后续项。`PATCH /api/proposals/{proposal_id}/display-name` 使用方案 `revision` 做并发校验，名称随方案目录正式化并被历史工程继承。
+
+本地任务删除接口为 `DELETE /api/local-items/{item_id}`。它只接受单一受管 `md__`、`plan__` 或 `temp__` 标识，且任何流水线运行中均返回冲突。删除 `plan__` 必须携带 `confirm_plan: true`，作为前端两次确认后的服务端约束；排队中的方案必须先由队列接口移出。删除 run 同时移除其索引和仅用于显示的名称映射，不改写其他工程记录。
 
 ## 审计文件
 

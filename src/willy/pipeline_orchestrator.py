@@ -1502,6 +1502,12 @@ class PipelineOrchestrator:
                 requires_box_rebuild=requires_box_rebuild,
             )
             self._sm.set_awaiting_confirmation(public_pending_action(action))
+            try:
+                from willy.frontend_api import enqueue_eq_recovery_fork
+
+                auto_fork = enqueue_eq_recovery_fork(run_dir.name)
+            except (OSError, ValueError, RuntimeError):
+                auto_fork = None
             if self._run_registry is not None:
                 try:
                     from willy.simulation.pending_action import pending_action_validated
@@ -1526,7 +1532,10 @@ class PipelineOrchestrator:
             self._sm.transition(State.ABORTED)
             print(f"[{label}] ❌ 无法生成待确认方案: {exc}")
             return False
-        print(f"[{label}] ⏸ 已生成待确认 EQ 方案，等待用户回复")
+        if auto_fork is None:
+            print(f"[{label}] ⏸ 已生成待确认 EQ 方案，等待用户补充或选择")
+        else:
+            print(f"[{label}] ⏸ 已登记 EQ 修复 fork，等待当前进程交接后自动启动")
         return False
 
     def _escalate_unknown_eq_research(
@@ -2110,8 +2119,17 @@ def _g16_sp_and_mol2(config_path: str, on_progress=None,
                 "target_type": "molecule", "target": name,
                 "current": i, "total": total,
             })
+        skip_optimization = cfg.get("skip_optimization") is True
         fchk_path = str(workspace / f"{name}.fchk")
-        if not Path(fchk_path).exists():
+        source_input_path = workspace / f"{name}.gjf"
+        if skip_optimization and (not source_input_path.is_file() or source_input_path.stat().st_size <= 0):
+            results.append(StepResult(
+                step_name="sp_mol2_g16", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{name}.gjf 不存在或为空，无法跳过结构优化"),
+                target_type="molecule", target=name))
+            continue
+        if not skip_optimization and not Path(fchk_path).exists():
             results.append(StepResult(
                 step_name="sp_mol2_g16", step_index=2, success=False,
                 error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
@@ -2123,8 +2141,10 @@ def _g16_sp_and_mol2(config_path: str, on_progress=None,
         mem = cfg.get("mem") or defaults.get("mem", "5GB")
         nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
         sr = sp_run(
-            fchk_path, charge=charge, spin=spin, workdir=str(workspace),
+            None if skip_optimization else fchk_path,
+            charge=charge, spin=spin, workdir=str(workspace), name=name,
             mem=mem, nproc=nproc, solvent=cfg.get("solvent", "gas"), solvent_ref=cfg.get("solvent_ref"),
+            source_input_path=str(source_input_path) if skip_optimization else None,
         )
         if sr.success:
             opt_fchk = sr.outputs["fchk"]
@@ -2164,8 +2184,17 @@ def _g09_sp_and_mol2(config_path: str, on_progress=None,
                 "target_type": "molecule", "target": name,
                 "current": i, "total": total,
             })
+        skip_optimization = cfg.get("skip_optimization") is True
         fchk_path = str(workspace / f"{name}.fchk")
-        if not Path(fchk_path).exists():
+        source_input_path = workspace / f"{name}.gjf"
+        if skip_optimization and (not source_input_path.is_file() or source_input_path.stat().st_size <= 0):
+            results.append(StepResult(
+                step_name="sp_mol2_g09", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{name}.gjf 不存在或为空，无法跳过结构优化"),
+                target_type="molecule", target=name))
+            continue
+        if not skip_optimization and not Path(fchk_path).exists():
             results.append(StepResult(
                 step_name="sp_mol2_g09", step_index=2, success=False,
                 error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
@@ -2177,8 +2206,10 @@ def _g09_sp_and_mol2(config_path: str, on_progress=None,
         mem = cfg.get("mem") or defaults.get("mem", "5GB")
         nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
         sr = sp_run(
-            fchk_path, charge=charge, spin=spin, workdir=str(workspace),
+            None if skip_optimization else fchk_path,
+            charge=charge, spin=spin, workdir=str(workspace), name=name,
             mem=mem, nproc=nproc, solvent=cfg.get("solvent", "gas"), solvent_ref=cfg.get("solvent_ref"),
+            source_input_path=str(source_input_path) if skip_optimization else None,
         )
         if sr.success:
             opt_fchk = sr.outputs["fchk"]
@@ -2218,8 +2249,17 @@ def _orca_sp_and_mol2(config_path: str, on_progress=None,
                 "target_type": "molecule", "target": name,
                 "current": i, "total": total,
             })
+        skip_optimization = cfg.get("skip_optimization") is True
         molden_path = str(workspace / f"{name}.molden")
-        if not Path(molden_path).exists():
+        source_input_path = workspace / f"{name}.inp"
+        if skip_optimization and (not source_input_path.is_file() or source_input_path.stat().st_size <= 0):
+            results.append(StepResult(
+                step_name="sp_orca", step_index=2, success=False,
+                error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
+                                message=f"{name}.inp 不存在或为空，无法跳过结构优化"),
+                target_type="molecule", target=name))
+            continue
+        if not skip_optimization and not Path(molden_path).exists():
             results.append(StepResult(
                 step_name="sp_orca", step_index=2, success=False,
                 error=StepError(kind=ErrorKind.FILE_NOT_FOUND,
@@ -2231,8 +2271,10 @@ def _orca_sp_and_mol2(config_path: str, on_progress=None,
         nproc = resolve_nproc(cfg.get("nproc") or defaults.get("nproc"))
         mem_mb = memory_to_mb(cfg.get("mem") or defaults.get("mem", "5GB"))
         sr = sp_run(
-            molden_path, charge=charge, spin=spin, workdir=str(workspace),
+            None if skip_optimization else molden_path,
+            charge=charge, spin=spin, workdir=str(workspace), name=name,
             nproc=nproc, mem_mb=mem_mb,
+            source_input_path=str(source_input_path) if skip_optimization else None,
         )
         if sr.success:
             opt_molden = sr.outputs.get("molden") or str(workspace / f"{name}_opt.molden")

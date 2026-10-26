@@ -19,18 +19,20 @@ from willy.quantum._orca_utils import (
     find_orca, find_orca_2mkl, get_orca_env,
     find_multiwfn, format_orca_xyz_coords, extract_xyz,
 )
+from willy.quantum.input_audit import coordinates_from_quantum_input
 
 SP_BASIS = "def2-TZVP"
 
 
 def run(
-    molden_path: str,
+    molden_path: str | None,
     charge: int,
     spin: int,
     workdir: str = None,
     name: str = None,
     nproc: int = 8,
     mem_mb: int = 5000,
+    source_input_path: str | None = None,
 ) -> StepResult:
     """ORCA single-point at B3LYP def2-TZVP → *_opt.molden + *_opt.fchk。
 
@@ -39,6 +41,7 @@ def run(
 
     Args:
         molden_path: Step 1 产出的 .molden（优化后几何+波函数）。
+        source_input_path: 跳过优化时使用的已审计原始 .inp 输入。
         charge: 净电荷。
         spin: 自旋多重度。
         workdir: 工作目录。
@@ -50,7 +53,8 @@ def run(
         StepResult: outputs["fchk"] 和 outputs["molden"] 分别为对应产物路径。
     """
     _start = _time.time()
-    mp = Path(molden_path)
+    source_input = Path(source_input_path) if source_input_path else None
+    mp = source_input if source_input is not None else Path(molden_path or "")
     if workdir is None:
         workdir = str(mp.parent)
     if name is None:
@@ -68,21 +72,23 @@ def run(
             artifacts=[str(opt_fchk), str(opt_molden)], duration_s=0.0,
         )
 
-    # ── Extract coordinates ──
+    # ── Extract coordinates from optimization molden or audited raw input ──
+    xyz_path = None
     try:
-        xyz_path = extract_xyz(molden_path, workdir)
-    except (FileNotFoundError, RuntimeError) as e:
+        if source_input is not None:
+            xyz_block = format_orca_xyz_coords(coordinates_from_quantum_input(source_input))
+        else:
+            xyz_path = extract_xyz(molden_path or "", workdir)
+            xyz_content = Path(xyz_path).read_text()
+            xyz_lines = xyz_content.strip().split("\n")
+            xyz_block = format_orca_xyz_coords(xyz_lines[2:])
+    except (FileNotFoundError, RuntimeError, ValueError) as e:
         return StepResult(
             step_name="sp_orca", step_index=2, success=False,
             error=StepError(kind=ErrorKind.RESP_FAILED,
-                            message=f"{name}: 坐标提取失败 — {e}"),
+                            message=f"{name}: 坐标读取失败 — {e}"),
             duration_s=_time.time() - _start,
         )
-
-    # ── Build *_opt.inp ──
-    xyz_content = Path(xyz_path).read_text()
-    xyz_lines = xyz_content.strip().split("\n")
-    xyz_block = format_orca_xyz_coords(xyz_lines[2:])
 
     inp_content = f"""! B3LYP {SP_BASIS} SP TightSCF
 %maxcore {mem_mb}
@@ -195,7 +201,8 @@ def run(
         )
 
     # ── Cleanup ──
-    Path(xyz_path).unlink(missing_ok=True)
+    if xyz_path is not None:
+        Path(xyz_path).unlink(missing_ok=True)
 
     print(f"[sp_orca] {name}: ✅ {opt_fchk.name}  ({opt_fchk.stat().st_size} bytes)")
 

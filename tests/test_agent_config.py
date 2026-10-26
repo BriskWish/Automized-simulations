@@ -37,7 +37,7 @@ def test_text_confirmation_starts_the_pending_plan_without_an_llm(monkeypatch):
     ]
 
 
-def test_text_confirmation_binds_the_durable_plan_workspace(monkeypatch):
+def test_text_confirmation_defers_durable_plan_to_the_queue(monkeypatch):
     config = {"backend": "g16", "residues": {"Li": 1}}
     calls = []
     monkeypatch.setattr(
@@ -56,8 +56,10 @@ def test_text_confirmation_binds_the_durable_plan_workspace(monkeypatch):
         proposal_workspace_id="plan__202608310001",
     ))
 
-    assert calls == [(config, "plan__202608310001")]
-    assert updates[-1][3] is None
+    assert calls == []
+    assert updates[-1][3]["config"] == config
+    assert updates[-1][3]["summary_fingerprint"] == _plan(config)["summary_fingerprint"]
+    assert updates[-1][1][-1]["content"] == agent_config.QUEUE_CONFIRMATION_MESSAGE
 
 
 def test_text_confirmation_without_a_pending_plan_does_not_start(monkeypatch):
